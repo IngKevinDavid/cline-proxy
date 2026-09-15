@@ -91,6 +91,29 @@ OpenCode Zen (new feature, mirrors the Cline pool):
 - [ ] Admin UI: show zen key list with per-key usage; keep single-key input
       working as a 1-element list (backward compat with existing `.zen-config.json`).
 
+## M3.5 — Proxy routing & abort hardening (done 2026-09-15)
+
+Per-request proxy rotation for all upstreams + client-abort safety:
+
+- [x] **Per-request rotation**: each upstream attempt explicitly picks an exit
+      (`pickUpstreamProxy`, round_robin default) via a per-proxy pinned client
+      cache (uTLS Chrome fingerprint + h2). Old behavior rotated per *dial*,
+      which with HTTP/2 connection reuse meant far less rotation than expected.
+- [x] **Proxies apply to cline upstream too** (before: zen only). Enabled by
+      `CLINE_USE_PROXIES=true` env (provider-wide) or per-combo `useProxies`
+      toggle (dashboard checkbox). zen upstream uses the pool whenever
+      `proxies` is configured in its config (unchanged), now per-request.
+- [x] **Dead-proxy handling**: failed exit gets a 5-min cooldown and the retry
+      automatically uses the next one; proxy failures never mark accounts/keys.
+- [x] **Client aborts (IDE cancel/abort) can't poison state**: client context is
+      propagated into both upstreams — a cancel terminates the upstream call (no
+      wasted quota), aborts bypass retry loops, and never count as rate-limit or
+      network failures on keys/accounts/proxies. Background summary generation
+      uses its own context (unaffected by client aborts).
+- [x] Cooldown poisoning audit: only genuine upstream 429/limit signals cool
+      keys/accounts/proxies; stream write errors to a dead client were verified
+      to touch no cooldown state.
+
 ## M4 — Combo model aliases (dashboard)
 
 Virtual model IDs the IDE calls; each combo maps to one concrete upstream model

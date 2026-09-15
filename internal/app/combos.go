@@ -18,10 +18,11 @@ import (
 // 上游改写为同平台的 target 模型。严格同平台：cline combo 只能选 cline
 // 模型列表中的模型，zen combo 只能选 zen 免费模型，保存时校验。
 type Combo struct {
-	ID        string    `json:"id"`
-	Platform  string    `json:"platform"` // cline | zen
-	Target    string    `json:"target"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID         string    `json:"id"`
+	Platform   string    `json:"platform"` // cline | zen
+	Target     string    `json:"target"`
+	UseProxies bool      `json:"useProxies,omitempty"` // 该别名的上游调用走出口代理池（round-robin）
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 var (
@@ -138,13 +139,13 @@ func validateCombo(id, platform, target string) error {
 }
 
 // addCombo 校验并持久化新 combo。
-func addCombo(id, platform, target string) (*Combo, error) {
+func addCombo(id, platform, target string, useProxies bool) (*Combo, error) {
 	id = strings.TrimSpace(id)
 	target = strings.TrimSpace(target)
 	if err := validateCombo(id, platform, target); err != nil {
 		return nil, err
 	}
-	c := &Combo{ID: id, Platform: platform, Target: target, CreatedAt: time.Now()}
+	c := &Combo{ID: id, Platform: platform, Target: target, UseProxies: useProxies, CreatedAt: time.Now()}
 	combosMu.Lock()
 	defer combosMu.Unlock()
 	loadCombosLocked()
@@ -193,15 +194,16 @@ func handleComboCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	var req struct {
-		ID       string `json:"id"`
-		Platform string `json:"platform"`
-		Target   string `json:"target"`
+		ID         string `json:"id"`
+		Platform   string `json:"platform"`
+		Target     string `json:"target"`
+		UseProxies bool   `json:"useProxies"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
 		return
 	}
-	c, err := addCombo(req.ID, req.Platform, req.Target)
+	c, err := addCombo(req.ID, req.Platform, req.Target, req.UseProxies)
 	if err != nil {
 		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
 		return

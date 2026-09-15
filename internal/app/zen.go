@@ -3,6 +3,7 @@ package app
 import (
 	"cline-go-proxy/internal/kit"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -510,8 +511,10 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 }
 
 // callZenAPI 调用 zen 上游,带限流防御: 并发信号量 + 指数退避重试 + 代理冷却 + 故障计数
-// 返回 (响应, 命中限流次数, 错误)
-func callZenAPI(params map[string]any, stream bool) (*http.Response, int, error) {
+// 返回 (响应, 命中限流次数, 错误)。
+// ctx 来自客户端请求: 客户端取消（IDE abort）时立即终止上游调用,不重试、
+// 不计数、不冷却任何 key/代理 —— 客户端行为不会污染限流状态。
+func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.Response, int, error) {
 	cfg := getZenConfig()
 	body := buildZenBody(params, stream)
 
@@ -536,7 +539,14 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, int, error)
 	rateLimited := 0
 
 	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequest("POST", endpoint, bytes.NewReader(bodyJSON))
+		// 代理轮转（round_robin 默认）: 每次上游尝试显式挑选出口,
+		// 冷却中的代理被跳过; 未配置代理时直连。
+		proxyURL, pidx := pickUpstreamProxy()
+		viaProxy := "direct"
+		if proxyURL != "" {
+			viaProxy = maskProxyURL(proxyURL)
+		}
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(bodyJSON))
 		if err != nil {
 			return nil, rateLimited, fmt.Errorf("create zen request: %w", err)
 		}
@@ -555,11 +565,20 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, int, error)
 		if m, ok := resolveZenModel(model); ok {
 			req.Header.Set("x-opencode-model", m.ID)
 		}
-		log.Printf("  zen upstream: model=%s stream=%v msgs=%d via=%s attempt=%d session=%s",
-			body["model"], stream, getMsgCount(params), describeZenProxy(), attempt+1, kit.Truncate(sess, 24))
+		log.Printf("  zen upstream: model=%s stream=%v msgs=%d via=%s key=#%d attempt=%d session=%s",
+			body["model"], stream, getMsgCount(params), viaProxy, keyIndex(key), attempt+1, kit.Truncate(sess, 24))
 
-		resp, err := getZenHTTPClient().Do(req)
+		resp, err := proxyClientFor(proxyURL).Do(req)
 		if err != nil {
+			// 客户端取消: 立即返回,不重试不冷却不计故障
+			if ctx.Err() != nil {
+				return nil, rateLimited, fmt.Errorf("client aborted: %w", err)
+			}
+			// 死代理: 短冷却该出口,下一次尝试自动切换到其他代理
+			if pidx >= 0 {
+				cooldownUpstreamProxy(pidx, 5*time.Minute)
+				log.Printf("  zen proxy failed (%v), cooldown exit %s", err, viaProxy)
+			}
 			// 网络错误:退避重试(不计入故障转移,瞬时可恢复)
 			if attempt < retries {
 				log.Printf("  zen network error (%v), retry %d/%d after %v", err, attempt+1, retries, delay)
@@ -581,12 +600,12 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, int, error)
 		if isRateLimited(resp.StatusCode, bodyBytes) {
 			rateLimited++
 			// 冷却当前出口代理
-			if idx := lastZenProxyIdx(); idx >= 0 {
+			if pidx >= 0 {
 				d := parseRetryAfter(resp.Header.Get("Retry-After"))
 				if d <= 0 {
 					d = 10 * time.Minute
 				}
-				cooldownZenProxy(idx, d)
+				cooldownUpstreamProxy(pidx, d)
 				log.Printf("  zen rate limited (%d), proxy cooldown %v", resp.StatusCode, d)
 			}
 			// 冷却当前 key；若还有其他未冷却 key 则立即切换重试（不睡眠）
@@ -615,18 +634,14 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, int, error)
 	}
 }
 
-func describeZenProxy() string {
-	cfg := getZenConfig()
-	proxies := cfg.Proxies
-	if len(proxies) == 0 {
-		return "direct"
+// keyIndex key 在池中的序号（日志用）
+func keyIndex(key string) int {
+	for i, k := range getZenConfig().Keys {
+		if k == key {
+			return i + 1
+		}
 	}
-	idx := lastZenProxyIdx()
-	if idx < 0 {
-		idx = 0
-	}
-	idx %= len(proxies)
-	return fmt.Sprintf("proxy[%d]=%s", idx+1, kit.Truncate(maskProxyURL(proxies[idx]), 60))
+	return 0
 }
 
 func zenModelList() []map[string]any {

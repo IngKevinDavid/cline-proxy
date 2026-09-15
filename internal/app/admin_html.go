@@ -492,6 +492,7 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
         <select id="comboPlatform" onchange="fillComboModels()"><option value="cline">cline</option><option value="zen">opencode zen</option></select>
       </div>
       <div class="field" style="flex:2"><label>目标模型（仅限所选平台）</label><select id="comboTarget"></select></div>
+      <div class="field" style="flex:0 0 auto;display:flex;align-items:flex-end"><label style="display:flex;gap:6px;align-items:center;white-space:nowrap;padding-bottom:8px"><input type="checkbox" id="comboUseProxies"> 走代理池</label></div>
     </div>
     <button class="btn btn-primary" onclick="createCombo()">创建 Combo</button>
   </div>
@@ -1259,11 +1260,12 @@ async function loadCombos() {
     const d = await api('GET', '/combos');
     const combos = d.data.combos || [];
     if (!combos.length) { _('combosList').innerHTML = '<div class="hint">暂无 Combo，用上方表单创建。</div>'; return; }
-    _('combosList').innerHTML = '<div class="table-wrap"><table><thead><tr><th style="text-align:left">别名 ID</th><th>平台</th><th style="text-align:left">目标模型</th><th>创建时间</th><th>操作</th></tr></thead><tbody>' +
+    _('combosList').innerHTML = '<div class="table-wrap"><table><thead><tr><th style="text-align:left">别名 ID</th><th>平台</th><th style="text-align:left">目标模型</th><th>代理</th><th>创建时间</th><th>操作</th></tr></thead><tbody>' +
       combos.map(c => '<tr>' +
         '<td style="text-align:left;font-family:monospace;font-weight:600">' + esc(c.id) + '</td>' +
         '<td><span class="model-tag">' + esc(c.platform === 'zen' ? 'opencode-zen' : 'cline') + '</span></td>' +
         '<td style="text-align:left;font-family:monospace">' + esc(c.target) + '</td>' +
+        '<td>' + (c.useProxies ? '<span class="model-tag" style="color:var(--accent2)">socks5池</span>' : '-') + '</td>' +
         '<td style="font-size:11px">' + (c.createdAt ? new Date(c.createdAt).toLocaleString('zh-CN') : '-') + '</td>' +
         '<td><button class="btn btn-sm btn-danger" onclick="deleteCombo(\'' + esc(c.id) + '\')">删除</button></td>' +
       '</tr>').join('') +
@@ -1278,9 +1280,10 @@ async function createCombo() {
   if (!id) { toast('请输入别名 ID', 'error'); return; }
   if (!target) { toast('请选择目标模型', 'error'); return; }
   try {
-    await api('POST', '/combos/create', { id, platform, target });
+    await api('POST', '/combos/create', { id, platform, target, useProxies: _('comboUseProxies').checked });
     toast('Combo 已创建: ' + id + ' → ' + target, 'success');
     _('comboId').value = '';
+    _('comboUseProxies').checked = false;
     loadCombos();
   } catch (e) { toast('创建失败: ' + e.message, 'error'); }
 }

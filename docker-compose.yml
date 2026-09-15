@@ -29,6 +29,8 @@ services:
       - LOG_FILE_MAX_MB=${LOG_FILE_MAX_MB:-10}
       # cline 账号种子文件（池为空时自动导入，可选）
       - CLINE_ACCOUNTS_SEED_FILE=${CLINE_ACCOUNTS_SEED_FILE:-}
+      # cline 上游走出口代理池（zen 配置 proxies 后默认走池；可选）
+      - CLINE_USE_PROXIES=${CLINE_USE_PROXIES:-false}
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3457/health"]
       interval: 30s

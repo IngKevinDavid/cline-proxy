@@ -24,6 +24,8 @@ import (
 //	ZEN_KEYS                   opencode zen 多 key，逗号分隔，配置为空时注入
 //	CLINE_ACCOUNTS_SEED_FILE   cline 账号种子文件（[{refreshToken,email}] JSON 数组），
 //	                           池为空时启动自动导入
+//	CLINE_USE_PROXIES          true 时 cline 上游全部走出口代理池（zen 上游配置
+//	                           proxies 后默认走池；combo 也可按别名单独开启）
 
 // envStr 读取环境变量并去除首尾空白，未设置或为空返回 ""。
 func envStr(key string) string {
@@ -174,5 +176,12 @@ func LogFileMaxBytes() int64 {
 // 系统提示词替换，默认 false（编码 IDE / Agent 保留自己的提示词）。
 func SystemPromptOverrideEnabled() bool {
 	v, _ := envBool("APPLY_SYSTEM_PROMPT_OVERRIDE")
+	return v
+}
+
+// ClineUseProxiesEnv CLINE_USE_PROXIES=true 时 cline 上游全部走出口代理池
+//（默认 false；cline 上游也可通过 combo 的 useProxies 开关按别名启用）。
+func ClineUseProxiesEnv() bool {
+	v, _ := envBool("CLINE_USE_PROXIES")
 	return v
 }

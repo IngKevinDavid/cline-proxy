@@ -29,8 +29,40 @@ var (
 	zenProxyCooldownsMu sync.Mutex
 )
 
-// cooldownZenProxy 标记某出口代理冷却,冷却期内轮询跳过
-func cooldownZenProxy(idx int, d time.Duration) {
+// proxyClientCache 按代理 URL 缓存钉定代理的 HTTP 客户端（uTLS Chrome 指纹 + h2）。
+// key 为代理 URL；"" 表示直连。zen 与 cline 上游共用，请求级轮转时
+// 每次上游尝试显式挑选代理并用对应客户端发出。
+var (
+	proxyClientCacheMu sync.Mutex
+	proxyClientCache   = map[string]*http.Client{}
+)
+
+// proxyClientFor 返回钉定到指定代理的 HTTP 客户端（缓存复用）。
+// proxyURL 为空时返回直连客户端。
+func proxyClientFor(proxyURL string) *http.Client {
+	proxyClientCacheMu.Lock()
+	defer proxyClientCacheMu.Unlock()
+	if c, ok := proxyClientCache[proxyURL]; ok {
+		return c
+	}
+	var transport *http.Transport
+	if proxyURL == "" {
+		transport = buildTransport(func(ctx context.Context, network, addr string) (net.Conn, error) {
+			d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+			return d.DialContext(ctx, network, addr)
+		})
+	} else {
+		transport = buildTransport(func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialViaProxy(ctx, proxyURL, network, addr)
+		})
+	}
+	c := &http.Client{Transport: transport}
+	proxyClientCache[proxyURL] = c
+	return c
+}
+
+// cooldownUpstreamProxy 标记某出口代理冷却,冷却期内轮询跳过
+func cooldownUpstreamProxy(idx int, d time.Duration) {
 	if idx < 0 {
 		return
 	}
@@ -84,10 +116,11 @@ func getZenHTTPClient() *http.Client {
 	return zenHTTPClient
 }
 
-// pickZenProxy 按策略选择代理,返回 (代理URL, 索引);无代理返回 ("", -1)。
-// 跳过冷却中的代理;全部冷却时返回最早恢复的近似(轮询位)。
-// 每次调用递增计数,保证 round_robin 顺序与日志索引一致。
-func pickZenProxy() (string, int) {
+// pickUpstreamProxy 按策略为一次上游尝试选择代理,返回 (代理URL, 索引);
+// 无代理配置返回 ("", -1)。跳过冷却中的代理;全部冷却时返回轮转位。
+// 由调用方在每次上游尝试时显式调用 —— 请求级轮转（round_robin 一比一）,
+// 不依赖连接复用时机。
+func pickUpstreamProxy() (string, int) {
 	cfg := getZenConfig()
 	n := len(cfg.Proxies)
 	if n == 0 {
@@ -110,15 +143,6 @@ func pickZenProxy() (string, int) {
 	return cfg.Proxies[idx], idx
 }
 
-// lastZenProxyIdx 最近一次选择的代理索引(日志用)
-func lastZenProxyIdx() int {
-	v := int64(zenProxyCount.Load())
-	if v <= 0 {
-		return -1
-	}
-	return int((v - 1) % int64(max(1, len(getZenConfig().Proxies))))
-}
-
 func maskProxyURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil || u.User == nil {
@@ -129,22 +153,32 @@ func maskProxyURL(raw string) string {
 }
 
 func buildZenTransport() *http.Transport {
+	// 共享 zenHTTPClient 现仅作为直连兜底（如模型同步）；带代理的请求
+	// 走 proxyClientFor() 按次钉定代理。拨号不再隐式挑选代理。
+	return buildTransport(func(ctx context.Context, network, addr string) (net.Conn, error) {
+		d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+		return d.DialContext(ctx, network, addr)
+	})
+}
+
+// buildTransport 构造 uTLS Chrome 指纹 + HTTP/2 的 Transport，拨号函数可注入。
+func buildTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
 	t := &http.Transport{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  false,
 	}
-	t.DialContext = zenDialContext
+	t.DialContext = dial
 	// https 走 HTTP/2 + uTLS Chrome 指纹: 完整浏览器指纹(含 h2),避免 Go 原生指纹被 CF 风控
-	t.RegisterProtocol("https", zenHTTP2Transport())
+	t.RegisterProtocol("https", http2TransportWithDial(dial))
 	return t
 }
 
-func zenHTTP2Transport() *http2.Transport {
+func http2TransportWithDial(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http2.Transport {
 	return &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			raw, err := zenDialContext(ctx, network, addr)
+			raw, err := dial(ctx, network, addr)
 			if err != nil {
 				return nil, err
 			}
@@ -164,15 +198,6 @@ func zenHTTP2Transport() *http2.Transport {
 			return uconn, nil
 		},
 	}
-}
-
-func zenDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	p, _ := pickZenProxy()
-	if p == "" {
-		d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-		return d.DialContext(ctx, network, addr)
-	}
-	return dialViaProxy(ctx, p, network, addr)
 }
 
 // dialViaProxy 统一拨号:http/https 走 CONNECT,socks5 走 SOCKS5 握手

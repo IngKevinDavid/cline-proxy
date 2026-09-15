@@ -5,6 +5,7 @@ import (
 	"cline-go-proxy/internal/kit"
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -249,11 +250,16 @@ func StartProxy(host string, port int) error {
 		model, _ := params["model"].(string)
 		log.Printf("  client: stream=%v tools=%d model=%s", isStream, toolCount, model)
 
-		// combo 别名模型：改写为平台上游真实模型后按平台路由
+		// combo 别名模型：改写为平台上游真实模型后按平台路由;
+		// combo 可声明 useProxies 让该别名走出口代理池
+		useProxies := ClineUseProxiesEnv()
 		if c := resolveCombo(model); c != nil {
-			log.Printf("  combo %q -> %s model %q", model, c.Platform, c.Target)
+			log.Printf("  combo %q -> %s model %q (useProxies=%v)", model, c.Platform, c.Target, c.UseProxies)
 			params["model"] = c.Target
 			model = c.Target
+			if c.UseProxies {
+				useProxies = true
+			}
 		}
 
 		// Override system prompt from override.md for OpenAI format
@@ -282,7 +288,7 @@ func StartProxy(host string, port int) error {
 			}
 		}
 
-		resp, acc, err := callClineAPI(params, upstreamStream)
+		resp, acc, err := callClineAPI(r.Context(), params, upstreamStream, useProxies)
 		if err != nil {
 			log.Printf("  api error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -456,7 +462,7 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 		log.Printf("  zen: %s", out.note)
 	}
 
-	resp, rateLimited, err := callZenAPI(params, isStream)
+	resp, rateLimited, err := callZenAPI(r.Context(), params, isStream)
 	if err != nil {
 		log.Printf("  zen api error: %v", err)
 		tracker.rec.RateLimited = rateLimited
@@ -567,7 +573,11 @@ func clineHeaders(token, sessionID string) http.Header {
 	return h
 }
 
-func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account, error) {
+// callClineAPI 调用 cline 上游。
+// ctx 来自客户端请求: IDE abort/取消时立即终止,不冷却账号。
+// useProxies 为 true 时走出口代理池（每次尝试 round-robin 挑选）;
+// 代理路径上的网络错误只冷却代理本身,绝不冷却账号 —— 代理故障不污染账号池。
+func callClineAPI(ctx context.Context, params map[string]any, stream bool, useProxies bool) (*http.Response, *Account, error) {
 	acc := pickAccount()
 	if acc == nil {
 		return nil, nil, fmt.Errorf("no active accounts available: %s", describePoolStatus())
@@ -587,7 +597,7 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 		return nil, acc, fmt.Errorf("marshal body: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", cline.ClineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
+	req, err := http.NewRequestWithContext(ctx, "POST", cline.ClineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
 	if err != nil {
 		return nil, acc, fmt.Errorf("create request: %w", err)
 	}
@@ -599,14 +609,43 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 			toolCount = len(t)
 		}
 	}
-	log.Printf("  upstream: account=%s stream=%v tools=%d msgs=%d max_tokens=%v effort=%v",
-		truncateEmail(acc.Email), stream, toolCount, getMsgCount(params), body["max_tokens"], body["reasoning_effort"])
+	log.Printf("  upstream: account=%s stream=%v tools=%d msgs=%d max_tokens=%v effort=%v proxies=%v",
+		truncateEmail(acc.Email), stream, toolCount, getMsgCount(params), body["max_tokens"], body["reasoning_effort"], useProxies)
 
-	resp, err := kit.HTTPClient.Do(req)
-	if err != nil {
-		// 网络错误：临时短冷却 5 分钟
+	// 代理模式: 网络错误冷却该出口并换下一个代理重试（最多 3 次）,
+	// 不冷却账号; 直连模式: 保持原语义（网络错误 5 分钟短冷却）。
+	client := kit.HTTPClient
+	attempts := 1
+	if useProxies {
+		attempts = 3
+	}
+	var resp *http.Response
+	for i := 0; i < attempts; i++ {
+		proxyURL, pidx := "", -1
+		if useProxies {
+			proxyURL, pidx = pickUpstreamProxy()
+			client = proxyClientFor(proxyURL)
+			log.Printf("  cline upstream via %s", maskProxyURL(proxyURL))
+		}
+		resp, err = client.Do(req)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return nil, acc, fmt.Errorf("client aborted: %w", err)
+		}
+		if useProxies {
+			cooldownUpstreamProxy(pidx, 5*time.Minute)
+			log.Printf("  cline proxy failed (%v), cooldown exit, retrying on next", err)
+			continue
+		}
+		// 直连网络错误：临时短冷却 5 分钟
 		markAccountCooldown(acc, "network error: "+err.Error(), 5*time.Minute)
 		return nil, acc, fmt.Errorf("upstream request: %w", err)
+	}
+	if err != nil {
+		// 所有代理出口都失败（useProxies 时）——不冷却账号
+		return nil, acc, fmt.Errorf("upstream request (all proxy exits failed): %w", err)
 	}
 
 	if resp.StatusCode == 401 {
@@ -615,7 +654,7 @@ func callClineAPI(params map[string]any, stream bool) (*http.Response, *Account,
 		if err := refreshAccountToken(acc); err == nil {
 			token = acc.AccessToken
 			req.Header = clineHeaders(token, sessionID)
-			resp, err = kit.HTTPClient.Do(req)
+			resp, err = client.Do(req)
 			if err != nil {
 				return nil, acc, fmt.Errorf("upstream retry: %w", err)
 			}
@@ -1506,9 +1545,13 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// combo 别名模型：改写为目标上游模型（anthropicToOpenAI 取 req.Model）
+	useProxies := ClineUseProxiesEnv()
 	if c := resolveCombo(req.Model); c != nil {
-		log.Printf("  anthropic combo %q -> %s model %q", req.Model, c.Platform, c.Target)
+		log.Printf("  anthropic combo %q -> %s model %q (useProxies=%v)", req.Model, c.Platform, c.Target, c.UseProxies)
 		req.Model = c.Target
+		if c.UseProxies {
+			useProxies = true
+		}
 	}
 
 	openAIReq := anthropicToOpenAI(req)
@@ -1550,7 +1593,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		log.Printf("  anthropic model %s requires stream: forcing upstream stream, will aggregate", req.Model)
 	}
 
-	resp, acc, err := callClineAPI(openAIReq, upstreamStream)
+	resp, acc, err := callClineAPI(r.Context(), openAIReq, upstreamStream, useProxies)
 	if err != nil {
 		log.Printf("  anthropic api error: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -1646,7 +1689,7 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 		log.Printf("  anthropic zen: %s", out.note)
 	}
 
-	resp, rateLimited, err := callZenAPI(openAIReq, isStream)
+	resp, rateLimited, err := callZenAPI(r.Context(), openAIReq, isStream)
 	if err != nil {
 		log.Printf("  anthropic zen api error: %v", err)
 		tracker.rec.RateLimited = rateLimited

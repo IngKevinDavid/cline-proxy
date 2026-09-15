@@ -451,10 +451,14 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	chat := responsesToChat(params)
 	chatModel, _ := chat["model"].(string)
 	// combo 别名模型：改写为平台上游真实模型
+	useProxies := ClineUseProxiesEnv()
 	if c := resolveCombo(chatModel); c != nil {
-		log.Printf("  responses combo %q -> %s model %q", chatModel, c.Platform, c.Target)
+		log.Printf("  responses combo %q -> %s model %q (useProxies=%v)", chatModel, c.Platform, c.Target, c.UseProxies)
 		chat["model"] = c.Target
 		chatModel = c.Target
+		if c.UseProxies {
+			useProxies = true
+		}
 	}
 	route := routeModel(chatModel)
 	if route == "reject" {
@@ -476,7 +480,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		if out.changed {
 			log.Printf("  responses zen: %s", out.note)
 		}
-		resp, _, err := callZenAPI(chat, isStream)
+		resp, _, err := callZenAPI(r.Context(), chat, isStream)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{
 				"error": map[string]string{"message": err.Error(), "type": "api_error"},
@@ -507,7 +511,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	if !isStream && modelNeedsStream(normalizeRequestModel(chatModel)) {
 		stream = true
 	}
-	up, acc, err := callClineAPI(chat, stream)
+	up, acc, err := callClineAPI(r.Context(), chat, stream, useProxies)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error": map[string]string{"message": err.Error(), "type": "api_error"},

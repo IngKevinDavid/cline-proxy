@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -223,7 +224,8 @@ func generateSummary(modelID, prompt string, maxSummary int) (string, error) {
 		"max_tokens": maxSummary,
 		"stream":     false,
 	}
-	resp, _, err := callZenAPI(body, false)
+	// 后台摘要生成与客户端请求无关,用独立 context,不受客户端 abort 影响
+	resp, _, err := callZenAPI(context.Background(), body, false)
 	if err != nil {
 		return "", err
 	}

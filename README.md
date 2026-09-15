@@ -256,15 +256,25 @@ curl http://127.0.0.1:3457/health
 | `APPLY_SYSTEM_PROMPT_OVERRIDE` | `false` | `true` 才启用 `override.md` 系统提示词替换（编码 IDE / Agent 默认保留自己的提示词） |
 | `ZEN_KEYS` | 空 | opencode zen 多 key（逗号分隔）；面板已有 key 配置时不覆盖 |
 | `CLINE_ACCOUNTS_SEED_FILE` | 空 | 账号种子 JSON（`[{"refreshToken":"...","email":"..."}]`），池为空时启动自动导入 |
+| `CLINE_USE_PROXIES` | `false` | `true` 时 cline 上游走出口代理池（zen 上游配置 `proxies` 后默认走池） |
 
 ### 3. 账号与多 key 轮转（round-robin）
 
 - **cline 账号池**：多个账号按 round-robin（默认）轮流承接请求，单账号限流/超额自动冷却并跳过，冷却到期自动恢复，最大化总免费额度。
 - **opencode zen 多 key**：管理面板「opencode 免费模型」页可填多个 key（每行一个），或用 `ZEN_KEYS` 环境变量注入；请求按 round-robin 轮转，某 key 触发 429/限流时立即冷却并切换下一个 key 重试。
 
+### 3.5 出口代理池（应对按 IP 限流）
+
+在 zen 配置的 `proxies` 列表（管理面板「opencode 免费模型 → 上游配置」）填入 http(s)/socks5 代理（每行一个，支持 `socks5://user:pass@host:port`）：
+
+- 上游请求按 round-robin **逐请求轮转**出口（每次上游尝试显式选一个出口，冷却中的出口自动跳过）。
+- 某出口触发限流（429 等）时按 `Retry-After`（默认 10 分钟）冷却该出口，请求自动换下一个出口重试。
+- zen 上游配置了 `proxies` 即默认启用；cline 上游通过 `CLINE_USE_PROXIES=true` 全局启用，或在「Combos」创建别名时勾选「走代理池」按别名启用。
+- 拨号失败的出口冷却 5 分钟并自动换下一个重试；代理故障不会污染账号/key 的冷却状态。
+
 ### 4. Combos（别名模型）
 
-管理面板「Combos」页可创建自定义别名模型（如 `cline-glm-5.3`）：客户端请求该别名，代理自动改写为所选平台的目标模型。严格同平台：cline combo 只能选 cline 模型，zen combo 只能选 zen 免费模型。别名会出现在 `/v1/models` 列表中，Cursor / ZCode / OpenClaw 可直接选用。
+管理面板「Combos」页可创建自定义别名模型（如 `cline-glm-5.3`）：客户端请求该别名，代理自动改写为所选平台的目标模型。严格同平台：cline combo 只能选 cline 模型，zen combo 只能选 zen 免费模型。可选勾选「走代理池」让该别名的上游调用走出口代理池。别名会出现在 `/v1/models` 列表中，Cursor / ZCode / OpenClaw 可直接选用。
 
 ### 5. 管理面板认证
 

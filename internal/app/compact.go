@@ -363,11 +363,14 @@ func maybeCompact(params map[string]any, m *ZenModel, sessionID string) compactO
 		return compactOutcome{}
 	}
 
-	// 1. 序列化(一一对应原始消息)
+	// 1. 序列化(一一对应原始消息；split 是 serialized 的下标，
+	//    切片时必须映射回 messages 原始下标，否则尾部错位)
 	serialized := make([]string, 0, len(messages))
-	for _, msg := range messages {
+	orig := make([]int, 0, len(messages))
+	for i, msg := range messages {
 		if mm, ok := msg.(map[string]any); ok {
 			serialized = append(serialized, serializeMsg(mm))
+			orig = append(orig, i)
 		}
 	}
 
@@ -376,6 +379,20 @@ func maybeCompact(params map[string]any, m *ZenModel, sessionID string) compactO
 	if sel == nil || sel.split <= 0 {
 		return compactOutcome{}
 	}
+	// 尾部不能以 tool 结果消息开头 —— 它对应的 assistant tool_calls 消息
+	// 在被丢弃的头部里，OpenAI 方言上游会 400 拒绝；compaction 对同一会话
+	// 是确定性的，不修正会变成每次重试都失败的死循环
+	for sel.split > 0 {
+		mm, ok := messages[orig[sel.split]].(map[string]any)
+		if !ok || strField(mm, "role") != "tool" {
+			break
+		}
+		sel.split--
+	}
+	if sel.split <= 0 {
+		return compactOutcome{}
+	}
+	sel.recent = append([]string{}, serialized[sel.split:]...)
 
 	// 3. 增量摘要: 优先复用会话摘要; 无会话时检查是否有历史摘要消息
 	st := loadCompactState(sessionID)
@@ -386,7 +403,7 @@ func maybeCompact(params map[string]any, m *ZenModel, sessionID string) compactO
 		previousRecent = st.recent
 	}
 	if previousSummary == "" {
-		previousSummary = findExistingSummary(messages, sel.split)
+		previousSummary = findExistingSummary(messages, orig[sel.split])
 	}
 
 	head := strings.Join(sel.head, "\n\n")
@@ -426,19 +443,15 @@ func maybeCompact(params map[string]any, m *ZenModel, sessionID string) compactO
 		"role":    "system",
 		"content": "[Conversation Summary]\n" + summary,
 	})
-	if st != nil && st.summary != "" {
-		newMsgs = append(newMsgs, map[string]any{
-			"role":    "system",
-			"content": "[Previous Conversation Summary]\n" + st.summary,
-		})
-	}
-	newMsgs = append(newMsgs, messages[sel.split:]...)
+	// 旧摘要已由 buildSummaryPrompt 合并进新摘要，这里不再重复注入
+	//（重复注入会在每次 compact 后浪费真实上下文）
+	newMsgs = append(newMsgs, messages[orig[sel.split]:]...)
 
 	updateCompactState(sessionID, summary, strings.Join(sel.recent, "\n\n"))
 	params["messages"] = newMsgs
 	return compactOutcome{
 		changed:       true,
-		note:          fmt.Sprintf("[compacted via summary] summary_model=%s kept=%d msgs", summaryModel, len(messages)-sel.split),
+		note:          fmt.Sprintf("[compacted via summary] summary_model=%s kept=%d msgs", summaryModel, len(messages)-orig[sel.split]),
 		compactTokens: estimateText(prompt) + estimateText(summary),
 	}
 }
@@ -500,7 +513,15 @@ func fallbackTruncate(params map[string]any, m *ZenModel) compactOutcome {
 		if !ok {
 			continue
 		}
+		// 只算文本会大幅低估 —— assistant 的 tool_calls 参数（Write 等工具
+		// 的文件内容）和 reasoning_content 往往是体积大头
 		t := estimateText(msgText(mm))
+		if r := strField(mm, "reasoning_content"); r != "" {
+			t += estimateText(r)
+		}
+		if tc, ok := mm["tool_calls"].([]any); ok {
+			t += estimateJSON(tc)
+		}
 		if used+t > budget {
 			continue
 		}
@@ -508,6 +529,19 @@ func fallbackTruncate(params map[string]any, m *ZenModel) compactOutcome {
 		used += t
 	}
 	sort.Slice(kept, func(a, b int) bool { return kept[a].idx < kept[b].idx })
+	// 孤儿 tool 结果剔除：前一条消息未保留的 tool 消息会被上游 400 拒绝
+	keptIdx := map[int]bool{}
+	for _, k := range kept {
+		keptIdx[k.idx] = true
+	}
+	filtered := kept[:0]
+	for _, k := range kept {
+		if mm, ok := k.msg.(map[string]any); ok && strField(mm, "role") == "tool" && !keptIdx[k.idx-1] {
+			continue
+		}
+		filtered = append(filtered, k)
+	}
+	kept = filtered
 	out := make([]any, 0, len(kept)+1)
 	out = append(out, map[string]any{
 		"role":    "system",

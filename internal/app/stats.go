@@ -188,12 +188,27 @@ func rollStatsDate() {
 	}
 }
 
+// cloneZenStatsAgg 深拷贝聚合（含 ByModel map），避免快照在锁外被
+// json 序列化时与 recordZenStats 的并发写发生 fatal 的 map 竞态。
+func cloneZenStatsAgg(src *zenStatsAgg) *zenStatsAgg {
+	if src == nil {
+		return nil
+	}
+	cp := *src
+	cp.ByModel = make(map[string]*zenStatsModel, len(src.ByModel))
+	for k, v := range src.ByModel {
+		m := *v
+		cp.ByModel[k] = &m
+	}
+	return &cp
+}
+
 func zenStatsSnapshot() map[string]any {
 	initStats()
 	statsAggMu.Lock()
 	defer statsAggMu.Unlock()
 	return map[string]any{
-		"today": statsToday,
-		"total": statsTotal,
+		"today": cloneZenStatsAgg(statsToday),
+		"total": cloneZenStatsAgg(statsTotal),
 	}
 }

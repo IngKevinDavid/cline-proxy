@@ -1,10 +1,10 @@
 package app
 
 import (
-	"cline-go-proxy/internal/cline"
-	"cline-go-proxy/internal/kit"
 	"bufio"
 	"bytes"
+	"cline-go-proxy/internal/cline"
+	"cline-go-proxy/internal/kit"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -14,7 +14,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -141,14 +144,14 @@ func StartProxy(host string, port int) error {
 			}
 
 			// 未设置 API_KEY：沿用管理面板生成的动态 key 列表；列表为空则放行（本地模式）
-			p := loadPool()
-			if len(p.Keys) == 0 {
+			keys := poolKeysSnapshot()
+			if len(keys) == 0 {
 				next(w, r)
 				return
 			}
 
 			valid := false
-			for _, k := range p.Keys {
+			for _, k := range keys {
 				if subtle.ConstantTimeCompare([]byte(key), []byte(k)) == 1 {
 					valid = true
 					break
@@ -212,15 +215,6 @@ func StartProxy(host string, port int) error {
 	chatHandler := apiKeyHandler(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-			return
-		}
-		if activeCount == 0 && len(loadPool().Accounts) == 0 {
-			writeJSON(w, http.StatusUnauthorized, map[string]any{
-				"error": map[string]string{
-					"message": "No accounts in pool. Run with --add-account or POST /admin/login to add accounts.",
-					"type":    "auth_error",
-				},
-			})
 			return
 		}
 
@@ -288,6 +282,18 @@ func StartProxy(host string, port int) error {
 			}
 		}
 
+		// cline 路由需要账号池；zen 免费模型不需要（纯 ZEN_KEYS 部署也能用），
+		// 因此该检查放在路由之后而不是函数开头
+		if poolAccountCount() == 0 {
+			writeJSON(w, http.StatusUnauthorized, map[string]any{
+				"error": map[string]string{
+					"message": "No accounts in pool. Run with --add-account or add via /admin/.",
+					"type":    "auth_error",
+				},
+			})
+			return
+		}
+
 		resp, acc, err := callClineAPI(r.Context(), params, upstreamStream, useProxies)
 		if err != nil {
 			log.Printf("  api error: %v", err)
@@ -349,8 +355,14 @@ func StartProxy(host string, port int) error {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	proxyListenAddress = addr
 	server := &http.Server{
-		Addr:    addr,
-		Handler: requestLogMiddleware(mux),
+		Addr: addr,
+		// 公网暴露必备：慢速头攻击（slowloris）防护与空闲连接回收。
+		// 不设全局 ReadTimeout/WriteTimeout —— SSE 流式响应是长连接，
+		// 超时由请求 ctx（客户端断开即取消）和请求体上限控制。
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+		Handler:           requestLogMiddleware(mux),
 	}
 
 	fmt.Println("")
@@ -364,7 +376,25 @@ func StartProxy(host string, port int) error {
 	fmt.Printf("  Accounts: %d total, %d active\n", len(loadPool().Accounts), activeCount)
 	fmt.Println(strings.Repeat("=", 58))
 
-	return server.ListenAndServe()
+	// 优雅停机：docker stop 发 SIGTERM，等待在途请求（含 SSE 流）最多
+	// 10s 后退出，而不是直接掐断
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe() }()
+	select {
+	case err := <-errCh:
+		return err
+	case <-stop:
+		log.Printf("  shutdown signal received, draining connections...")
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			return fmt.Errorf("graceful shutdown: %w", err)
+		}
+		log.Printf("  shutdown complete")
+		return nil
+	}
 }
 
 // initLogFile 将日志同时输出到控制台与 cline-proxy.log（追加模式），
@@ -510,14 +540,30 @@ func cleanMessages(messages []any) []any {
 	return cleaned
 }
 
+// asInt 把数值型 any 转为 int（客户端 JSON 解码得到 float64，
+// anthropic/responses 内部转换路径写入 int/int64）。
+func asInt(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case int64:
+		return int(n)
+	}
+	return 0
+}
+
 func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
-	sessionID := fmt.Sprintf("sess_%d", time.Now().UnixMilli())
+	sessionID := "sess_" + kit.RandHex(8)
 
 	maxTokens := defaultMaxTokens
-	if mt, ok := params["max_tokens"].(float64); ok {
-		maxTokens = int(mt)
-	} else if mt, ok := params["max_completion_tokens"].(float64); ok {
-		maxTokens = int(mt)
+	// max_tokens 可能是 float64（客户端 JSON 解码）或 int（anthropic/responses
+	// 内部转换路径写入）—— 两种都要接受，否则转换路径永远回退到 128000
+	if mt := asInt(params["max_tokens"]); mt > 0 {
+		maxTokens = mt
+	} else if mt := asInt(params["max_completion_tokens"]); mt > 0 {
+		maxTokens = mt
 	}
 
 	model := getDefaultModel()
@@ -564,6 +610,9 @@ func clineHeaders(token, sessionID string) http.Header {
 	h.Set("Authorization", "Bearer "+token)
 	h.Set("Content-Type", "application/json")
 	h.Set("X-Task-ID", sessionID)
+	// Go 默认 UA（Go-http-client/1.1）是指纹异常点，容易被上游风控拦截；
+	// 与管理面板探测请求保持一致的客户端标识。cfg.Headers 里可覆盖。
+	h.Set("User-Agent", "Cline/3.0.50")
 
 	cfg := getProxyConfig()
 	for k, v := range cfg.Headers {
@@ -597,12 +646,6 @@ func callClineAPI(ctx context.Context, params map[string]any, stream bool, usePr
 		return nil, acc, fmt.Errorf("marshal body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", cline.ClineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
-	if err != nil {
-		return nil, acc, fmt.Errorf("create request: %w", err)
-	}
-	req.Header = clineHeaders(token, sessionID)
-
 	toolCount := 0
 	if tools, ok := params["tools"]; ok {
 		if t, ok := tools.([]any); ok {
@@ -620,6 +663,7 @@ func callClineAPI(ctx context.Context, params map[string]any, stream bool, usePr
 		attempts = 3
 	}
 	var resp *http.Response
+	var lastErr error
 	for i := 0; i < attempts; i++ {
 		proxyURL, pidx := "", -1
 		if useProxies {
@@ -627,36 +671,47 @@ func callClineAPI(ctx context.Context, params map[string]any, stream bool, usePr
 			client = proxyClientFor(proxyURL)
 			log.Printf("  cline upstream via %s", maskProxyURL(proxyURL))
 		}
-		resp, err = client.Do(req)
-		if err == nil {
+		// 每次尝试重建请求: bytes.Reader 只能读一次,
+		// 复用已发送的 req 会以 "ContentLength=N with Body length 0" 失败
+		req, rerr := http.NewRequestWithContext(ctx, "POST", cline.ClineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
+		if rerr != nil {
+			return nil, acc, fmt.Errorf("create request: %w", rerr)
+		}
+		req.Header = clineHeaders(token, sessionID)
+		resp, lastErr = client.Do(req)
+		if lastErr == nil {
 			break
 		}
 		if ctx.Err() != nil {
-			return nil, acc, fmt.Errorf("client aborted: %w", err)
+			return nil, acc, fmt.Errorf("client aborted: %w", lastErr)
 		}
 		if useProxies {
 			cooldownUpstreamProxy(pidx, 5*time.Minute)
-			log.Printf("  cline proxy failed (%v), cooldown exit, retrying on next", err)
+			log.Printf("  cline proxy failed (%v), cooldown exit, retrying on next", lastErr)
 			continue
 		}
 		// 直连网络错误：临时短冷却 5 分钟
-		markAccountCooldown(acc, "network error: "+err.Error(), 5*time.Minute)
-		return nil, acc, fmt.Errorf("upstream request: %w", err)
+		markAccountCooldown(acc, "network error: "+lastErr.Error(), 5*time.Minute)
+		return nil, acc, fmt.Errorf("upstream request: %w", lastErr)
 	}
-	if err != nil {
+	if lastErr != nil {
 		// 所有代理出口都失败（useProxies 时）——不冷却账号
-		return nil, acc, fmt.Errorf("upstream request (all proxy exits failed): %w", err)
+		return nil, acc, fmt.Errorf("upstream request (all proxy exits failed): %w", lastErr)
 	}
 
 	if resp.StatusCode == 401 {
 		resp.Body.Close()
-		// Refresh token and retry
-		if err := refreshAccountToken(acc); err == nil {
+		// Refresh token and retry（重建请求: 上一次 Do 已消费请求体）
+		if rerr := refreshAccountToken(acc); rerr == nil {
 			token = acc.AccessToken
-			req.Header = clineHeaders(token, sessionID)
-			resp, err = client.Do(req)
-			if err != nil {
-				return nil, acc, fmt.Errorf("upstream retry: %w", err)
+			req2, cerr := http.NewRequestWithContext(ctx, "POST", cline.ClineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
+			if cerr != nil {
+				return nil, acc, fmt.Errorf("create request: %w", cerr)
+			}
+			req2.Header = clineHeaders(token, sessionID)
+			resp, derr := client.Do(req2)
+			if derr != nil {
+				return nil, acc, fmt.Errorf("upstream retry: %w", derr)
 			}
 			if resp.StatusCode == 401 {
 				resp.Body.Close()
@@ -758,7 +813,7 @@ func handleStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Respons
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("data: {\"error\":{\"message\":\"aggregation failed\",\"type\":\"parse_error\"}}\n\n"))
-			w.Write([]byte("n\n"))
+			w.Write([]byte("data: [DONE]\n\n"))
 			return
 		}
 		if u, ok := out["usage"].(map[string]any); ok && len(u) > 0 {
@@ -933,10 +988,10 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 	reader := bufio.NewReader(upstream.Body)
 	for {
 		line, err := reader.ReadString('\n')
-		if err != nil {
-			if err != io.EOF && err != bufio.ErrBufferFull {
-				break
-			}
+		if err != nil && err != io.EOF {
+			// 真实读错误（连接中断等）：把部分内容当成功返回会让客户端拿到
+			// 截断的代码/工具参数还毫无察觉 —— 上抛由调用方返回 500 重试
+			return nil, fmt.Errorf("upstream stream read failed after %d bytes: %w", content.Len(), err)
 		}
 		line = strings.TrimRight(line, "\r\n")
 
@@ -1010,6 +1065,11 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 						}
 						if a, ok := fn["arguments"].(string); ok && a != "" {
 							curArgs.WriteString(a)
+						} else if aRaw, ok := fn["arguments"]; ok && aRaw != nil {
+							// 某些上游一次性下发完整对象 —— 序列化后追加，不能丢弃
+							if bts, merr := json.Marshal(aRaw); merr == nil {
+								curArgs.WriteString(string(bts))
+							}
 						}
 					}
 				}
@@ -1030,6 +1090,11 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 	}
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
+	}
+	if finishReason == "" {
+		// 流以 EOF 结束但从未收到 finish_reason 块 —— 补一个合法值，
+		// 空串对 OpenAI 方言客户端是非法 finish_reason
+		finishReason = "stop"
 	}
 	choice := map[string]any{
 		"index":         0,
@@ -1079,9 +1144,9 @@ type anthropicReq struct {
 	Messages    []anthropicMsg  `json:"messages"`
 	System      json.RawMessage `json:"system,omitempty"`
 	Stream      bool            `json:"stream,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
-	TopP        float64         `json:"top_p,omitempty"`
-	TopK        int             `json:"top_k,omitempty"`
+	Temperature *float64        `json:"temperature,omitempty"`
+	TopP        *float64        `json:"top_p,omitempty"`
+	TopK        *int            `json:"top_k,omitempty"`
 	Stop        json.RawMessage `json:"stop_sequences,omitempty"`
 	Tools       json.RawMessage `json:"tools,omitempty"`
 	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
@@ -1160,11 +1225,17 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 		"stream":     req.Stream,
 		"messages":   []any{},
 	}
-	if req.Temperature != 0 {
-		openAI["temperature"] = req.Temperature
+	// 指针字段：temperature=0（确定性输出）与未设置必须区分开
+	if req.Temperature != nil {
+		openAI["temperature"] = *req.Temperature
 	}
-	if req.TopP != 0 {
-		openAI["top_p"] = req.TopP
+	if req.TopP != nil {
+		openAI["top_p"] = *req.TopP
+	}
+	// stop_sequences 是合法的 OpenAI stop 参数，之前被静默丢弃会导致
+	// 依赖停止序列的 Agent 生成失控
+	if len(req.Stop) > 0 && string(req.Stop) != "null" {
+		openAI["stop"] = json.RawMessage(req.Stop)
 	}
 	// Convert Anthropic tools to OpenAI format
 	if req.Tools != nil {
@@ -1174,18 +1245,42 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 		}
 	}
 	if req.ToolChoice != nil {
-		openAI["tool_choice"] = req.ToolChoice
+		// Anthropic 形状 {"type":"any"}/{"type":"tool","name":x} 映射为
+		// OpenAI 形状 "required"/{"type":"function",...}，原样透传会被上游 400
+		var tc map[string]any
+		if json.Unmarshal(req.ToolChoice, &tc) == nil {
+			switch tc["type"] {
+			case "auto":
+				openAI["tool_choice"] = "auto"
+			case "none":
+				openAI["tool_choice"] = "none"
+			case "any":
+				openAI["tool_choice"] = "required"
+			case "tool":
+				if n, _ := tc["name"].(string); n != "" {
+					openAI["tool_choice"] = map[string]any{
+						"type":     "function",
+						"function": map[string]any{"name": n},
+					}
+				}
+			default:
+				openAI["tool_choice"] = req.ToolChoice
+			}
+		}
 	}
 
 	msgs := []any{}
 
-	// System prompt: use override.md if it exists, otherwise use Anthropic's system field
-	sysContent := loadOverrideContent()
+	// System prompt: 默认用请求自带的 system；仅 APPLY_SYSTEM_PROMPT_OVERRIDE=true
+	// 时才用 override.md 替换（与 chat 路径 applyOverride 行为一致）
+	sysContent := ""
+	if SystemPromptOverrideEnabled() {
+		sysContent = loadOverrideContent()
+	}
 	if sysContent == "" && req.System != nil {
 		sysContent = extractStringContent(req.System)
 	}
 	if sysContent != "" {
-		log.Printf("  system prompt: %d bytes (from override.md)", len(sysContent))
 		msgs = append(msgs, map[string]any{"role": "system", "content": sysContent})
 	}
 
@@ -1253,6 +1348,11 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 					content, _ := tr["content"].(string)
 					id, _ := tr["tool_call_id"].(string)
 					log.Printf("  anthropic req: tool_result id=%s content_len=%d prefix=%s", id, len(content), kit.Truncate(content, 400))
+				}
+				// 混合块中 tool_result 与 text 并存时，text 不能丢
+				//（Claude Code 在工具执行期间允许用户输入）
+				if len(textParts) > 0 {
+					msgs = append(msgs, map[string]any{"role": "user", "content": strings.Join(textParts, "\n")})
 				}
 			} else {
 				content := strings.Join(textParts, "\n")
@@ -1499,11 +1599,17 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 		out["stop_reason"] = "end_turn"
 	}
 
-	usage := map[string]any{}
+	// usage 字段必须有确定数值：缺 key 时置 0，null 会炸掉 Anthropic 客户端
+	// 的整数断言（上下文预估 / 费用统计）
+	usage := map[string]any{"input_tokens": 0, "output_tokens": 0}
 	if u := getNested(openAI, "usage"); u != nil {
 		if um, ok := u.(map[string]any); ok {
-			usage["input_tokens"] = um["prompt_tokens"]
-			usage["output_tokens"] = um["completion_tokens"]
+			if pt, ok := um["prompt_tokens"].(float64); ok {
+				usage["input_tokens"] = int(pt)
+			}
+			if ct, ok := um["completion_tokens"].(float64); ok {
+				usage["output_tokens"] = int(ct)
+			}
 		}
 	}
 	out["usage"] = usage
@@ -1768,9 +1874,13 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(http.StatusOK)
 
+	// 原始 SSE 落盘（完整对话内容，无上限）仅在 STREAM_LOG=true 时开启 ——
+	// 公网长跑部署默认关闭，避免磁盘无限增长与对话内容留存
 	var streamLog *os.File
-	if sf, err := os.OpenFile(kit.ResolveDataPath("cline-proxy-stream.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
-		streamLog = sf
+	if StreamLogEnabled() {
+		if sf, err := os.OpenFile(kit.ResolveDataPath("cline-proxy-stream.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644); err == nil {
+			streamLog = sf
+		}
 	}
 	defer func() {
 		if streamLog != nil {
@@ -1790,6 +1900,8 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 
 	msgID := "msg_" + fmt.Sprintf("%x", time.Now().UnixMilli())
 	stopReason := "end_turn"
+	// lastUsage 记录最近一次上游 usage 块，message_delta 时回传给客户端
+	var lastUsage map[string]any
 	emit("message_start", map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
@@ -1879,6 +1991,7 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 		}
 		if onUsage != nil {
 			if u, ok := obj["usage"].(map[string]any); ok && len(u) > 0 {
+				lastUsage = u
 				onUsage(u)
 			}
 		}
@@ -1957,8 +2070,9 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 					if args, ok := fn["arguments"].(string); ok && args != "" {
 						acc.args += args
 					} else if argsRaw, ok := fn["arguments"]; ok && argsRaw != nil {
+						// 上游一次性下发完整对象：序列化后追加（覆盖会丢掉之前的分片）
 						if bts, err := json.Marshal(argsRaw); err == nil {
-							acc.args = string(bts)
+							acc.args += string(bts)
 						}
 					}
 				}
@@ -1995,22 +2109,37 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 		})
 	}
 
-	// Emit any remaining un-emitted tool blocks
-	for _, acc := range pendingTools {
-		if !acc.emitted {
+	// Emit any remaining un-emitted tool blocks（按 index 升序 —— map 遍历
+	// 顺序随机，会让相同请求每次得到不同的工具块顺序）
+	idxs := make([]int, 0, len(pendingTools))
+	for i := range pendingTools {
+		idxs = append(idxs, i)
+	}
+	sort.Ints(idxs)
+	for _, i := range idxs {
+		if acc := pendingTools[i]; !acc.emitted {
 			emitToolBlock(acc)
 		}
 	}
 
+	// 上游 usage 透传给 Anthropic 客户端（Claude Code / ZCode 用它做
+	// 上下文预估与自动 compact；一直报 0 会让长会话撑爆上下文才报错）
+	usageOut := map[string]any{"output_tokens": 0}
+	if lastUsage != nil {
+		if ct, ok := lastUsage["completion_tokens"].(float64); ok {
+			usageOut["output_tokens"] = int(ct)
+		}
+		if pt, ok := lastUsage["prompt_tokens"].(float64); ok {
+			usageOut["input_tokens"] = int(pt)
+		}
+	}
 	emit("message_delta", map[string]any{
 		"type": "message_delta",
 		"delta": map[string]any{
 			"stop_reason":   stopReason,
 			"stop_sequence": nil,
 		},
-		"usage": map[string]any{
-			"output_tokens": 0,
-		},
+		"usage": usageOut,
 	})
 
 	emit("message_stop", map[string]any{"type": "message_stop"})

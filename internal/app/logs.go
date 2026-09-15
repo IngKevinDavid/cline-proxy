@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -143,16 +144,30 @@ func (w *statusWriter) Flush() {
 // requestLogMiddleware 记录所有进入代理的请求（API 调用与调用历史）。
 // LOG_REQUESTS=false 时跳过日志，但仍包一层 statusWriter —— 它实现了
 // http.Flusher，SSE 流式响应依赖它透传 Flush。
+// 所有请求体先经 http.MaxBytesReader 限幅（MAX_BODY_MB，默认 32MB），
+// 公网匿名请求的超大 body 在读入内存前即被拒绝。
 func requestLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w}
 
+		r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBodyBytes())
+
 		logEnabled := LogRequestsEnabled()
 		model := ""
 		if logEnabled {
 			// 读取请求体提取模型，并放回，避免影响后续处理
-			bodyBytes, _ := io.ReadAll(r.Body)
+			bodyBytes, err := io.ReadAll(r.Body)
+			if err != nil {
+				// 超限（或读失败）：直接 413，不进入业务处理
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{
+					"error": map[string]string{
+						"message": fmt.Sprintf("request body too large (limit %d MB)", MaxRequestBodyBytes()>>20),
+						"type":    "invalid_request_error",
+					},
+				})
+				return
+			}
 			if len(bodyBytes) > 0 {
 				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 				var probe struct {

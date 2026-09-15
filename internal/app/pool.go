@@ -75,6 +75,22 @@ func setDefaultModel(modelID string) {
 	savePool()
 }
 
+// poolAccountCount 线程安全地返回账号池大小。
+func poolAccountCount() int {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	return len(p.Accounts)
+}
+
+// poolKeysSnapshot 线程安全地返回客户端 API key 列表副本。
+func poolKeysSnapshot() []string {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	return append([]string(nil), p.Keys...)
+}
+
 func savePool() {
 	poolMu.Lock()
 	defer poolMu.Unlock()
@@ -129,14 +145,62 @@ func getAccountByID(accountID string) *Account {
 	return nil
 }
 
+// refreshAccountToken 刷新账号 access token。
+// 单飞（single-flight）：同一账号的并发 401 只发一次刷新请求 ——
+// cline 的 refresh token 是轮换型，两个并发刷新会让后到者拿旧 token
+// 换新失败，进而把还活着的账号误标为 expired。
 func refreshAccountToken(acc *Account) error {
+	refreshFlightMu.Lock()
+	if c, ok := refreshFlight[acc]; ok {
+		refreshFlightMu.Unlock()
+		<-c.done
+		return c.err
+	}
+	c := &refreshFlightCall{done: make(chan struct{})}
+	refreshFlight[acc] = c
+	refreshFlightMu.Unlock()
+
+	c.err = doRefreshAccountToken(acc)
+	close(c.done)
+
+	refreshFlightMu.Lock()
+	delete(refreshFlight, acc)
+	refreshFlightMu.Unlock()
+	return c.err
+}
+
+type refreshFlightCall struct {
+	done chan struct{}
+	err  error
+}
+
+var (
+	refreshFlightMu sync.Mutex
+	refreshFlight   = map[*Account]*refreshFlightCall{}
+)
+
+func doRefreshAccountToken(acc *Account) error {
 	resp, err := cline.RefreshClineToken(acc.RefreshToken)
 	if err != nil {
 		poolMu.Lock()
-		acc.Status = "expired"
+		if cline.IsAuthRejection(err) {
+			// 上游明确拒绝该 refresh token（400/401/403）—— 账号确实失效
+			acc.Status = "expired"
+			acc.LastReason = "refresh rejected: " + err.Error()
+		} else {
+			// 网络故障 / 5xx 是瞬时的: 短冷却 5 分钟,不判死账号
+			acc.Status = "cooldown"
+			acc.CooldownUntil = time.Now().Add(5 * time.Minute)
+			acc.LastReason = "refresh transient error: " + err.Error()
+		}
 		savePoolLocked()
 		poolMu.Unlock()
 		return fmt.Errorf("token refresh failed: %w", err)
+	}
+	if resp.Data.AccessToken == "" {
+		// 200 但空 token: 上游响应异常,按瞬时故障处理
+		markAccountCooldown(acc, "refresh returned empty access token", 5*time.Minute)
+		return fmt.Errorf("token refresh returned empty access token")
 	}
 
 	poolMu.Lock()
@@ -144,12 +208,28 @@ func refreshAccountToken(acc *Account) error {
 	if resp.Data.RefreshToken != "" {
 		acc.RefreshToken = resp.Data.RefreshToken
 	}
-	acc.ExpiresAt = cline.ParseExpiry(resp.Data.ExpiresAt) - 60000
+	acc.ExpiresAt = clineExpiryMs(resp.Data.ExpiresAt)
 	acc.Status = "active"
+	acc.LastReason = ""
 	savePoolLocked()
 	poolMu.Unlock()
 	return nil
 }
+
+// clineExpiryMs 解析过期时间并预留 60s 提前量。ParseExpiry 解析失败返回 0，
+// 直接使用会得到 ExpiresAt=-60000 → 每个请求都触发刷新（刷新风暴 + 每请求
+// 落盘一次）；此时回退到保守的 55 分钟（cline token 生命周期约 1h）。
+func clineExpiryMs(expiresAt any) int64 {
+	exp := cline.ParseExpiry(expiresAt)
+	if exp <= 0 {
+		return time.Now().UnixMilli() + 55*60_000
+	}
+	return exp - 60_000
+}
+
+// maxCooldown 冷却时长上限：上游给的间隔（Retry-After / 错误文本解析）
+// 可能是离谱的大值，封顶 24h，防止把账号/key/代理冷却到事实上永久下线。
+const maxCooldown = 24 * time.Hour
 
 func pickAccount() *Account {
 	p := loadPool()
@@ -246,7 +326,7 @@ func ListAccounts() []*Account {
 			TokensDate:      a.TokensDate,
 			CreatedAt:       a.CreatedAt,
 			CooldownUntil:   a.CooldownUntil,
-			LastReason:     a.LastReason,
+			LastReason:      a.LastReason,
 		}
 	}
 	savePoolLocked()
@@ -256,19 +336,25 @@ func ListAccounts() []*Account {
 
 // markAccountCooldown 将账号置为冷却状态，并记录预计恢复时间。
 // duration 为冷却时长；duration<=0 时使用默认冷却。
-func markAccountCooldown(acc *Account, reason string, duration time.Duration) {
+// 返回设置的恢复时间（调用方用它代替锁外读取 acc.CooldownUntil）。
+func markAccountCooldown(acc *Account, reason string, duration time.Duration) time.Time {
 	if acc == nil {
-		return
+		return time.Time{}
 	}
 	if duration <= 0 {
 		duration = 18 * time.Hour // 默认 18 小时（Cline 免费额度每日重置）
+	}
+	if duration > maxCooldown {
+		duration = maxCooldown
 	}
 	poolMu.Lock()
 	acc.Status = "cooldown"
 	acc.CooldownUntil = time.Now().Add(duration)
 	acc.LastReason = reason
 	savePoolLocked()
+	until := acc.CooldownUntil
 	poolMu.Unlock()
+	return until
 }
 
 // bumpUsage 递增本地成功调用计数（含今日计数），自动处理跨日重置。
@@ -414,11 +500,11 @@ func AddAccountFromDeviceAuth() (*Account, error) {
 	}
 
 	acc := &Account{
-		AccountID:    fmt.Sprintf("acc_%d", time.Now().UnixMilli()),
+		AccountID:    "acc_" + kit.RandHex(8),
 		Email:        email,
 		RefreshToken: reg.Data.RefreshToken,
 		AccessToken:  "workos:" + reg.Data.AccessToken,
-		ExpiresAt:    cline.ParseExpiry(reg.Data.ExpiresAt) - 60000,
+		ExpiresAt:    clineExpiryMs(reg.Data.ExpiresAt),
 		Status:       "active",
 		CreatedAt:    time.Now(),
 	}

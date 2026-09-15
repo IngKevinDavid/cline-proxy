@@ -1,8 +1,8 @@
 package app
 
 import (
-	"cline-go-proxy/internal/kit"
 	"bytes"
+	"cline-go-proxy/internal/kit"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -438,16 +438,39 @@ func pickZenKey() string {
 }
 
 // cooldownZenKey 将 key 置为冷却，冷却期内 round-robin 跳过它。
+// 默认的 "public" key 仅在它是池中唯一 key 时跳过冷却（无其他 key 可轮转）；
+// 多 key 池中 "public" 也参与冷却轮转。
 func cooldownZenKey(key string, d time.Duration) {
-	if key == "" || key == "public" {
+	if key == "" {
+		return
+	}
+	if key == "public" && len(getZenConfig().Keys) <= 1 {
 		return
 	}
 	if d <= 0 {
 		d = time.Minute
 	}
+	if d > maxCooldown {
+		d = maxCooldown
+	}
 	zenKeyMu.Lock()
 	zenKeyCool[key] = time.Now().Add(d)
 	zenKeyMu.Unlock()
+}
+
+// zenKeyCooling 查询 key 是否处于冷却期。
+func zenKeyCooling(key string) bool {
+	zenKeyMu.Lock()
+	defer zenKeyMu.Unlock()
+	until, ok := zenKeyCool[key]
+	if !ok {
+		return false
+	}
+	if time.Now().After(until) {
+		delete(zenKeyCool, key)
+		return false
+	}
+	return true
 }
 
 // zenKeyStatus 每个 key 的运行时状态（管理面板展示用，key 值打码）。
@@ -525,10 +548,17 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 
 	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
 
+	// 先取信号量再等待：不能在持有 zenStateMu 时阻塞在 channel 上，
+	// 否则并发打满时（in-flight 调用要拿 zenStateMu 记成功/失败才能释放槽位）
+	// 会形成确定性死锁。ctx 取消（客户端 abort）时不再占用槽位。
 	zenStateMu.Lock()
 	sem := zenSem
-	sem <- struct{}{}
 	zenStateMu.Unlock()
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, 0, fmt.Errorf("client aborted: %w", ctx.Err())
+	}
 	defer func() { <-sem }()
 
 	retries := cfg.Retries
@@ -579,10 +609,12 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 				cooldownUpstreamProxy(pidx, 5*time.Minute)
 				log.Printf("  zen proxy failed (%v), cooldown exit %s", err, viaProxy)
 			}
-			// 网络错误:退避重试(不计入故障转移,瞬时可恢复)
+			// 网络错误:退避重试(不计入故障转移,瞬时可恢复);ctx 取消时中断等待
 			if attempt < retries {
 				log.Printf("  zen network error (%v), retry %d/%d after %v", err, attempt+1, retries, delay)
-				time.Sleep(kit.WithRetryJitter(delay))
+				if !sleepCtx(ctx, kit.WithRetryJitter(delay)) {
+					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
+				}
 				delay *= 2
 				continue
 			}
@@ -611,17 +643,23 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 			// 冷却当前 key；若还有其他未冷却 key 则立即切换重试（不睡眠）
 			rl := parseRetryAfter(resp.Header.Get("Retry-After"))
 			cooldownZenKey(key, rl)
-			if next := pickZenKey(); next != "" && next != key {
+			if next := pickZenKey(); next != "" && next != key && !zenKeyCooling(next) {
 				log.Printf("  zen rate limited (%d), switching to next zen key (%d configured)", resp.StatusCode, len(cfg.Keys))
 				continue
 			}
 			if attempt < retries {
+				// Retry-After 封顶 30s：更长的等待没有意义（槽位被占、客户端早已离开）
 				wait := delay
 				if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > wait {
 					wait = retryAfter
 				}
+				if wait > 30*time.Second {
+					wait = 30 * time.Second
+				}
 				log.Printf("  zen rate limited (%d), retry %d/%d after %v", resp.StatusCode, attempt+1, retries, wait)
-				time.Sleep(kit.WithRetryJitter(wait))
+				if !sleepCtx(ctx, kit.WithRetryJitter(wait)) {
+					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
+				}
 				delay *= 2
 				continue
 			}
@@ -629,8 +667,24 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 			return nil, rateLimited, fmt.Errorf("%s", reason)
 		}
 
-		markZenFail()
+		// 非 2xx：只有限流信号或服务端错误才推进全局故障转移，
+		// 客户端侧 400/401（提示词超限、key 配错）不应污染 failover 状态
+		if resp.StatusCode >= 500 {
+			markZenFail()
+		}
 		return nil, rateLimited, fmt.Errorf("%s", reason)
+	}
+}
+
+// sleepCtx ctx 感知的睡眠；返回 false 表示等待期间被取消。
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-t.C:
+		return true
 	}
 }
 

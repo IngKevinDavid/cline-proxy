@@ -14,6 +14,8 @@ import (
 //	PORT                       监听端口（main.go 中显式 flag 优先）
 //	DATA_DIR                   数据目录（账号池/zen 配置/日志/combos 等，kit.ResolveDataPath）
 //	API_KEY                    /v1 上游代理接口的固定 API key；设置后仅此 key 可调用 /v1/*
+//	API_KEY_FILE               API key 文件路径（docker secrets），优先于 API_KEY
+//	MAX_BODY_MB                单请求体上限 MB，默认 32，超出返回 413
 //	ADMIN_PASSWORD             管理面板登录密码；设置后所有 /admin/* 需登录
 //	ADMIN_PASSWORD_FILE        密码文件路径（docker secrets），优先于 ADMIN_PASSWORD
 //	REQUIRE_ADMIN_AUTH         "false" 时允许公网无密码运行（如反代已做认证），默认强制
@@ -32,8 +34,9 @@ func envStr(key string) string {
 	return strings.TrimSpace(os.Getenv(key))
 }
 
-// envBool 解析布尔环境变量：1/true/yes/on（大小写不敏感）为 true。
-// 第二个返回值表示变量是否被显式设置。
+// envBool 解析布尔环境变量：1/true/yes/on（大小写不敏感）为 true，
+// 0/false/no/off 为 false。未设置或无法识别的值返回 (false, false)，
+// 调用方回落到各自默认值 —— 拼写错误不会意外关闭安全开关（fail closed）。
 func envBool(key string) (bool, bool) {
 	v := strings.ToLower(envStr(key))
 	if v == "" {
@@ -45,7 +48,8 @@ func envBool(key string) (bool, bool) {
 	case "0", "false", "no", "off":
 		return false, true
 	}
-	return false, true
+	fmt.Printf("  WARNING: unrecognized boolean %q for %s, using default\n", v, key)
+	return false, false
 }
 
 // envInt 解析整数环境变量，无效或未设置返回 (0, false)。
@@ -79,8 +83,16 @@ func envList(key string) []string {
 	return out
 }
 
-// APIKeyEnv 返回 /v1 接口的固定 API key（API_KEY 环境变量），未设置返回 ""。
+// APIKeyEnv 返回 /v1 接口的固定 API key：API_KEY_FILE（docker secrets，
+// 整个文件内容去除首尾空白）优先，其次 API_KEY。均未设置返回 ""。
 func APIKeyEnv() string {
+	if path := envStr("API_KEY_FILE"); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			if k := strings.TrimSpace(string(data)); k != "" {
+				return k
+			}
+		}
+	}
 	return envStr("API_KEY")
 }
 
@@ -172,6 +184,15 @@ func LogFileMaxBytes() int64 {
 	return 10 << 20
 }
 
+// MaxRequestBodyBytes 单个请求体的字节上限（MAX_BODY_MB，默认 32MB），
+// 在日志中间件以 http.MaxBytesReader 包裹，防止公网匿名超大 body 撑爆内存。
+func MaxRequestBodyBytes() int64 {
+	if n, ok := envInt("MAX_BODY_MB"); ok && n > 0 {
+		return int64(n) << 20
+	}
+	return 32 << 20
+}
+
 // SystemPromptOverrideEnabled APPLY_SYSTEM_PROMPT_OVERRIDE 是否启用 override.md
 // 系统提示词替换，默认 false（编码 IDE / Agent 保留自己的提示词）。
 func SystemPromptOverrideEnabled() bool {
@@ -179,8 +200,15 @@ func SystemPromptOverrideEnabled() bool {
 	return v
 }
 
+// StreamLogEnabled STREAM_LOG=true 时把 Anthropic 流式路径的原始 SSE 事件
+// 落盘到 cline-proxy-stream.log（完整对话内容、无大小上限），默认关闭。
+func StreamLogEnabled() bool {
+	v, _ := envBool("STREAM_LOG")
+	return v
+}
+
 // ClineUseProxiesEnv CLINE_USE_PROXIES=true 时 cline 上游全部走出口代理池
-//（默认 false；cline 上游也可通过 combo 的 useProxies 开关按别名启用）。
+// （默认 false；cline 上游也可通过 combo 的 useProxies 开关按别名启用）。
 func ClineUseProxiesEnv() bool {
 	v, _ := envBool("CLINE_USE_PROXIES")
 	return v

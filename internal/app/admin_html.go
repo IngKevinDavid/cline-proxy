@@ -625,7 +625,7 @@ function toggleTheme() {
 applyTheme(getTheme());
 
 const _ = id => document.getElementById(id);
-const esc = s => { const d=document.createElement('div'); d.textContent=s||''; return d.innerHTML; };
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtNum = n => (n || 0).toLocaleString('zh-CN');
 const fmtTokens = n => {
   n = n || 0;
@@ -740,11 +740,21 @@ async function loadAccounts() {
         '<td class="mono" style="font-size:11px">' + lu + '</td>' +
         '<td class="mono" style="font-size:11px">' + cr + '</td>' +
         '<td style="white-space:nowrap">' +
-          '<button class="btn btn-sm" onclick="testAccount(\'' + a.accountId + '\', this)" title="测试账号是否可用（成功会清除冷却/过期状态）">测试</button> ' +
-          '<button class="btn btn-sm" onclick="resetAccount(\'' + a.accountId + '\', this)" title="检测限流并解除：探测上游，若仍限流则保持冷却并提示恢复时间">重置</button> ' +
-          '<button class="btn btn-sm btn-danger" onclick="deleteAccount(\'' + a.accountId + '\')" title="删除">删除</button>' +
+          // 动作按钮经 data-* 属性 + 委托监听分发：内联 onclick 拼接字符串
+          // 会先做 HTML 解码再进 JS 解析，即使转义了引号也可能被绕过
+          '<button class="btn btn-sm" data-act="test" data-acc="' + esc(a.accountId) + '" title="测试账号是否可用（成功会清除冷却/过期状态）">测试</button> ' +
+          '<button class="btn btn-sm" data-act="reset" data-acc="' + esc(a.accountId) + '" title="检测限流并解除：探测上游，若仍限流则保持冷却并提示恢复时间">重置</button> ' +
+          '<button class="btn btn-sm btn-danger" data-act="delete" data-acc="' + esc(a.accountId) + '" title="删除">删除</button>' +
         '</td></tr>';
     }).join('');
+    tbody.onclick = e => {
+      const b = e.target.closest('button[data-act]');
+      if (!b) return;
+      const id = b.dataset.acc;
+      if (b.dataset.act === 'test') testAccount(id, b);
+      else if (b.dataset.act === 'reset') resetAccount(id, b);
+      else if (b.dataset.act === 'delete') deleteAccount(id);
+    };
   } catch (e) { toast('加载账号失败: ' + e.message, 'error'); }
 }
 
@@ -917,10 +927,16 @@ async function loadKeys() {
     }
     el.innerHTML = keys.map(k =>
       '<div class="flex" style="margin-bottom:8px">' +
-        '<span class="key-display" style="flex:1" onclick="copyText(\'' + k + '\')" title="点击复制">' + esc(k) + '</span>' +
-        '<button class="btn btn-sm btn-danger" onclick="deleteKey(\'' + k + '\')">删除</button>' +
+        '<span class="key-display" style="flex:1" data-copy="' + esc(k) + '" title="点击复制">' + esc(k) + '</span>' +
+        '<button class="btn btn-sm btn-danger" data-delkey="' + esc(k) + '">删除</button>' +
       '</div>'
     ).join('');
+    el.onclick = e => {
+      const c = e.target.closest('[data-copy]');
+      if (c) { copyText(c.dataset.copy); return; }
+      const d = e.target.closest('button[data-delkey]');
+      if (d) deleteKey(d.dataset.delkey);
+    };
   } catch (e) { _('keysList').innerHTML = '<div class="empty">加载失败</div>'; }
 }
 
@@ -931,8 +947,10 @@ async function generateKey() {
     _('keyGenResult').innerHTML =
       '<div style="background:rgba(52,211,153,.08);border:1px solid rgba(52,211,153,.4);border-radius:10px;padding:12px">' +
         '<div style="color:var(--accent2);font-weight:600;margin-bottom:8px">新密钥已生成（点击复制）</div>' +
-        '<div class="key-display" onclick="copyText(\'' + key + '\')">' + esc(key) + '</div>' +
+        '<div class="key-display" data-copy="' + esc(key) + '">' + esc(key) + '</div>' +
       '</div>';
+    const kr = _('keyGenResult').querySelector('[data-copy]');
+    if (kr) kr.onclick = () => copyText(kr.dataset.copy);
     loadKeys();
     toast('密钥已生成', 'success');
     setTimeout(() => _('keyGenResult').innerHTML = '', 8000);
@@ -982,10 +1000,10 @@ function toggleLogsAuto() {
 }
 
 async function loadLogs() {
+  const tbody = _('logsTableBody');
   try {
     const d = await api('GET', '/logs');
     const logs = d.data.logs || [];
-    const tbody = _('logsTableBody');
     if (!logs.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无请求记录</td></tr>'; return; }
     tbody.innerHTML = logs.map(l => {
       const t = l.time ? new Date(l.time).toLocaleString('zh-CN') : '-';
@@ -1267,9 +1285,13 @@ async function loadCombos() {
         '<td style="text-align:left;font-family:monospace">' + esc(c.target) + '</td>' +
         '<td>' + (c.useProxies ? '<span class="model-tag" style="color:var(--accent2)">socks5池</span>' : '-') + '</td>' +
         '<td style="font-size:11px">' + (c.createdAt ? new Date(c.createdAt).toLocaleString('zh-CN') : '-') + '</td>' +
-        '<td><button class="btn btn-sm btn-danger" onclick="deleteCombo(\'' + esc(c.id) + '\')">删除</button></td>' +
+        '<td><button class="btn btn-sm btn-danger" data-delcombo="' + esc(c.id) + '">删除</button></td>' +
       '</tr>').join('') +
       '</tbody></table></div>';
+    _('combosList').onclick = e => {
+      const b = e.target.closest('button[data-delcombo]');
+      if (b) deleteCombo(b.dataset.delcombo);
+    };
   } catch (e) { _('combosList').textContent = '加载失败: ' + e.message; }
 }
 

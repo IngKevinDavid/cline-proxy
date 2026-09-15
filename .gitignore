@@ -22,3 +22,7 @@ override.md
 # Local debug tool (kept locally, not uploaded)
 capture.go
 capture-logs/
+
+# Secrets (docker-compose documents putting API_KEY/ADMIN_PASSWORD here)
+.env
+.env.*

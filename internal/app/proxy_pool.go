@@ -69,6 +69,9 @@ func cooldownUpstreamProxy(idx int, d time.Duration) {
 	if d <= 0 {
 		d = 10 * time.Minute
 	}
+	if d > maxCooldown {
+		d = maxCooldown
+	}
 	zenProxyCooldownsMu.Lock()
 	zenProxyCooldowns[idx] = time.Now().Add(d)
 	zenProxyCooldownsMu.Unlock()

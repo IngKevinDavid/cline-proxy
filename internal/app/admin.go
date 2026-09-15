@@ -1,9 +1,11 @@
 package app
 
 import (
+	"bytes"
 	"cline-go-proxy/internal/cline"
 	"cline-go-proxy/internal/kit"
-	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,10 +34,10 @@ type oauthSessionState struct {
 }
 
 type apiResponse struct {
-	Success bool        `json:"success"`
-	Data    any         `json:"data,omitempty"`
-	Error   string      `json:"error,omitempty"`
-	Message string      `json:"message,omitempty"`
+	Success bool   `json:"success"`
+	Data    any    `json:"data,omitempty"`
+	Error   string `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 func writeAPI(w http.ResponseWriter, status int, resp apiResponse) {
@@ -44,51 +46,65 @@ func writeAPI(w http.ResponseWriter, status int, resp apiResponse) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// adminCORS 管理路由的跨域策略：SPA 是同源的，管理员 API 无需 CORS。
+// 不回显 Access-Control-Allow-Origin —— 通配符会让任意网页在无密码模式
+// （默认本机部署）下读写 /admin/api/*（含导出 refresh token、删除全部账号）。
+// OPTIONS 预检在认证前短路。
+func adminCORS(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		h(w, r)
+	}
+}
+
 func registerAdminRoutes(mux *http.ServeMux) {
 	// 管理面板认证：ADMIN_PASSWORD 设置后所有 /admin/*（含静态页与全部 API）
-	// 需要会话凭证；登录/登出端点本身豁免。corsHandler 在外层保证 OPTIONS
+	// 需要会话凭证；登录/登出端点本身豁免。adminCORS 在外层保证 OPTIONS
 	// 预检在认证前短路。
 	auth := adminAuthMiddleware
-	mux.HandleFunc("/admin/api/login", corsHandler(handleAdminLogin))
-	mux.HandleFunc("/admin/api/logout", corsHandler(handleAdminLogout))
+	mux.HandleFunc("/admin/api/login", adminCORS(handleAdminLogin))
+	mux.HandleFunc("/admin/api/logout", adminCORS(handleAdminLogout))
 	// 静态页自行区分认证状态：未认证返回独立登录页，认证后返回完整面板
 	//（数据全部由下方带 auth 的 API 提供，面板 HTML 本身不含敏感信息）
 	mux.HandleFunc("/admin/", adminStaticHandler)
-	mux.HandleFunc("/admin/api/accounts", corsHandler(auth(handleAdminAccounts)))
-	mux.HandleFunc("/admin/api/accounts/add", corsHandler(auth(handleAdminAccountAdd)))
-	mux.HandleFunc("/admin/api/accounts/delete", corsHandler(auth(handleAdminAccountDelete)))
-	mux.HandleFunc("/admin/api/accounts/test", corsHandler(auth(handleAdminAccountTest)))
-	mux.HandleFunc("/admin/api/oauth/start", corsHandler(auth(handleOAuthStart)))
-	mux.HandleFunc("/admin/api/oauth/status", corsHandler(auth(handleOAuthStatus)))
-	mux.HandleFunc("/admin/api/sso/import", corsHandler(auth(handleSSOImport)))
-	mux.HandleFunc("/admin/api/stats", corsHandler(auth(handleAdminStats)))
-	mux.HandleFunc("/admin/api/batch-import", corsHandler(auth(handleBatchImport)))
-	mux.HandleFunc("/admin/api/accounts/refresh-all", corsHandler(auth(handleAdminRefreshAll)))
-	mux.HandleFunc("/admin/api/accounts/delete-all", corsHandler(auth(handleAdminDeleteAll)))
-	mux.HandleFunc("/admin/api/accounts/reset", corsHandler(auth(handleAdminAccountReset)))
-	mux.HandleFunc("/admin/api/accounts/export", corsHandler(auth(handleAccountsExport)))
-	mux.HandleFunc("/admin/api/logs", corsHandler(auth(handleRequestLogs)))
-	mux.HandleFunc("/admin/api/keys", corsHandler(auth(handleAdminGetKeys)))
-	mux.HandleFunc("/admin/api/keys/generate", corsHandler(auth(handleAdminGenerateKey)))
-	mux.HandleFunc("/admin/api/keys/delete", corsHandler(auth(handleAdminDeleteKey)))
-	mux.HandleFunc("/admin/api/models", corsHandler(auth(handleAdminModels)))
-	mux.HandleFunc("/admin/api/models/refresh", corsHandler(auth(handleAdminModelsRefresh)))
-	mux.HandleFunc("/admin/api/config", corsHandler(auth(handleAdminConfig)))
-	mux.HandleFunc("/admin/api/config/update", corsHandler(auth(handleAdminUpdateConfig)))
-	mux.HandleFunc("/admin/api/combos", corsHandler(auth(handleCombosList)))
-	mux.HandleFunc("/admin/api/combos/create", corsHandler(auth(handleComboCreate)))
-	mux.HandleFunc("/admin/api/combos/delete", corsHandler(auth(handleComboDelete)))
-	mux.HandleFunc("/admin/api/opencode/config", corsHandler(auth(handleZenConfig)))
-	mux.HandleFunc("/admin/api/opencode/config/update", corsHandler(auth(handleZenConfigUpdate)))
-	mux.HandleFunc("/admin/api/opencode/models", corsHandler(auth(handleZenModels)))
-	mux.HandleFunc("/admin/api/opencode/models/refresh", corsHandler(auth(handleZenModelsRefresh)))
-	mux.HandleFunc("/admin/api/opencode/stats", corsHandler(auth(handleZenStats)))
+	mux.HandleFunc("/admin/api/accounts", adminCORS(auth(handleAdminAccounts)))
+	mux.HandleFunc("/admin/api/accounts/add", adminCORS(auth(handleAdminAccountAdd)))
+	mux.HandleFunc("/admin/api/accounts/delete", adminCORS(auth(handleAdminAccountDelete)))
+	mux.HandleFunc("/admin/api/accounts/test", adminCORS(auth(handleAdminAccountTest)))
+	mux.HandleFunc("/admin/api/oauth/start", adminCORS(auth(handleOAuthStart)))
+	mux.HandleFunc("/admin/api/oauth/status", adminCORS(auth(handleOAuthStatus)))
+	mux.HandleFunc("/admin/api/sso/import", adminCORS(auth(handleSSOImport)))
+	mux.HandleFunc("/admin/api/stats", adminCORS(auth(handleAdminStats)))
+	mux.HandleFunc("/admin/api/batch-import", adminCORS(auth(handleBatchImport)))
+	mux.HandleFunc("/admin/api/accounts/refresh-all", adminCORS(auth(handleAdminRefreshAll)))
+	mux.HandleFunc("/admin/api/accounts/delete-all", adminCORS(auth(handleAdminDeleteAll)))
+	mux.HandleFunc("/admin/api/accounts/reset", adminCORS(auth(handleAdminAccountReset)))
+	mux.HandleFunc("/admin/api/accounts/export", adminCORS(auth(handleAccountsExport)))
+	mux.HandleFunc("/admin/api/logs", adminCORS(auth(handleRequestLogs)))
+	mux.HandleFunc("/admin/api/keys", adminCORS(auth(handleAdminGetKeys)))
+	mux.HandleFunc("/admin/api/keys/generate", adminCORS(auth(handleAdminGenerateKey)))
+	mux.HandleFunc("/admin/api/keys/delete", adminCORS(auth(handleAdminDeleteKey)))
+	mux.HandleFunc("/admin/api/models", adminCORS(auth(handleAdminModels)))
+	mux.HandleFunc("/admin/api/models/refresh", adminCORS(auth(handleAdminModelsRefresh)))
+	mux.HandleFunc("/admin/api/config", adminCORS(auth(handleAdminConfig)))
+	mux.HandleFunc("/admin/api/config/update", adminCORS(auth(handleAdminUpdateConfig)))
+	mux.HandleFunc("/admin/api/combos", adminCORS(auth(handleCombosList)))
+	mux.HandleFunc("/admin/api/combos/create", adminCORS(auth(handleComboCreate)))
+	mux.HandleFunc("/admin/api/combos/delete", adminCORS(auth(handleComboDelete)))
+	mux.HandleFunc("/admin/api/opencode/config", adminCORS(auth(handleZenConfig)))
+	mux.HandleFunc("/admin/api/opencode/config/update", adminCORS(auth(handleZenConfigUpdate)))
+	mux.HandleFunc("/admin/api/opencode/models", adminCORS(auth(handleZenModels)))
+	mux.HandleFunc("/admin/api/opencode/models/refresh", adminCORS(auth(handleZenModelsRefresh)))
+	mux.HandleFunc("/admin/api/opencode/stats", adminCORS(auth(handleZenStats)))
 	// 旧 zen 路径别名,兼容旧引用
-	mux.HandleFunc("/admin/api/zen/config", corsHandler(auth(handleZenConfig)))
-	mux.HandleFunc("/admin/api/zen/config/update", corsHandler(auth(handleZenConfigUpdate)))
-	mux.HandleFunc("/admin/api/zen/models", corsHandler(auth(handleZenModels)))
-	mux.HandleFunc("/admin/api/zen/models/refresh", corsHandler(auth(handleZenModelsRefresh)))
-	mux.HandleFunc("/admin/api/zen/stats", corsHandler(auth(handleZenStats)))
+	mux.HandleFunc("/admin/api/zen/config", adminCORS(auth(handleZenConfig)))
+	mux.HandleFunc("/admin/api/zen/config/update", adminCORS(auth(handleZenConfigUpdate)))
+	mux.HandleFunc("/admin/api/zen/models", adminCORS(auth(handleZenModels)))
+	mux.HandleFunc("/admin/api/zen/models/refresh", adminCORS(auth(handleZenModelsRefresh)))
+	mux.HandleFunc("/admin/api/zen/stats", adminCORS(auth(handleZenStats)))
 	mux.HandleFunc("/admin/zen/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusFound)
 	})
@@ -96,6 +112,8 @@ func registerAdminRoutes(mux *http.ServeMux) {
 
 func adminStaticHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/admin/" || r.URL.Path == "/admin" {
+		// no-store：登出/改密后不能让缓存的旧面板继续可用
+		w.Header().Set("Cache-Control", "no-store")
 		// 配置了密码且未认证时只返回独立登录页，不暴露面板 HTML
 		if AdminAuthRequired() && !verifySessionToken(sessionFromRequest(r)) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -125,9 +143,9 @@ func handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, http.StatusOK, apiResponse{
 		Success: true,
 		Data: map[string]any{
-			"accounts":   accounts,
-			"total":      len(accounts),
-			"poolIndex":  loadPool().CurrentIdx,
+			"accounts":  accounts,
+			"total":     len(accounts),
+			"poolIndex": loadPool().CurrentIdx,
 		},
 	})
 }
@@ -171,11 +189,11 @@ func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	acc := &Account{
-		AccountID:    fmt.Sprintf("acc_%d", time.Now().UnixMilli()),
+		AccountID:    "acc_" + kit.RandHex(8),
 		Email:        req.Email,
 		RefreshToken: req.RefreshToken,
 		AccessToken:  "workos:" + resp.Data.AccessToken,
-		ExpiresAt:    cline.ParseExpiry(resp.Data.ExpiresAt) - 60000,
+		ExpiresAt:    clineExpiryMs(resp.Data.ExpiresAt),
 		Status:       "active",
 		CreatedAt:    time.Now(),
 	}
@@ -257,6 +275,13 @@ func handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	oauthSessionsMu.Lock()
+	// 顺带清扫：被遗弃（从未再轮询状态）的会话 15 分钟后过期，防 map 泄漏
+	now := time.Now()
+	for id, s := range oauthSessions {
+		if now.Sub(s.CreatedAt) > 15*time.Minute {
+			delete(oauthSessions, id)
+		}
+	}
 	oauthSessions[sessionID] = state
 	oauthSessionsMu.Unlock()
 
@@ -297,11 +322,11 @@ func handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 		}
 
 		acc := &Account{
-			AccountID:    fmt.Sprintf("acc_%d", time.Now().UnixMilli()),
+			AccountID:    "acc_" + kit.RandHex(8),
 			Email:        email,
 			RefreshToken: reg.Data.RefreshToken,
 			AccessToken:  "workos:" + reg.Data.AccessToken,
-			ExpiresAt:    cline.ParseExpiry(reg.Data.ExpiresAt) - 60000,
+			ExpiresAt:    clineExpiryMs(reg.Data.ExpiresAt),
 			Status:       "active",
 			CreatedAt:    time.Now(),
 		}
@@ -327,6 +352,10 @@ func handleOAuthStart(w http.ResponseWriter, r *http.Request) {
 
 // GET /admin/api/oauth/status?sessionId=xxx
 func handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
 	sessionID := r.URL.Query().Get("sessionId")
 	if sessionID == "" {
 		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "sessionId required"})
@@ -335,25 +364,27 @@ func handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
 
 	oauthSessionsMu.Lock()
 	state, ok := oauthSessions[sessionID]
-	oauthSessionsMu.Unlock()
-
-	if !ok {
-		writeAPI(w, http.StatusNotFound, apiResponse{Error: "session not found"})
+	if ok {
+		// 加锁读快照（后台轮询 goroutine 在写这些字段）；
+		// 已结束的会话读走即删，map 不会无限增长
+		resp := map[string]any{
+			"done":    state.Done,
+			"success": state.Success,
+		}
+		if state.Done {
+			resp["email"] = state.Email
+			if !state.Success {
+				resp["error"] = state.Error
+			}
+			delete(oauthSessions, sessionID)
+		}
+		oauthSessionsMu.Unlock()
+		writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: resp})
 		return
 	}
+	oauthSessionsMu.Unlock()
 
-	resp := map[string]any{
-		"done":    state.Done,
-		"success": state.Success,
-	}
-	if state.Done {
-		resp["email"] = state.Email
-		if !state.Success {
-			resp["error"] = state.Error
-		}
-	}
-
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: resp})
+	writeAPI(w, http.StatusNotFound, apiResponse{Error: "session not found"})
 }
 
 // POST /admin/api/sso/import  body: { ssoCookies: string, email?: string }
@@ -408,15 +439,15 @@ func handleSSOImport(w http.ResponseWriter, r *http.Request) {
 			}
 			email := req.Email
 			if email == "" {
-				email = fmt.Sprintf("sso_user_%d", time.Now().UnixMilli())
+				email = "sso_user_" + kit.RandHex(4)
 			}
 
 			acc := &Account{
-				AccountID:    fmt.Sprintf("acc_%d", time.Now().UnixMilli()),
+				AccountID:    "acc_" + kit.RandHex(8),
 				Email:        email,
 				RefreshToken: token,
 				AccessToken:  "workos:" + resp.Data.AccessToken,
-				ExpiresAt:    cline.ParseExpiry(resp.Data.ExpiresAt) - 60000,
+				ExpiresAt:    clineExpiryMs(resp.Data.ExpiresAt),
 				Status:       "active",
 				CreatedAt:    time.Now(),
 			}
@@ -468,6 +499,12 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "tokens array is empty"})
 		return
 	}
+	// 每个元素都会同步向上游发一次刷新请求 —— 上限防止一次请求放大成
+	// 对 cline 的请求洪流
+	if len(req.Tokens) > 500 {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "too many tokens (max 500 per batch)"})
+		return
+	}
 
 	imported := 0
 	errors := []string{}
@@ -483,14 +520,14 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 		}
 		email := t.Email
 		if email == "" {
-			email = fmt.Sprintf("batch_%d", time.Now().UnixMilli())
+			email = "batch_" + kit.RandHex(4)
 		}
 		acc := &Account{
-			AccountID:    fmt.Sprintf("acc_%d", time.Now().UnixMilli()),
+			AccountID:    "acc_" + kit.RandHex(8),
 			Email:        email,
 			RefreshToken: t.RefreshToken,
 			AccessToken:  "workos:" + resp.Data.AccessToken,
-			ExpiresAt:    cline.ParseExpiry(resp.Data.ExpiresAt) - 60000,
+			ExpiresAt:    clineExpiryMs(resp.Data.ExpiresAt),
 			Status:       "active",
 			CreatedAt:    time.Now(),
 		}
@@ -533,8 +570,11 @@ func handleAdminDeleteAll(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
 		return
 	}
+	// 只清空账号：Keys（/v1 的 API key）与 DefaultModel 必须保留，
+	// 否则"删除全部账号"会顺手作废所有已分发的客户端 key
+	old := loadPool()
 	poolMu.Lock()
-	pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}}
+	pool = &AccountPool{Accounts: []*Account{}, Keys: old.Keys, DefaultModel: old.DefaultModel, CurrentIdx: 0}
 	poolMu.Unlock()
 	savePool()
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "All accounts deleted"})
@@ -658,8 +698,9 @@ func testAccount(acc *Account) (map[string]any, string) {
 	// 取 token（expired/cooldown 也尝试刷新，测试按钮不因状态直接拒绝）
 	token, err := ensureAccountToken(acc)
 	if err != nil {
+		reason := "token refresh failed: " + err.Error()
 		poolMu.Lock()
-		acc.LastReason = "token refresh failed: " + err.Error()
+		acc.LastReason = reason
 		acc.Status = "expired"
 		acc.CooldownUntil = time.Time{}
 		savePoolLocked()
@@ -668,7 +709,7 @@ func testAccount(acc *Account) (map[string]any, string) {
 			"accountId":  acc.AccountID,
 			"email":      acc.Email,
 			"status":     "expired",
-			"reason":     acc.LastReason,
+			"reason":     reason,
 			"prevStatus": prevStatus,
 		}, "expired"
 	}
@@ -704,15 +745,16 @@ func testAccount(acc *Account) (map[string]any, string) {
 
 	resp, err := kit.HTTPClient.Do(req)
 	if err != nil {
-		// 网络错误：5 分钟短冷却
-		markAccountCooldown(acc, "network error: "+err.Error(), 5*time.Minute)
+		// 网络错误：5 分钟短冷却（恢复时间取返回值，避免锁外读账号字段）
+		reason := "network error: " + err.Error()
+		until := markAccountCooldown(acc, reason, 5*time.Minute)
 		return map[string]any{
-			"accountId": acc.AccountID,
-			"email":     acc.Email,
-			"status":    "cooldown",
-			"reason":    acc.LastReason,
-			"cooldownUntil": acc.CooldownUntil.Format("2006-01-02 15:04:05"),
-			"remaining": formatDuration(time.Until(acc.CooldownUntil)),
+			"accountId":     acc.AccountID,
+			"email":         acc.Email,
+			"status":        "cooldown",
+			"reason":        reason,
+			"cooldownUntil": until.Format("2006-01-02 15:04:05"),
+			"remaining":     formatDuration(time.Until(until)),
 		}, "cooldown"
 	}
 	defer resp.Body.Close()
@@ -725,16 +767,16 @@ func testAccount(acc *Account) (map[string]any, string) {
 		if duration <= 0 {
 			duration = parseRetryAfter(resp.Header.Get("Retry-After"))
 		}
-		reason := kit.Truncate(bodyStr, 500)
-		markAccountCooldown(acc, "429: "+reason, duration)
+		reason := "429: " + kit.Truncate(bodyStr, 500)
+		until := markAccountCooldown(acc, reason, duration)
 		log.Printf("Test hit 429 on %s, cooldown %v", truncateEmail(acc.Email), duration)
 		return map[string]any{
 			"accountId":     acc.AccountID,
 			"email":         acc.Email,
 			"status":        "cooldown",
-			"reason":        acc.LastReason,
-			"cooldownUntil": acc.CooldownUntil.Format("2006-01-02 15:04:05"),
-			"remaining":     formatDuration(time.Until(acc.CooldownUntil)),
+			"reason":        reason,
+			"cooldownUntil": until.Format("2006-01-02 15:04:05"),
+			"remaining":     formatDuration(time.Until(until)),
 			"httpStatus":    resp.StatusCode,
 		}, "cooldown"
 	}
@@ -750,7 +792,7 @@ func testAccount(acc *Account) (map[string]any, string) {
 			"accountId":  acc.AccountID,
 			"email":      acc.Email,
 			"status":     "expired",
-			"reason":     acc.LastReason,
+			"reason":     "401 unauthorized",
 			"httpStatus": resp.StatusCode,
 		}, "expired"
 	}
@@ -855,6 +897,10 @@ func setProxyConfig(c *proxyConfigData) {
 
 // GET /admin/api/keys
 func handleAdminGetKeys(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
 	p := loadPool()
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"keys": p.Keys}})
 }
@@ -865,7 +911,14 @@ func handleAdminGenerateKey(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
 		return
 	}
-	key := fmt.Sprintf("cline_%x_%x", time.Now().UnixMilli(), time.Now().UnixNano()%1000000)
+	// key 只能来自 crypto/rand —— 时间戳生成的 key 可预测，
+	// 而它把守着公网暴露的 /v1 接口
+	b := make([]byte, 18)
+	if _, err := rand.Read(b); err != nil {
+		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: "keygen failed"})
+		return
+	}
+	key := "cline_" + hex.EncodeToString(b)
 	p := loadPool()
 	poolMu.Lock()
 	p.Keys = append(p.Keys, key)
@@ -908,6 +961,10 @@ func handleAdminDeleteKey(w http.ResponseWriter, r *http.Request) {
 
 // GET /admin/api/config
 func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
 	cfg := getProxyConfig()
 	address := r.Host
 	if address == "" {
@@ -946,13 +1003,20 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 写时复制：getProxyConfig 返回的是被请求路径并发读取的活配置，
+	// 直接原地改 Strategy/Headers 会与读方竞态（concurrent map read/write
+	// 直接 panic 进程）；先验证全部字段，再整体替换
 	cfg := getProxyConfig()
+	newCfg := &proxyConfigData{Strategy: cfg.Strategy, Headers: map[string]string{}}
+	for k, v := range cfg.Headers {
+		newCfg.Headers[k] = v
+	}
 	changed := false
 
 	if req.Strategy != "" {
 		switch req.Strategy {
 		case "round_robin", "fill", "random":
-			cfg.Strategy = req.Strategy
+			newCfg.Strategy = req.Strategy
 			changed = true
 		default:
 			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid strategy, must be: round_robin, fill, random"})
@@ -962,7 +1026,7 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	if req.Headers != nil {
 		for k, v := range req.Headers {
-			cfg.Headers[k] = v
+			newCfg.Headers[k] = v
 		}
 		changed = true
 	}
@@ -981,7 +1045,8 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if changed {
-		setProxyConfig(cfg)
+		setProxyConfig(newCfg)
+		cfg = newCfg
 	}
 
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
@@ -993,6 +1058,10 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 // GET /admin/api/models
 func handleAdminModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
 	ensureModelsFresh()
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
 		"models":   getFreeModels(),

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -60,7 +61,10 @@ func loadSessionSecret() []byte {
 		if _, err := rand.Read(s); err != nil {
 			panic("generate session secret: " + err.Error())
 		}
-		os.WriteFile(path, []byte(hex.EncodeToString(s)), 0600)
+		if err := os.WriteFile(path, []byte(hex.EncodeToString(s)), 0600); err != nil {
+			// 写失败只影响"重启后会话仍有效"，不阻断启动，但必须可感知
+			log.Printf("  WARNING: persist session secret failed (%v); sessions will not survive restart", err)
+		}
 		sessionSecret = s
 	})
 	return sessionSecret
@@ -119,14 +123,11 @@ func sessionFromRequest(r *http.Request) string {
 }
 
 // adminAuthMiddleware 管理面板认证中间件。未配置 ADMIN_PASSWORD 时直接放行
-// （本地模式）；OPTIONS 预检放行（认证在真正请求上执行）。
+// （本地模式）；OPTIONS 预检由外层 adminCORS 在此之前短路，这里不再放行 ——
+// 否则新增任何未带 adminCORS 的管理路由都会把 handler 暴露给匿名 OPTIONS。
 func adminAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !AdminAuthRequired() {
-			next(w, r)
-			return
-		}
-		if r.Method == http.MethodOptions {
 			next(w, r)
 			return
 		}
@@ -141,11 +142,18 @@ func adminAuthMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // loginRateAllow IP 登录限流：每分钟最多 loginMaxFails 次失败尝试。
+// 顺带清扫过期窗口 —— 公网管理端点会给每个扫描 IP 建条目，不清扫 map 无限增长。
 func loginRateAllow(ip string) bool {
 	loginFailsMu.Lock()
 	defer loginFailsMu.Unlock()
+	now := time.Now()
+	for k, st := range loginFails {
+		if now.Sub(st.windowAt) > loginWindow {
+			delete(loginFails, k)
+		}
+	}
 	st, ok := loginFails[ip]
-	if !ok || time.Since(st.windowAt) > loginWindow {
+	if !ok {
 		return true
 	}
 	return st.count < loginMaxFails
@@ -207,7 +215,7 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
-		Path:     "/",
+		Path:     "/admin",
 		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
@@ -225,7 +233,7 @@ func handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
-		Path:     "/",
+		Path:     "/admin",
 		MaxAge:   -1,
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
@@ -233,7 +241,15 @@ func handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "logged out"})
 }
 
+// clientIP 客户端真实 IP：默认取 RemoteAddr（不信任任何请求头，防止
+// 伪造 X-Forwarded-For 绕过登录限流）。反代部署可设 CLIENT_IP_HEADER
+// （如 X-Real-IP 或 X-Forwarded-For），仅在该环境下取该头第一个值。
 func clientIP(r *http.Request) string {
+	if h := envStr("CLIENT_IP_HEADER"); h != "" {
+		if v := r.Header.Get(h); v != "" {
+			return strings.TrimSpace(strings.Split(v, ",")[0])
+		}
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr

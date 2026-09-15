@@ -3,6 +3,7 @@ package cline
 import (
 	"cline-go-proxy/internal/kit"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -13,10 +14,10 @@ import (
 )
 
 const (
-	workosClientID       = "client_01K3A541FN8TA3EPPHTD2325AR"
-	workosDeviceAuthURL  = "https://api.workos.com/user_management/authorize/device"
+	workosClientID        = "client_01K3A541FN8TA3EPPHTD2325AR"
+	workosDeviceAuthURL   = "https://api.workos.com/user_management/authorize/device"
 	workosAuthenticateURL = "https://api.workos.com/user_management/authenticate"
-	ClineAPIBase         = "https://api.cline.bot/api/v1"
+	ClineAPIBase          = "https://api.cline.bot/api/v1"
 )
 
 type credentials struct {
@@ -93,7 +94,6 @@ func FindCredentialsFile() string {
 	pwd, _ = os.Getwd()
 	return filepath.Join(pwd, ".cline-credentials.json")
 }
-
 
 func LoadCredentials() *credentials {
 	data, err := os.ReadFile(credentialsPath)
@@ -206,6 +206,25 @@ func RegisterWithCline(workosAccess, workosRefresh string) (*clineAuthResp, erro
 	return &c, nil
 }
 
+// StatusError 携带 HTTP 状态码的上游错误，供调用方区分
+// "上游明确拒绝认证"（400/401/403，账号确实失效）与瞬时故障（网络/5xx）。
+type StatusError struct {
+	Status int
+	Err    error
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("status %d: %v", e.Status, e.Err)
+}
+
+func (e *StatusError) Unwrap() error { return e.Err }
+
+// IsAuthRejection 判断 err 是否为上游明确拒绝认证（400/401/403）。
+func IsAuthRejection(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && (se.Status == 400 || se.Status == 401 || se.Status == 403)
+}
+
 func RefreshClineToken(refreshToken string) (*clineRefreshResp, error) {
 	body := map[string]string{
 		"refreshToken": refreshToken,
@@ -218,7 +237,7 @@ func RefreshClineToken(refreshToken string) (*clineRefreshResp, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("cline refresh failed: %d", resp.StatusCode)
+		return nil, &StatusError{Status: resp.StatusCode, Err: fmt.Errorf("cline refresh failed")}
 	}
 
 	var c clineRefreshResp

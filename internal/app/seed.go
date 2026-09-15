@@ -2,6 +2,7 @@ package app
 
 import (
 	"cline-go-proxy/internal/cline"
+	"cline-go-proxy/internal/kit"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -52,11 +53,11 @@ func seedAccountsFromFile() {
 			email = fmt.Sprintf("seeded_%d", time.Now().UnixMilli())
 		}
 		acc := &Account{
-			AccountID:    fmt.Sprintf("acc_%d", time.Now().UnixMilli()),
+			AccountID:    "acc_" + kit.RandHex(8),
 			Email:        email,
 			RefreshToken: item.RefreshToken,
 			AccessToken:  "workos:" + resp.Data.AccessToken,
-			ExpiresAt:    cline.ParseExpiry(resp.Data.ExpiresAt) - 60000,
+			ExpiresAt:    clineExpiryMs(resp.Data.ExpiresAt),
 			Status:       "active",
 			CreatedAt:    time.Now(),
 		}

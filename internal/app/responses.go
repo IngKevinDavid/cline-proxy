@@ -155,12 +155,12 @@ func responsesToolsToChat(tools []any) []any {
 // chatToResponses chat.completions 响应 -> Responses 响应
 func chatToResponses(chat map[string]any) map[string]any {
 	resp := map[string]any{
-		"id":         "resp_" + fmt.Sprintf("%x", time.Now().UnixMilli()),
-		"object":     "response",
-		"created_at": time.Now().Unix(),
-		"status":     "completed",
-		"model":      chat["model"],
-		"output":     []any{},
+		"id":          "resp_" + fmt.Sprintf("%x", time.Now().UnixMilli()),
+		"object":      "response",
+		"created_at":  time.Now().Unix(),
+		"status":      "completed",
+		"model":       chat["model"],
+		"output":      []any{},
 		"output_text": "",
 	}
 	choices, _ := chat["choices"].([]any)
@@ -178,11 +178,11 @@ func chatToResponses(chat map[string]any) map[string]any {
 				content = append(content, map[string]any{"type": "output_text", "text": c, "annotations": []any{}})
 			}
 			msgOut := map[string]any{
-				"type":      "message",
-				"id":        "msg_" + fmt.Sprintf("%x", time.Now().UnixMilli()),
-				"status":    "completed",
-				"role":      "assistant",
-				"content":   content,
+				"type":        "message",
+				"id":          "msg_" + fmt.Sprintf("%x", time.Now().UnixMilli()),
+				"status":      "completed",
+				"role":        "assistant",
+				"content":     content,
 				"output_text": outputText.String(),
 			}
 			outputs = append(outputs, msgOut)
@@ -260,6 +260,14 @@ func (s *responsesSSEWriter) event(event string, data any) {
 	}
 }
 
+// respCall 单个工具调用的流式累积器（按上游 index 区分，支持并行工具调用）
+type respCall struct {
+	id     string
+	name   string
+	args   strings.Builder
+	outIdx int // 该调用在 Responses 输出序列中的位置；-1 = 尚未发出 added
+}
+
 // chatStreamToResponses 将上游 chat.completions SSE 流转换为 Responses SSE 流
 func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, onUsage func(map[string]any)) {
 	model := ""
@@ -279,10 +287,33 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, onUsa
 	s.event("response.in_progress", map[string]any{"type": "response.in_progress", "response": map[string]any{"id": s.respID}})
 
 	textEmitted := false
-	callEmitted := false
-	var curCallID, curCallName string
-	var curArgs strings.Builder
+	textOutIdx := 0
+	nextOutIdx := 0
 	var outText strings.Builder
+	calls := map[int]*respCall{}
+	order := []int{}
+	var upUsage map[string]any
+
+	emitCallAdded := func(call *respCall) {
+		itemID := "fc_" + call.id
+		if call.id == "" {
+			itemID = "fc_" + call.name
+		}
+		call.outIdx = nextOutIdx
+		nextOutIdx++
+		s.event("response.output_item.added", map[string]any{
+			"type":         "response.output_item.added",
+			"output_index": call.outIdx,
+			"item": map[string]any{
+				"type":      "function_call",
+				"id":        itemID,
+				"call_id":   call.id,
+				"name":      call.name,
+				"arguments": "",
+				"status":    "in_progress",
+			},
+		})
+	}
 
 	reader := bufio.NewReader(upstream.Body)
 	for {
@@ -308,6 +339,7 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, onUsa
 				}
 				if onUsage != nil {
 					if u, ok := obj["usage"].(map[string]any); ok && len(u) > 0 {
+						upUsage = u
 						onUsage(u)
 					}
 				}
@@ -327,90 +359,149 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, onUsa
 				if c, ok := delta["content"].(string); ok && c != "" {
 					if !textEmitted {
 						textEmitted = true
+						textOutIdx = nextOutIdx
+						nextOutIdx++
 						s.event("response.output_item.added", map[string]any{
-							"type":       "response.output_item.added",
-							"output_index": 0,
-							"item": map[string]any{"id": s.msgID, "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}},
+							"type":         "response.output_item.added",
+							"output_index": textOutIdx,
+							"item":         map[string]any{"id": s.msgID, "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}},
 						})
 						s.event("response.content_part.added", map[string]any{
-							"type": "response.content_part.added",
-							"item_id": s.msgID,
-							"output_index": 0,
+							"type":          "response.content_part.added",
+							"item_id":       s.msgID,
+							"output_index":  textOutIdx,
 							"content_index": 0,
-							"part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
+							"part":          map[string]any{"type": "output_text", "text": "", "annotations": []any{}},
 						})
 					}
 					outText.WriteString(c)
 					s.event("response.output_text.delta", map[string]any{
-						"type": "response.output_text.delta",
-						"item_id": s.msgID,
-						"output_index": 0,
+						"type":          "response.output_text.delta",
+						"item_id":       s.msgID,
+						"output_index":  textOutIdx,
 						"content_index": 0,
-						"delta": c,
+						"delta":         c,
 					})
 				}
 				// 推理
 				if r, ok := delta["reasoning_content"].(string); ok && r != "" {
 					s.event("response.reasoning_summary_text.delta", map[string]any{
-						"type": "response.reasoning_summary_text.delta",
-						"item_id": s.msgID,
-						"output_index": 0,
+						"type":          "response.reasoning_summary_text.delta",
+						"item_id":       s.msgID,
+						"output_index":  textOutIdx,
 						"content_index": 0,
-						"delta": r,
+						"delta":         r,
 					})
 				}
-				// 工具调用
+				// 工具调用（并行调用按上游 index 各自累积，互不覆盖）
 				if tc, ok := delta["tool_calls"].([]any); ok {
 					for _, c := range tc {
 						cm, ok := c.(map[string]any)
 						if !ok {
 							continue
 						}
+						idx := 0
+						if i, ok := cm["index"].(float64); ok {
+							idx = int(i)
+						}
+						call := calls[idx]
+						if call == nil {
+							call = &respCall{outIdx: -1}
+							calls[idx] = call
+							order = append(order, idx)
+						}
 						if id, ok := cm["id"].(string); ok && id != "" {
-							curCallID = id
+							call.id = id
 						}
 						fn, _ := cm["function"].(map[string]any)
 						if fn != nil {
 							if n, ok := fn["name"].(string); ok && n != "" {
-								curCallName = n
+								call.name = n
+							}
+							if call.outIdx < 0 && call.name != "" {
+								emitCallAdded(call)
 							}
 							if a, ok := fn["arguments"].(string); ok && a != "" {
-								curArgs.WriteString(a)
+								call.args.WriteString(a)
+								if call.outIdx >= 0 {
+									itemID := "fc_" + call.id
+									if call.id == "" {
+										itemID = "fc_" + call.name
+									}
+									s.event("response.function_call_arguments.delta", map[string]any{
+										"type":         "response.function_call_arguments.delta",
+										"item_id":      itemID,
+										"output_index": call.outIdx,
+										"delta":        a,
+									})
+								}
+							} else if aRaw, ok := fn["arguments"]; ok && aRaw != nil {
+								if b, merr := json.Marshal(aRaw); merr == nil {
+									call.args.WriteString(string(b))
+								}
 							}
-						}
-						if !callEmitted && curCallName != "" {
-							callEmitted = true
-							s.event("response.output_item.added", map[string]any{
-								"type": "response.output_item.added",
-								"output_index": 1,
-								"item": map[string]any{
-									"type": "function_call",
-									"id":   "fc_" + curCallName,
-									"call_id": curCallID,
-									"name": curCallName,
-									"arguments": "",
-									"status": "in_progress",
-								},
-							})
 						}
 					}
 				}
 			}
 		}
 		if err != nil {
+			if err != io.EOF {
+				// 上游流中断：不能谎报 completed（截断内容会被客户端当完整结果）
+				s.event("response.failed", map[string]any{
+					"type": "response.failed",
+					"response": map[string]any{
+						"id":         s.respID,
+						"object":     "response",
+						"created_at": time.Now().Unix(),
+						"status":     "failed",
+						"model":      model,
+						"output":     []any{},
+						"error":      map[string]any{"code": "upstream_error", "message": err.Error()},
+					},
+				})
+				return
+			}
 			break
 		}
 	}
 
 	// 收尾
 	if textEmitted {
-		s.event("response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": s.msgID, "output_index": 0, "content_index": 0, "text": outText.String()})
-		s.event("response.content_part.done", map[string]any{"type": "response.content_part.done", "item_id": s.msgID, "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": outText.String(), "annotations": []any{}}})
-		s.event("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": 0, "item": map[string]any{"id": s.msgID, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": outText.String(), "annotations": []any{}}}}})
+		s.event("response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": s.msgID, "output_index": textOutIdx, "content_index": 0, "text": outText.String()})
+		s.event("response.content_part.done", map[string]any{"type": "response.content_part.done", "item_id": s.msgID, "output_index": textOutIdx, "content_index": 0, "part": map[string]any{"type": "output_text", "text": outText.String(), "annotations": []any{}}})
+		s.event("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": textOutIdx, "item": map[string]any{"id": s.msgID, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": outText.String(), "annotations": []any{}}}}})
 	}
-	if callEmitted {
-		s.event("response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "item_id": "fc_" + curCallName, "output_index": 1, "arguments": curArgs.String()})
-		s.event("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": 1, "item": map[string]any{"type": "function_call", "id": "fc_" + curCallName, "call_id": curCallID, "name": curCallName, "arguments": curArgs.String(), "status": "completed"}})
+	finalOutput := []any{}
+	if textEmitted {
+		finalOutput = append(finalOutput, map[string]any{"id": s.msgID, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": outText.String(), "annotations": []any{}}}})
+	}
+	for _, idx := range order {
+		call := calls[idx]
+		if call.outIdx < 0 {
+			if call.name == "" {
+				continue
+			}
+			emitCallAdded(call)
+		}
+		itemID := "fc_" + call.id
+		if call.id == "" {
+			itemID = "fc_" + call.name
+		}
+		s.event("response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "item_id": itemID, "output_index": call.outIdx, "arguments": call.args.String()})
+		s.event("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": call.outIdx, "item": map[string]any{"type": "function_call", "id": itemID, "call_id": call.id, "name": call.name, "arguments": call.args.String(), "status": "completed"}})
+		finalOutput = append(finalOutput, map[string]any{"type": "function_call", "id": itemID, "call_id": call.id, "name": call.name, "arguments": call.args.String(), "status": "completed"})
+	}
+	// usage 用上游真实值 —— 客户端靠它做上下文与用量估算
+	usageOut := map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+	if upUsage != nil {
+		if pt, ok := upUsage["prompt_tokens"].(float64); ok {
+			usageOut["input_tokens"] = int(pt)
+		}
+		if ct, ok := upUsage["completion_tokens"].(float64); ok {
+			usageOut["output_tokens"] = int(ct)
+		}
+		usageOut["total_tokens"] = usageOut["input_tokens"].(int) + usageOut["output_tokens"].(int)
 	}
 	s.event("response.completed", map[string]any{
 		"type": "response.completed",
@@ -420,9 +511,9 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, onUsa
 			"created_at":  time.Now().Unix(),
 			"status":      "completed",
 			"model":       model,
-			"output":      []any{},
+			"output":      finalOutput,
 			"output_text": outText.String(),
-			"usage":       map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+			"usage":       usageOut,
 		},
 	})
 }
@@ -502,7 +593,14 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, chatToResponses(raw))
+		// zen 可能把响应包在 {data:{...}} —— 与 cline 路径一致地解包 + 归一化，
+		// 否则 choices 为 nil，客户端拿到空 output 且无任何报错
+		if data, ok := raw["data"]; ok {
+			if d, ok := data.(map[string]any); ok {
+				raw = d
+			}
+		}
+		writeJSON(w, http.StatusOK, chatToResponses(normalizeOpenAIResponse(raw)))
 		return
 	}
 

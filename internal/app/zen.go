@@ -107,6 +107,11 @@ func resolveZenFreeModel(id string) (*ZenModel, bool) {
 // 故障转移: zen 连续失败期间,zen 免费模型请求临时路由到 cline 账号池
 func routeModel(id string) string {
 	id = strings.TrimSpace(id)
+	// combo 别名兜底：调用方通常已把 model 改写为 target，这里防止 combo ID
+	// 直接进入路由（按 combo 声明的平台走，不解析为普通模型）
+	if c := resolveCombo(id); c != nil {
+		return c.Platform
+	}
 	initZenModels()
 	cfg := getZenConfig()
 	if zm, ok := resolveZenModel(id); ok {
@@ -155,7 +160,8 @@ type zenCompactConfig struct {
 
 type zenConfigData struct {
 	Enabled         bool             `json:"enabled"`
-	Key             string           `json:"key"`
+	Key             string           `json:"key"`            // 兼容字段：始终等于 Keys[0]（旧版单 key 读取用）
+	Keys            []string         `json:"keys,omitempty"` // zen 多 key 池，请求按 round-robin 轮转
 	BaseURL         string           `json:"baseURL"`
 	Proxies         []string         `json:"proxies"`         // http(s)/socks5 代理,轮询出口
 	ProxyStrategy   string           `json:"proxyStrategy"`   // round_robin / random / fill
@@ -171,6 +177,7 @@ func defaultZenConfig() *zenConfigData {
 	return &zenConfigData{
 		Enabled:         true,
 		Key:             "public",
+		Keys:            []string{"public"},
 		BaseURL:         zenAPIBase,
 		ProxyStrategy:   "round_robin",
 		MaxConcurrency:  8,
@@ -272,17 +279,47 @@ func isRateLimited(status int, body string) bool {
 	return false
 }
 
+// normalizeZenKeys 规范 key 池：迁移旧单 key 字段、去空去重、回退默认 "public"、
+// 同步兼容字段 Key = Keys[0]。
+func normalizeZenKeys(cfg *zenConfigData) {
+	if len(cfg.Keys) == 0 && cfg.Key != "" {
+		cfg.Keys = []string{cfg.Key}
+	}
+	cleaned := make([]string, 0, len(cfg.Keys))
+	seen := map[string]bool{}
+	for _, k := range cfg.Keys {
+		k = strings.TrimSpace(k)
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		cleaned = append(cleaned, k)
+	}
+	if len(cleaned) == 0 {
+		cleaned = []string{"public"}
+	}
+	cfg.Keys = cleaned
+	cfg.Key = cleaned[0]
+}
+
 func loadZenConfig() *zenConfigData {
 	path := kit.ResolveDataPath(".zen-config.json")
 	cfg := defaultZenConfig()
+	fileExists := false
 	if data, err := os.ReadFile(path); err == nil {
+		fileExists = true
 		if err := json.Unmarshal(data, cfg); err != nil {
 			log.Printf("zen config parse failed: %v", err)
 		}
 	}
-	if cfg.Key == "" {
-		cfg.Key = "public"
+	// ZEN_KEYS 环境变量：配置为空（无文件或只有默认 public key）时注入多 key 池
+	if envKeys := envList("ZEN_KEYS"); len(envKeys) > 0 {
+		if !fileExists || len(cfg.Keys) == 0 || (len(cfg.Keys) == 1 && cfg.Keys[0] == "public") {
+			cfg.Keys = envKeys
+			log.Printf("zen keys seeded from ZEN_KEYS env: %d key(s)", len(envKeys))
+		}
 	}
+	normalizeZenKeys(cfg)
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = zenAPIBase
 	}
@@ -305,12 +342,31 @@ func getZenConfig() *zenConfigData {
 }
 
 func setZenConfig(c *zenConfigData) {
+	normalizeZenKeys(c)
 	zenConfigMu.Lock()
 	zenConfig = c
 	zenConfigMu.Unlock()
 	saveZenConfig()
 	rebuildZenTransport()
 	rebuildZenSem()
+	// 清理已移除 key 的轮转状态
+	valid := map[string]bool{}
+	for _, k := range c.Keys {
+		valid[k] = true
+	}
+	zenKeyMu.Lock()
+	for k := range zenKeyCool {
+		if !valid[k] {
+			delete(zenKeyCool, k)
+		}
+	}
+	for k := range zenKeyUsage {
+		if !valid[k] {
+			delete(zenKeyUsage, k)
+		}
+	}
+	zenKeyIdx = 0
+	zenKeyMu.Unlock()
 }
 
 // validateProxyList 校验代理列表格式: 支持 http/https/socks5/socks5h, 必须包含 host:port。
@@ -337,6 +393,92 @@ func validateProxyList(proxies []string) error {
 		}
 	}
 	return nil
+}
+
+// ============ zen 多 key 轮转（round_robin 默认策略） ============
+
+var (
+	zenKeyMu    sync.Mutex
+	zenKeyIdx   int
+	zenKeyUsage = map[string]int64{} // 每 key 成功调用计数（内存态）
+	zenKeyCool  = map[string]time.Time{}
+)
+
+// pickZenKey round-robin 选取一个未冷却的 key；全部冷却时按轮转顺序返回下一个。
+// 返回 "" 表示当前没有配置任何 key。
+func pickZenKey() string {
+	keys := getZenConfig().Keys
+	if len(keys) == 0 {
+		return ""
+	}
+	zenKeyMu.Lock()
+	defer zenKeyMu.Unlock()
+	now := time.Now()
+	// 先清理过期冷却
+	for k, until := range zenKeyCool {
+		if now.After(until) {
+			delete(zenKeyCool, k)
+		}
+	}
+	for i := 0; i < len(keys); i++ {
+		idx := (zenKeyIdx + i) % len(keys)
+		k := keys[idx]
+		if _, cooling := zenKeyCool[k]; !cooling {
+			zenKeyIdx = (idx + 1) % len(keys)
+			zenKeyUsage[k]++
+			return k
+		}
+	}
+	// 全部冷却中：仍按轮转返回（保持请求流动，上游会再次限流）
+	k := keys[zenKeyIdx%len(keys)]
+	zenKeyIdx = (zenKeyIdx + 1) % len(keys)
+	zenKeyUsage[k]++
+	return k
+}
+
+// cooldownZenKey 将 key 置为冷却，冷却期内 round-robin 跳过它。
+func cooldownZenKey(key string, d time.Duration) {
+	if key == "" || key == "public" {
+		return
+	}
+	if d <= 0 {
+		d = time.Minute
+	}
+	zenKeyMu.Lock()
+	zenKeyCool[key] = time.Now().Add(d)
+	zenKeyMu.Unlock()
+}
+
+// zenKeyStatus 每个 key 的运行时状态（管理面板展示用，key 值打码）。
+func zenKeyStatus() []map[string]any {
+	keys := getZenConfig().Keys
+	zenKeyMu.Lock()
+	defer zenKeyMu.Unlock()
+	now := time.Now()
+	out := make([]map[string]any, 0, len(keys))
+	for i, k := range keys {
+		st := map[string]any{
+			"index":   i,
+			"keyMask": kit.Truncate(k, 8) + "…",
+			"usage":   zenKeyUsage[k],
+			"current": i == zenKeyIdx%maxInt(len(keys), 1),
+		}
+		if until, cooling := zenKeyCool[k]; cooling && now.Before(until) {
+			st["cooling"] = true
+			st["cooldownUntil"] = until.Format(time.RFC3339)
+		} else {
+			st["cooling"] = false
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // ============ zen 上游调用 ============
@@ -400,7 +542,9 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, int, error)
 		}
 		// 客户端身份轮换: 每次请求模拟全新 opencode 客户端,规避 session/UA 维度限流
 		sess, user, ua := kit.FreshZenIdentity()
-		req.Header.Set("Authorization", "Bearer "+cfg.Key)
+		// 多 key 轮转: round-robin 选取未冷却的 key（单 key 时行为不变）
+		key := pickZenKey()
+		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", ua)
 		req.Header.Set("x-opencode-session", sess)
@@ -444,6 +588,13 @@ func callZenAPI(params map[string]any, stream bool) (*http.Response, int, error)
 				}
 				cooldownZenProxy(idx, d)
 				log.Printf("  zen rate limited (%d), proxy cooldown %v", resp.StatusCode, d)
+			}
+			// 冷却当前 key；若还有其他未冷却 key 则立即切换重试（不睡眠）
+			rl := parseRetryAfter(resp.Header.Get("Retry-After"))
+			cooldownZenKey(key, rl)
+			if next := pickZenKey(); next != "" && next != key {
+				log.Printf("  zen rate limited (%d), switching to next zen key (%d configured)", resp.StatusCode, len(cfg.Keys))
+				continue
 			}
 			if attempt < retries {
 				wait := delay

@@ -5,6 +5,7 @@ import (
 	"cline-go-proxy/internal/kit"
 	"bufio"
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -49,7 +50,17 @@ func StartProxy(host string, port int) error {
 	if strings.TrimSpace(host) == "" {
 		host = "0.0.0.0"
 	}
+	ApplyEnvConfig()
+
+	// 公网暴露 fail-closed 检查：非回环监听必须有 API_KEY 与 ADMIN_PASSWORD
+	if err := CheckPublicExposure(host); err != nil {
+		return err
+	}
+
 	initLogFile()
+
+	// 池为空时从种子文件导入cline账号（容器无状态重建场景）
+	seedAccountsFromFile()
 
 	p := loadPool()
 	activeCount := 0
@@ -106,13 +117,6 @@ func StartProxy(host string, port int) error {
 
 	apiKeyHandler := func(next http.HandlerFunc) http.HandlerFunc {
 		return corsHandler(func(w http.ResponseWriter, r *http.Request) {
-			// Allow requests without key if no keys configured
-			p := loadPool()
-			if len(p.Keys) == 0 {
-				next(w, r)
-				return
-			}
-
 			key := r.Header.Get("x-api-key")
 			if key == "" {
 				if b := r.Header.Get("Authorization"); len(b) > 7 && b[:7] == "Bearer " {
@@ -120,9 +124,31 @@ func StartProxy(host string, port int) error {
 				}
 			}
 
+			// API_KEY 环境变量优先：设置后它是 /v1 唯一有效凭证（无状态部署模式）
+			if envKey := APIKeyEnv(); envKey != "" {
+				if subtle.ConstantTimeCompare([]byte(key), []byte(envKey)) != 1 {
+					writeJSON(w, http.StatusUnauthorized, map[string]any{
+						"error": map[string]string{
+							"message": "invalid API key (server requires the API_KEY env value)",
+							"type":    "auth_error",
+						},
+					})
+					return
+				}
+				next(w, r)
+				return
+			}
+
+			// 未设置 API_KEY：沿用管理面板生成的动态 key 列表；列表为空则放行（本地模式）
+			p := loadPool()
+			if len(p.Keys) == 0 {
+				next(w, r)
+				return
+			}
+
 			valid := false
 			for _, k := range p.Keys {
-				if k == key {
+				if subtle.ConstantTimeCompare([]byte(key), []byte(k)) == 1 {
 					valid = true
 					break
 				}
@@ -160,6 +186,22 @@ func StartProxy(host string, port int) error {
 					"output":   zm["output"],
 				})
 			}
+		}
+		// combo 别名模型（仪表盘自定义的虚拟模型 ID）
+		for _, c := range listCombos() {
+			owned := "cline"
+			if c.Platform == "zen" {
+				owned = "opencode-zen"
+			}
+			data = append(data, map[string]any{
+				"id":       c.ID,
+				"object":   "model",
+				"created":  c.CreatedAt.UnixMilli(),
+				"owned_by": owned,
+				"source":   "combo",
+				"status":   "active",
+				"cost":     "free",
+			})
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"object": "list", "data": data})
 	})
@@ -206,6 +248,13 @@ func StartProxy(host string, port int) error {
 		}
 		model, _ := params["model"].(string)
 		log.Printf("  client: stream=%v tools=%d model=%s", isStream, toolCount, model)
+
+		// combo 别名模型：改写为平台上游真实模型后按平台路由
+		if c := resolveCombo(model); c != nil {
+			log.Printf("  combo %q -> %s model %q", model, c.Platform, c.Target)
+			params["model"] = c.Target
+			model = c.Target
+		}
 
 		// Override system prompt from override.md for OpenAI format
 		applyOverride(params)
@@ -346,8 +395,12 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 	json.NewEncoder(w).Encode(data)
 }
 
-// applyOverride 用 override.md 替换系统提示词(不存在则跳过)
+// applyOverride 用 override.md 替换系统提示词。默认关闭：需设置
+// APPLY_SYSTEM_PROMPT_OVERRIDE=true 才启用（编码 IDE / Agent 保留自己的提示词）。
 func applyOverride(params map[string]any) {
+	if !SystemPromptOverrideEnabled() {
+		return
+	}
 	override := loadOverrideContent()
 	if override == "" {
 		return
@@ -1450,6 +1503,12 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 
 	if req.MaxTokens == 0 {
 		req.MaxTokens = defaultMaxTokens
+	}
+
+	// combo 别名模型：改写为目标上游模型（anthropicToOpenAI 取 req.Model）
+	if c := resolveCombo(req.Model); c != nil {
+		log.Printf("  anthropic combo %q -> %s model %q", req.Model, c.Platform, c.Target)
+		req.Model = c.Target
 	}
 
 	openAIReq := anthropicToOpenAI(req)

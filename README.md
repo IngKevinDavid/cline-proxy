@@ -211,4 +211,77 @@ Model:    deepseek-v4-flash-free
 
 ---
 
+## 公网容器部署（Docker）
+
+面向公网长期运行：`/v1` 是唯一对外服务面（给 Cursor / ZCode / OpenClaw 等客户端），管理面板只用于配置和维护。
+
+### 1. 必填环境变量
+
+监听非回环地址时以下两项缺一不可，否则进程拒绝启动（fail closed）：
+
+| 变量 | 说明 |
+|---|---|
+| `API_KEY` | `/v1/*` 的唯一有效 key（`Authorization: Bearer` 或 `x-api-key`）。设置后管理面板生成的动态 key 全部失效 |
+| `ADMIN_PASSWORD` | 管理面板登录密码；也可用 `ADMIN_PASSWORD_FILE` 指向 secrets 文件 |
+
+在 `.env` 文件中提供（compose 会读取）：
+
+```
+API_KEY=你的固定key
+ADMIN_PASSWORD=你的管理密码
+ZEN_KEYS=key1,key2,key3        # 可选：opencode zen 多 key，逗号分隔
+POOL_STRATEGY=round_robin      # 默认值，可不填
+LOG_REQUESTS=true              # 默认值，可不填
+```
+
+启动：
+
+```bash
+docker compose up -d --build
+curl http://127.0.0.1:3457/health
+```
+
+### 2. 全部环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `PORT` | `3457` | 监听端口（显式 `-port` flag 优先于环境变量） |
+| `DATA_DIR` | 容器内 `/app/data` | 全部状态文件的目录 |
+| `API_KEY` | 空 | `/v1` 固定 key；为空时沿用管理面板动态 key（本地模式） |
+| `ADMIN_PASSWORD` / `ADMIN_PASSWORD_FILE` | 空 | 管理面板密码；设置后 `/admin/*` 全部需要登录 |
+| `REQUIRE_ADMIN_AUTH` | `true` | `false` 豁免公网无密码运行检查（如反代已做认证） |
+| `POOL_STRATEGY` | `round_robin` | cline 账号池策略（`round_robin`/`fill`/`random`），环境变量覆盖面板配置 |
+| `LOG_REQUESTS` | `true` | 请求日志开关（仅元数据：IP/路径/模型/状态/耗时，不含对话内容）；`false` 完全关闭 |
+| `LOG_FILE_MAX_MB` | `10` | `requests.jsonl` 大小上限，超出清空 |
+| `APPLY_SYSTEM_PROMPT_OVERRIDE` | `false` | `true` 才启用 `override.md` 系统提示词替换（编码 IDE / Agent 默认保留自己的提示词） |
+| `ZEN_KEYS` | 空 | opencode zen 多 key（逗号分隔）；面板已有 key 配置时不覆盖 |
+| `CLINE_ACCOUNTS_SEED_FILE` | 空 | 账号种子 JSON（`[{"refreshToken":"...","email":"..."}]`），池为空时启动自动导入 |
+
+### 3. 账号与多 key 轮转（round-robin）
+
+- **cline 账号池**：多个账号按 round-robin（默认）轮流承接请求，单账号限流/超额自动冷却并跳过，冷却到期自动恢复，最大化总免费额度。
+- **opencode zen 多 key**：管理面板「opencode 免费模型」页可填多个 key（每行一个），或用 `ZEN_KEYS` 环境变量注入；请求按 round-robin 轮转，某 key 触发 429/限流时立即冷却并切换下一个 key 重试。
+
+### 4. Combos（别名模型）
+
+管理面板「Combos」页可创建自定义别名模型（如 `cline-glm-5.3`）：客户端请求该别名，代理自动改写为所选平台的目标模型。严格同平台：cline combo 只能选 cline 模型，zen combo 只能选 zen 免费模型。别名会出现在 `/v1/models` 列表中，Cursor / ZCode / OpenClaw 可直接选用。
+
+### 5. 管理面板认证
+
+设置 `ADMIN_PASSWORD` 后访问 `/admin/` 出现登录页；登录后以 HttpOnly Cookie 保持会话（7 天）。脚本调用可用登录响应中的 token：`Authorization: Bearer <token>`。登录限流：每 IP 每分钟 5 次失败上限。
+
+### 6. TLS 与备份
+
+- **TLS**：compose 内置可选 Caddy profile（自动 HTTPS）。取消 `docker-compose.yml` 中 caddy 段的注释，`.env` 加 `DOMAIN=你的域名`，然后 `docker compose --profile tls up -d`。Caddyfile 示例：
+
+  ```
+  你的域名 {
+      reverse_proxy cline-proxy:3457
+  }
+  ```
+
+- **备份/恢复**：全部状态在 `data/` 卷内（`.cline-accounts.json`、`.zen-config.json`、`combos.json`、`requests.jsonl`）。迁移 = 拷贝目录；或用管理面板导出账号 JSON。
+
+---
+
 感谢 [LINUX DO](https://linux.do) 社区

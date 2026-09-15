@@ -45,39 +45,50 @@ func writeAPI(w http.ResponseWriter, status int, resp apiResponse) {
 }
 
 func registerAdminRoutes(mux *http.ServeMux) {
+	// 管理面板认证：ADMIN_PASSWORD 设置后所有 /admin/*（含静态页与全部 API）
+	// 需要会话凭证；登录/登出端点本身豁免。corsHandler 在外层保证 OPTIONS
+	// 预检在认证前短路。
+	auth := adminAuthMiddleware
+	mux.HandleFunc("/admin/api/login", corsHandler(handleAdminLogin))
+	mux.HandleFunc("/admin/api/logout", corsHandler(handleAdminLogout))
+	// 静态页自行区分认证状态：未认证返回独立登录页，认证后返回完整面板
+	//（数据全部由下方带 auth 的 API 提供，面板 HTML 本身不含敏感信息）
 	mux.HandleFunc("/admin/", adminStaticHandler)
-	mux.HandleFunc("/admin/api/accounts", corsHandler(handleAdminAccounts))
-	mux.HandleFunc("/admin/api/accounts/add", corsHandler(handleAdminAccountAdd))
-	mux.HandleFunc("/admin/api/accounts/delete", corsHandler(handleAdminAccountDelete))
-	mux.HandleFunc("/admin/api/accounts/test", corsHandler(handleAdminAccountTest))
-	mux.HandleFunc("/admin/api/oauth/start", corsHandler(handleOAuthStart))
-	mux.HandleFunc("/admin/api/oauth/status", corsHandler(handleOAuthStatus))
-	mux.HandleFunc("/admin/api/sso/import", corsHandler(handleSSOImport))
-	mux.HandleFunc("/admin/api/stats", corsHandler(handleAdminStats))
-	mux.HandleFunc("/admin/api/batch-import", corsHandler(handleBatchImport))
-	mux.HandleFunc("/admin/api/accounts/refresh-all", corsHandler(handleAdminRefreshAll))
-	mux.HandleFunc("/admin/api/accounts/delete-all", corsHandler(handleAdminDeleteAll))
-	mux.HandleFunc("/admin/api/accounts/reset", corsHandler(handleAdminAccountReset))
-	mux.HandleFunc("/admin/api/accounts/export", corsHandler(handleAccountsExport))
-	mux.HandleFunc("/admin/api/logs", corsHandler(handleRequestLogs))
-	mux.HandleFunc("/admin/api/keys", corsHandler(handleAdminGetKeys))
-	mux.HandleFunc("/admin/api/keys/generate", corsHandler(handleAdminGenerateKey))
-	mux.HandleFunc("/admin/api/keys/delete", corsHandler(handleAdminDeleteKey))
-	mux.HandleFunc("/admin/api/models", corsHandler(handleAdminModels))
-	mux.HandleFunc("/admin/api/models/refresh", corsHandler(handleAdminModelsRefresh))
-	mux.HandleFunc("/admin/api/config", corsHandler(handleAdminConfig))
-	mux.HandleFunc("/admin/api/config/update", corsHandler(handleAdminUpdateConfig))
-	mux.HandleFunc("/admin/api/opencode/config", corsHandler(handleZenConfig))
-	mux.HandleFunc("/admin/api/opencode/config/update", corsHandler(handleZenConfigUpdate))
-	mux.HandleFunc("/admin/api/opencode/models", corsHandler(handleZenModels))
-	mux.HandleFunc("/admin/api/opencode/models/refresh", corsHandler(handleZenModelsRefresh))
-	mux.HandleFunc("/admin/api/opencode/stats", corsHandler(handleZenStats))
+	mux.HandleFunc("/admin/api/accounts", corsHandler(auth(handleAdminAccounts)))
+	mux.HandleFunc("/admin/api/accounts/add", corsHandler(auth(handleAdminAccountAdd)))
+	mux.HandleFunc("/admin/api/accounts/delete", corsHandler(auth(handleAdminAccountDelete)))
+	mux.HandleFunc("/admin/api/accounts/test", corsHandler(auth(handleAdminAccountTest)))
+	mux.HandleFunc("/admin/api/oauth/start", corsHandler(auth(handleOAuthStart)))
+	mux.HandleFunc("/admin/api/oauth/status", corsHandler(auth(handleOAuthStatus)))
+	mux.HandleFunc("/admin/api/sso/import", corsHandler(auth(handleSSOImport)))
+	mux.HandleFunc("/admin/api/stats", corsHandler(auth(handleAdminStats)))
+	mux.HandleFunc("/admin/api/batch-import", corsHandler(auth(handleBatchImport)))
+	mux.HandleFunc("/admin/api/accounts/refresh-all", corsHandler(auth(handleAdminRefreshAll)))
+	mux.HandleFunc("/admin/api/accounts/delete-all", corsHandler(auth(handleAdminDeleteAll)))
+	mux.HandleFunc("/admin/api/accounts/reset", corsHandler(auth(handleAdminAccountReset)))
+	mux.HandleFunc("/admin/api/accounts/export", corsHandler(auth(handleAccountsExport)))
+	mux.HandleFunc("/admin/api/logs", corsHandler(auth(handleRequestLogs)))
+	mux.HandleFunc("/admin/api/keys", corsHandler(auth(handleAdminGetKeys)))
+	mux.HandleFunc("/admin/api/keys/generate", corsHandler(auth(handleAdminGenerateKey)))
+	mux.HandleFunc("/admin/api/keys/delete", corsHandler(auth(handleAdminDeleteKey)))
+	mux.HandleFunc("/admin/api/models", corsHandler(auth(handleAdminModels)))
+	mux.HandleFunc("/admin/api/models/refresh", corsHandler(auth(handleAdminModelsRefresh)))
+	mux.HandleFunc("/admin/api/config", corsHandler(auth(handleAdminConfig)))
+	mux.HandleFunc("/admin/api/config/update", corsHandler(auth(handleAdminUpdateConfig)))
+	mux.HandleFunc("/admin/api/combos", corsHandler(auth(handleCombosList)))
+	mux.HandleFunc("/admin/api/combos/create", corsHandler(auth(handleComboCreate)))
+	mux.HandleFunc("/admin/api/combos/delete", corsHandler(auth(handleComboDelete)))
+	mux.HandleFunc("/admin/api/opencode/config", corsHandler(auth(handleZenConfig)))
+	mux.HandleFunc("/admin/api/opencode/config/update", corsHandler(auth(handleZenConfigUpdate)))
+	mux.HandleFunc("/admin/api/opencode/models", corsHandler(auth(handleZenModels)))
+	mux.HandleFunc("/admin/api/opencode/models/refresh", corsHandler(auth(handleZenModelsRefresh)))
+	mux.HandleFunc("/admin/api/opencode/stats", corsHandler(auth(handleZenStats)))
 	// 旧 zen 路径别名,兼容旧引用
-	mux.HandleFunc("/admin/api/zen/config", corsHandler(handleZenConfig))
-	mux.HandleFunc("/admin/api/zen/config/update", corsHandler(handleZenConfigUpdate))
-	mux.HandleFunc("/admin/api/zen/models", corsHandler(handleZenModels))
-	mux.HandleFunc("/admin/api/zen/models/refresh", corsHandler(handleZenModelsRefresh))
-	mux.HandleFunc("/admin/api/zen/stats", corsHandler(handleZenStats))
+	mux.HandleFunc("/admin/api/zen/config", corsHandler(auth(handleZenConfig)))
+	mux.HandleFunc("/admin/api/zen/config/update", corsHandler(auth(handleZenConfigUpdate)))
+	mux.HandleFunc("/admin/api/zen/models", corsHandler(auth(handleZenModels)))
+	mux.HandleFunc("/admin/api/zen/models/refresh", corsHandler(auth(handleZenModelsRefresh)))
+	mux.HandleFunc("/admin/api/zen/stats", corsHandler(auth(handleZenStats)))
 	mux.HandleFunc("/admin/zen/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusFound)
 	})
@@ -85,7 +96,18 @@ func registerAdminRoutes(mux *http.ServeMux) {
 
 func adminStaticHandler(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/admin/" || r.URL.Path == "/admin" {
+		// 配置了密码且未认证时只返回独立登录页，不暴露面板 HTML
+		if AdminAuthRequired() && !verifySessionToken(sessionFromRequest(r)) {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-Frame-Options", "DENY")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(adminLoginPageHTML))
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(adminHTML))
 		return

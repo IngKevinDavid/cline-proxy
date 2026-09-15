@@ -225,6 +225,7 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 <div class="nav-item" data-tab="settings"><span class="nav-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg></span> 代理设置</div>
 <div class="nav-item" data-tab="logs"><span class="nav-ico"><svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg></span> 请求日志</div>
 <div class="nav-item" data-tab="opencode"><span class="nav-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14.5 14.5 0 0 1 0 18 14.5 14.5 0 0 1 0-18z"/></svg></span> opencode 免费模型</div>
+<div class="nav-item" data-tab="combos"><span class="nav-ico"><svg viewBox="0 0 24 24"><path d="M8 3v5a4 4 0 0 1-4 4 4 4 0 0 1 4 4v5M16 3v5a4 4 0 0 0 4 4 4 4 0 0 0-4 4v5"/></svg></span> Combos</div>
 <div class="sidebar-footer">
   <div>管理面板: <a href="/admin/">/admin/</a></div>
   <div>API 地址: <span id="footerApiAddr">http://127.0.0.1:3457</span></div>
@@ -479,6 +480,28 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 </div>
 </div>
 
+<div id="tab-combos" class="tab-panel" style="display:none">
+<h2>Combos（自定义别名模型）</h2>
+<div class="section">
+  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span> 创建 Combo</div>
+  <div class="section-body">
+    <div class="hint" style="margin-bottom:10px">客户端请求 model 填别名 ID，代理会按所选平台改写为目标模型。别名 ID 由你自定义（如 <code>cline-glm-5.3</code>），不能与真实模型 ID 冲突；只能选择所属平台自己的模型，不允许跨平台。</div>
+    <div class="form-row">
+      <div class="field"><label>别名 ID</label><input type="text" id="comboId" placeholder="cline-glm-5.3"></div>
+      <div class="field"><label>平台</label>
+        <select id="comboPlatform" onchange="fillComboModels()"><option value="cline">cline</option><option value="zen">opencode zen</option></select>
+      </div>
+      <div class="field" style="flex:2"><label>目标模型（仅限所选平台）</label><select id="comboTarget"></select></div>
+    </div>
+    <button class="btn btn-primary" onclick="createCombo()">创建 Combo</button>
+  </div>
+</div>
+<div class="section">
+  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg></span> 已有 Combos</div>
+  <div class="section-body" id="combosList">加载中...</div>
+</div>
+</div>
+
 <div id="tab-opencode" class="tab-panel" style="display:none">
 <h2>opencode 免费模型（统一网关）</h2>
 
@@ -489,8 +512,9 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
       <div class="field"><label>启用 opencode 上游</label>
         <select id="ocEnabled"><option value="true">开启</option><option value="false">关闭</option></select>
       </div>
-      <div class="field"><label>API Key</label><input type="text" id="ocKey" placeholder="public"></div>
+      <div class="field" style="flex:2"><label>API Keys（每行一个，round-robin 轮转，429 自动冷却切换）</label><textarea id="ocKeys" rows="3" placeholder="public"></textarea></div>
     </div>
+    <div class="hint" id="ocKeyStates" style="margin-bottom:8px"></div>
     <div class="form-row">
       <div class="field"><label>Base URL</label><input type="text" id="ocBaseURL" placeholder="https://opencode.ai/zen/v1"></div>
       <div class="field"><label>代理策略</label>
@@ -635,6 +659,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.tab === 'settings') { loadKeys(); loadModels(); loadConfig(); }
     if (el.dataset.tab === 'logs') loadLogs();
     if (el.dataset.tab === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); }
+    if (el.dataset.tab === 'combos') { loadCombos(); fillComboModels(); }
   });
 });
 
@@ -649,6 +674,7 @@ function switchTab(name) {
   if (name === 'settings') { loadKeys(); loadModels(); }
   if (name === 'logs') loadLogs();
   if (name === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); }
+  if (name === 'combos') { loadCombos(); fillComboModels(); }
 }
 
 // 导入子标签
@@ -666,6 +692,7 @@ async function api(method, path, body) {
   const opts = { method, headers: {} };
   if (body) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
   const res = await fetch(API + path, opts);
+  if (res.status === 401 && path !== '/login') { location.reload(); return new Promise(() => {}); }
   const data = await res.json();
   if (!data.success && data.error) throw new Error(data.error);
   return data;
@@ -1133,7 +1160,11 @@ async function loadOcConfig() {
     const d = await api('GET', '/opencode/config');
     const c = d.data;
     _('ocEnabled').value = String(c.enabled);
-    _('ocKey').value = c.key || 'public';
+    _('ocKeys').value = (c.keys && c.keys.length ? c.keys : [c.key || 'public']).join('\n');
+    const ks = c.keyStates || [];
+    _('ocKeyStates').textContent = ks.length
+      ? ks.map(k => '#' + (k.index + 1) + ' ' + k.keyMask + ' · 调用 ' + (k.usage || 0) + ' 次' + (k.cooling ? ' · 冷却中' : '') + (k.current ? ' · 下一个' : '')).join('  |  ')
+      : '';
     _('ocBaseURL').value = c.baseURL || '';
     _('ocProxies').value = (c.proxies || []).join('\n');
     _('ocStrategy').value = c.proxyStrategy || 'round_robin';
@@ -1164,9 +1195,11 @@ async function saveOcConfig() {
   const PROXY_RE = /^(https?|socks5h?):\/\/[^\s]+:\d+/;
   const bad = proxies.find(p => !PROXY_RE.test(p));
   if (bad) { toast('代理格式无效: ' + bad + '（需 http(s)://host:port 或 socks5://host:port）', 'error'); return; }
+  const keys = _('ocKeys').value.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!keys.length) { toast('API Keys 不能为空（无 key 时填 public）', 'error'); return; }
   const body = {
     enabled: _('ocEnabled').value === 'true',
-    key: _('ocKey').value.trim(),
+    keys: _('ocKeys').value.split('\n').map(s => s.trim()).filter(Boolean),
     baseURL: _('ocBaseURL').value.trim(),
     proxies: proxies,
     proxyStrategy: _('ocStrategy').value,
@@ -1198,6 +1231,67 @@ async function loadOcModels() {
       models.map(m => '<tr><td style="text-align:left;font-family:monospace">' + esc(m.id) + '</td><td>' + m.context + '</td><td>' + m.output + '</td><td>' + m.source + '</td></tr>').join('') +
       '</tbody></table></div><div class="hint">共 ' + models.length + ' 个免费模型（每 10 分钟自动同步）</div>';
   } catch (e) { _('ocModelsList').textContent = '加载失败'; }
+}
+
+// ========== Combos（别名模型） ==========
+const comboModels = { cline: [], zen: [] };
+
+async function fillComboModels() {
+  const platform = _('comboPlatform').value;
+  const sel = _('comboTarget');
+  try {
+    if (!comboModels[platform].length) {
+      if (platform === 'cline') {
+        const d = await api('GET', '/models');
+        comboModels.cline = (d.data.models || []).map(m => m.id).filter(Boolean);
+      } else {
+        const d = await api('GET', '/opencode/models');
+        comboModels.zen = (d.data.models || []).map(m => m.id).filter(Boolean);
+      }
+    }
+    if (!comboModels[platform].length) { sel.innerHTML = '<option value="">该平台暂无模型</option>'; return; }
+    sel.innerHTML = comboModels[platform].map(id => '<option value="' + esc(id) + '">' + esc(id) + '</option>').join('');
+  } catch (e) { sel.innerHTML = '<option value="">模型列表加载失败</option>'; }
+}
+
+async function loadCombos() {
+  try {
+    const d = await api('GET', '/combos');
+    const combos = d.data.combos || [];
+    if (!combos.length) { _('combosList').innerHTML = '<div class="hint">暂无 Combo，用上方表单创建。</div>'; return; }
+    _('combosList').innerHTML = '<div class="table-wrap"><table><thead><tr><th style="text-align:left">别名 ID</th><th>平台</th><th style="text-align:left">目标模型</th><th>创建时间</th><th>操作</th></tr></thead><tbody>' +
+      combos.map(c => '<tr>' +
+        '<td style="text-align:left;font-family:monospace;font-weight:600">' + esc(c.id) + '</td>' +
+        '<td><span class="model-tag">' + esc(c.platform === 'zen' ? 'opencode-zen' : 'cline') + '</span></td>' +
+        '<td style="text-align:left;font-family:monospace">' + esc(c.target) + '</td>' +
+        '<td style="font-size:11px">' + (c.createdAt ? new Date(c.createdAt).toLocaleString('zh-CN') : '-') + '</td>' +
+        '<td><button class="btn btn-sm btn-danger" onclick="deleteCombo(\'' + esc(c.id) + '\')">删除</button></td>' +
+      '</tr>').join('') +
+      '</tbody></table></div>';
+  } catch (e) { _('combosList').textContent = '加载失败: ' + e.message; }
+}
+
+async function createCombo() {
+  const id = _('comboId').value.trim();
+  const platform = _('comboPlatform').value;
+  const target = _('comboTarget').value;
+  if (!id) { toast('请输入别名 ID', 'error'); return; }
+  if (!target) { toast('请选择目标模型', 'error'); return; }
+  try {
+    await api('POST', '/combos/create', { id, platform, target });
+    toast('Combo 已创建: ' + id + ' → ' + target, 'success');
+    _('comboId').value = '';
+    loadCombos();
+  } catch (e) { toast('创建失败: ' + e.message, 'error'); }
+}
+
+async function deleteCombo(id) {
+  if (!confirm('删除 Combo ' + id + '？使用该别名的客户端将无法再调用。')) return;
+  try {
+    await api('POST', '/combos/delete', { id });
+    toast('Combo 已删除', 'success');
+    loadCombos();
+  } catch (e) { toast('删除失败: ' + e.message, 'error'); }
 }
 
 async function refreshOcModels() {

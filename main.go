@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -19,6 +21,16 @@ func main() {
 	showList := flag.Bool("list", false, "List all accounts in the pool")
 	startMode := flag.Bool("start", false, "Build, start proxy, and open admin panel in browser")
 	flag.Parse()
+
+	// 配置优先级：显式 flag > 环境变量 > 内置默认值。
+	// PORT 环境变量仅在未显式传 -port 时生效。
+	explicit := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { explicit[f.Name] = true })
+	if !explicit["port"] {
+		if p, err := strconv.Atoi(strings.TrimSpace(os.Getenv("PORT"))); err == nil && p > 0 && p < 65536 {
+			*port = p
+		}
+	}
 
 	if *startMode {
 		buildAndStart(*host, *port)

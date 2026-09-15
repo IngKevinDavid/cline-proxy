@@ -20,6 +20,8 @@ func handleZenConfig(w http.ResponseWriter, r *http.Request) {
 	data := map[string]any{
 		"enabled":         cfg.Enabled,
 		"key":             cfg.Key,
+		"keys":            cfg.Keys,
+		"keyStates":       zenKeyStatus(),
 		"baseURL":         cfg.BaseURL,
 		"proxies":         cfg.Proxies,
 		"proxyStrategy":   cfg.ProxyStrategy,
@@ -54,6 +56,7 @@ func handleZenConfigUpdate(w http.ResponseWriter, r *http.Request) {
 	var patch struct {
 		Enabled         *bool    `json:"enabled"`
 		Key             *string  `json:"key"`
+		Keys            []string `json:"keys"`
 		BaseURL         *string  `json:"baseURL"`
 		Proxies         []string `json:"proxies"`
 		ProxyStrategy   *string  `json:"proxyStrategy"`
@@ -77,6 +80,7 @@ func handleZenConfigUpdate(w http.ResponseWriter, r *http.Request) {
 	next := &zenConfigData{
 		Enabled:         cur.Enabled,
 		Key:             cur.Key,
+		Keys:            cur.Keys,
 		BaseURL:         cur.BaseURL,
 		Proxies:         cur.Proxies,
 		ProxyStrategy:   cur.ProxyStrategy,
@@ -90,8 +94,19 @@ func handleZenConfigUpdate(w http.ResponseWriter, r *http.Request) {
 	if patch.Enabled != nil {
 		next.Enabled = *patch.Enabled
 	}
-	if patch.Key != nil && *patch.Key != "" {
-		next.Key = *patch.Key
+	if patch.Keys != nil {
+		// 多 key 池整体替换；兼容旧单 key 字段（key 非空时视为单元素列表）
+		if len(patch.Keys) == 0 && (patch.Key == nil || *patch.Key == "") {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "keys list is empty"})
+			return
+		}
+		if len(patch.Keys) > 0 {
+			next.Keys = patch.Keys
+		}
+	}
+	if patch.Key != nil && *patch.Key != "" && patch.Keys == nil {
+		// 旧客户端单 key 提交 → 单元素池
+		next.Keys = []string{*patch.Key}
 	}
 	if patch.BaseURL != nil && *patch.BaseURL != "" {
 		next.BaseURL = strings.TrimRight(*patch.BaseURL, "/")

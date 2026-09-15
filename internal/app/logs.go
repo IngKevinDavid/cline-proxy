@@ -28,8 +28,7 @@ type RequestLog struct {
 }
 
 const (
-	maxReqLogs     = 500
-	maxReqLogsFile = 10 << 20 // 10MB 上限，超出后清空落盘文件（内存仍保留最近 500 条）
+	maxReqLogs = 500
 )
 
 var (
@@ -39,8 +38,12 @@ var (
 
 var reqLogsFile = kit.ResolveDataPath("requests.jsonl")
 
-// AppendReqLog 记录一条请求日志：内存环形保留 + 异步追加落盘
+// AppendReqLog 记录一条请求日志：内存环形保留 + 异步追加落盘。
+// LOG_REQUESTS=false 时完全关闭（调用方已跳过，这里兜底）。
 func AppendReqLog(l RequestLog) {
+	if !LogRequestsEnabled() {
+		return
+	}
 	reqLogsMu.Lock()
 	reqLogs = append(reqLogs, l)
 	if len(reqLogs) > maxReqLogs {
@@ -55,7 +58,8 @@ func AppendReqLog(l RequestLog) {
 		}
 		f.Write(append(data, '\n'))
 		f.Close()
-		if st, err := os.Stat(reqLogsFile); err == nil && st.Size() > maxReqLogsFile {
+		// 大小上限（LOG_FILE_MAX_MB，默认 10MB）：超出清空落盘文件（内存仍保留最近 500 条）
+		if st, err := os.Stat(reqLogsFile); err == nil && st.Size() > LogFileMaxBytes() {
 			os.WriteFile(reqLogsFile, nil, 0600)
 		}
 	}()
@@ -68,8 +72,11 @@ func LoadRequestLogs() []RequestLog {
 	return reqLogs
 }
 
-// LoadRequestLogsFromFile 启动时从落盘文件读取尾部记录
+// LoadRequestLogsFromFile 启动时从落盘文件读取尾部记录（日志关闭时跳过）
 func LoadRequestLogsFromFile() {
+	if !LogRequestsEnabled() {
+		return
+	}
 	raw, err := os.ReadFile(reqLogsFile)
 	if err != nil {
 		return
@@ -133,27 +140,35 @@ func (w *statusWriter) Flush() {
 	}
 }
 
-// requestLogMiddleware 记录所有进入代理的请求（API 调用与对话历史）。
+// requestLogMiddleware 记录所有进入代理的请求（API 调用与调用历史）。
+// LOG_REQUESTS=false 时跳过日志，但仍包一层 statusWriter —— 它实现了
+// http.Flusher，SSE 流式响应依赖它透传 Flush。
 func requestLogMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w}
 
-		// 读取请求体提取模型，并放回，避免影响后续处理
+		logEnabled := LogRequestsEnabled()
 		model := ""
-		bodyBytes, _ := io.ReadAll(r.Body)
-		if len(bodyBytes) > 0 {
-			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			var probe struct {
-				Model string `json:"model"`
-			}
-			if json.Unmarshal(bodyBytes, &probe) == nil {
-				model = probe.Model
+		if logEnabled {
+			// 读取请求体提取模型，并放回，避免影响后续处理
+			bodyBytes, _ := io.ReadAll(r.Body)
+			if len(bodyBytes) > 0 {
+				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				var probe struct {
+					Model string `json:"model"`
+				}
+				if json.Unmarshal(bodyBytes, &probe) == nil {
+					model = probe.Model
+				}
 			}
 		}
 
 		next.ServeHTTP(sw, r)
 
+		if !logEnabled {
+			return
+		}
 		if sw.status == 0 {
 			sw.status = http.StatusOK
 		}

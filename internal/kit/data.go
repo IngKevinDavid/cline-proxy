@@ -3,12 +3,19 @@ package kit
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
-// ResolveDataPath 数据文件路径解析：优先 data/ 子目录（可执行文件目录，其次工作目录），
-// 兼容历史根目录存放；均不存在时默认写到 data/ 子目录并自动创建目录。
+// ResolveDataPath 数据文件路径解析：DATA_DIR 环境变量优先（容器部署用），
+// 其次 data/ 子目录（可执行文件目录，其次工作目录），兼容历史根目录存放；
+// 均不存在时默认写到 data/ 子目录并自动创建目录。
 // go run 运行时编译产物在临时目录，此时应回退到工作目录（项目根）的 data/。
 func ResolveDataPath(filename string) string {
+	// DATA_DIR 显式指定时始终使用它（容器场景 volume 挂载点）
+	if dir := strings.TrimSpace(os.Getenv("DATA_DIR")); dir != "" {
+		os.MkdirAll(dir, 0755)
+		return filepath.Join(dir, filename)
+	}
 	exeDir, pwd := "", ""
 	if exe, err := os.Executable(); err == nil {
 		exeDir = filepath.Dir(exe)

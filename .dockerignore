@@ -1,0 +1,26 @@
+# Version control
+.git
+.gitignore
+
+# Local data & secrets — never bake into the image
+data/
+.env
+.cline-accounts.json
+.cline-credentials.json
+.zen-config.json
+combos.json
+.session-secret
+
+# Logs & debug artifacts
+*.log
+capture.go
+capture-logs/
+dist/
+*.out
+
+# Runtime config not needed in the image (opt-in via volume mount)
+override.md
+
+# Docs & CI
+.github/
+TODO.md

@@ -1,0 +1,178 @@
+package app
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"strings"
+)
+
+// 环境变量配置层。优先级：显式命令行 flag > 环境变量 > 内置默认值。
+//
+// 支持的环境变量：
+//
+//	PORT                       监听端口（main.go 中显式 flag 优先）
+//	DATA_DIR                   数据目录（账号池/zen 配置/日志/combos 等，kit.ResolveDataPath）
+//	API_KEY                    /v1 上游代理接口的固定 API key；设置后仅此 key 可调用 /v1/*
+//	ADMIN_PASSWORD             管理面板登录密码；设置后所有 /admin/* 需登录
+//	ADMIN_PASSWORD_FILE        密码文件路径（docker secrets），优先于 ADMIN_PASSWORD
+//	REQUIRE_ADMIN_AUTH         "false" 时允许公网无密码运行（如反代已做认证），默认强制
+//	POOL_STRATEGY              账号池策略 round_robin(默认) / fill / random，覆盖持久化配置
+//	LOG_REQUESTS               请求日志开关，默认 true；"false" 完全关闭（含 body 探测）
+//	LOG_FILE_MAX_MB            requests.jsonl 大写上限 MB，默认 10，超出清空
+//	APPLY_SYSTEM_PROMPT_OVERRIDE  "true" 才启用 override.md 系统提示词替换，默认关闭
+//	ZEN_KEYS                   opencode zen 多 key，逗号分隔，配置为空时注入
+//	CLINE_ACCOUNTS_SEED_FILE   cline 账号种子文件（[{refreshToken,email}] JSON 数组），
+//	                           池为空时启动自动导入
+
+// envStr 读取环境变量并去除首尾空白，未设置或为空返回 ""。
+func envStr(key string) string {
+	return strings.TrimSpace(os.Getenv(key))
+}
+
+// envBool 解析布尔环境变量：1/true/yes/on（大小写不敏感）为 true。
+// 第二个返回值表示变量是否被显式设置。
+func envBool(key string) (bool, bool) {
+	v := strings.ToLower(envStr(key))
+	if v == "" {
+		return false, false
+	}
+	switch v {
+	case "1", "true", "yes", "on":
+		return true, true
+	case "0", "false", "no", "off":
+		return false, true
+	}
+	return false, true
+}
+
+// envInt 解析整数环境变量，无效或未设置返回 (0, false)。
+func envInt(key string) (int, bool) {
+	v := envStr(key)
+	if v == "" {
+		return 0, false
+	}
+	n := 0
+	for _, c := range v {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, true
+}
+
+// envList 解析逗号分隔的环境变量为去空白、去空项的列表。
+func envList(key string) []string {
+	raw := envStr(key)
+	if raw == "" {
+		return nil
+	}
+	out := make([]string, 0, 4)
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// APIKeyEnv 返回 /v1 接口的固定 API key（API_KEY 环境变量），未设置返回 ""。
+func APIKeyEnv() string {
+	return envStr("API_KEY")
+}
+
+// AdminPasswordEnv 解析管理密码：ADMIN_PASSWORD_FILE（docker secrets，整个文件
+// 内容去除首尾空白）优先，其次 ADMIN_PASSWORD。均未设置返回 ""。
+func AdminPasswordEnv() string {
+	if path := envStr("ADMIN_PASSWORD_FILE"); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			if pw := strings.TrimSpace(string(data)); pw != "" {
+				return pw
+			}
+		}
+	}
+	return envStr("ADMIN_PASSWORD")
+}
+
+// ApplyEnvConfig 在包初始化后、启动前应用环境变量到内存配置。
+// 由 StartProxy 在最早期调用。
+func ApplyEnvConfig() {
+	// POOL_STRATEGY 覆盖内存中的账号池策略（该配置本身不落盘，重启即回到默认）
+	if s := envStr("POOL_STRATEGY"); s != "" {
+		switch s {
+		case "round_robin", "fill", "random":
+			proxyConfigMu.Lock()
+			proxyConfig.Strategy = s
+			proxyConfigMu.Unlock()
+		default:
+			fmt.Printf("  WARNING: invalid POOL_STRATEGY %q, using round_robin\n", s)
+		}
+	}
+}
+
+// isLoopbackHost 判断监听 host 是否仅本机可达。
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" || host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
+}
+
+// CheckPublicExposure 公网暴露安全检查（fail closed）：
+// 监听非回环地址时必须设置 API_KEY 与 ADMIN_PASSWORD，否则拒绝启动。
+// REQUIRE_ADMIN_AUTH=false 可显式豁免管理密码检查（例如反代已做认证）。
+func CheckPublicExposure(host string) error {
+	if isLoopbackHost(host) {
+		return nil
+	}
+	if APIKeyEnv() == "" {
+		return fmt.Errorf("refusing to start: listening on %q (public) without API_KEY; "+
+			"set API_KEY env so only your key can call /v1, or bind -host 127.0.0.1 for local use", host)
+	}
+	if AdminPasswordEnv() == "" && !adminAuthExplicitlyDisabled() {
+		return fmt.Errorf("refusing to start: listening on %q (public) without ADMIN_PASSWORD; "+
+			"set ADMIN_PASSWORD env, or REQUIRE_ADMIN_AUTH=false if a reverse proxy handles auth, "+
+			"or bind -host 127.0.0.1 for local use", host)
+	}
+	return nil
+}
+
+func adminAuthExplicitlyDisabled() bool {
+	v, ok := envBool("REQUIRE_ADMIN_AUTH")
+	return ok && !v
+}
+
+// AdminAuthRequired 判断管理面板是否需要登录认证：
+// 设置了 ADMIN_PASSWORD(_FILE) 即启用；未设置时仅本机访问不启用。
+func AdminAuthRequired() bool {
+	return AdminPasswordEnv() != ""
+}
+
+// LogRequestsEnabled LOG_REQUESTS 是否启用，默认 true。
+func LogRequestsEnabled() bool {
+	v, ok := envBool("LOG_REQUESTS")
+	if !ok {
+		return true
+	}
+	return v
+}
+
+// LogFileMaxBytes requests.jsonl 落盘文件大小上限，默认 10MB。
+func LogFileMaxBytes() int64 {
+	if n, ok := envInt("LOG_FILE_MAX_MB"); ok && n > 0 {
+		return int64(n) << 20
+	}
+	return 10 << 20
+}
+
+// SystemPromptOverrideEnabled APPLY_SYSTEM_PROMPT_OVERRIDE 是否启用 override.md
+// 系统提示词替换，默认 false（编码 IDE / Agent 保留自己的提示词）。
+func SystemPromptOverrideEnabled() bool {
+	v, _ := envBool("APPLY_SYSTEM_PROMPT_OVERRIDE")
+	return v
+}

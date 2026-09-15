@@ -8,15 +8,26 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o cline-proxy .
 
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata \
+    && addgroup -S app && adduser -S app -G app
+
 WORKDIR /app
 COPY --from=builder /build/cline-proxy .
+
+RUN mkdir -p /app/data && chown -R app:app /app
+
+USER app
 
 EXPOSE 3457
 
 VOLUME ["/app/data"]
 
+# 容器内数据目录固定为 /app/data（可用 DATA_DIR 覆盖）
+ENV DATA_DIR=/app/data
 ENV PORT=3457
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD wget -q -O /dev/null http://127.0.0.1:${PORT}/health || exit 1
+
 ENTRYPOINT ["/app/cline-proxy"]
-CMD ["-port", "3457"]
+CMD []

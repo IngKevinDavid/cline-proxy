@@ -450,6 +450,12 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	chat := responsesToChat(params)
 	chatModel, _ := chat["model"].(string)
+	// combo 别名模型：改写为平台上游真实模型
+	if c := resolveCombo(chatModel); c != nil {
+		log.Printf("  responses combo %q -> %s model %q", chatModel, c.Platform, c.Target)
+		chat["model"] = c.Target
+		chatModel = c.Target
+	}
 	route := routeModel(chatModel)
 	if route == "reject" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{

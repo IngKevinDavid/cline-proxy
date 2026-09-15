@@ -255,8 +255,12 @@ curl http://127.0.0.1:3457/health
 | `LOG_FILE_MAX_MB` | `10` | `requests.jsonl` 大小上限，超出清空 |
 | `APPLY_SYSTEM_PROMPT_OVERRIDE` | `false` | `true` 才启用 `override.md` 系统提示词替换（编码 IDE / Agent 默认保留自己的提示词） |
 | `ZEN_KEYS` | 空 | opencode zen 多 key（逗号分隔）；面板已有 key 配置时不覆盖 |
-| `CLINE_ACCOUNTS_SEED_FILE` | 空 | 账号种子 JSON（`[{"refreshToken":"...","email":"..."}]`），池为空时启动自动导入 |
+| `CLINE_ACCOUNTS_SEED_FILE` | 空 | 账号种子 JSON，池为空时启动自动导入。两种条目：OAuth `[{"refreshToken":"...","email":"..."}]` 或静态 API key `[{"apiToken":"sk_...","email":"..."}]` |
 | `CLINE_USE_PROXIES` | `false` | `true` 时 cline 上游走出口代理池（zen 上游配置 `proxies` 后默认走池） |
+| `MAX_BODY_MB` | `32` | 单请求体上限 MB，超出返回 413 |
+| `STREAM_LOG` | `false` | `true` 才把 Anthropic 流式路径的原始 SSE 落盘（完整对话内容，调试用） |
+| `CLIENT_IP_HEADER` | 空 | 反代部署时信任的客户端 IP 头（如 `X-Real-IP`）；默认只取 RemoteAddr，不信任转发头 |
+| `API_KEY_FILE` | 空 | API key 文件路径（docker secrets），优先于 `API_KEY` |
 
 ### 3. 账号与多 key 轮转（round-robin）
 

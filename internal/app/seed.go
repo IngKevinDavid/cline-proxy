@@ -4,15 +4,16 @@ import (
 	"cline-go-proxy/internal/cline"
 	"cline-go-proxy/internal/kit"
 	"encoding/json"
-	"fmt"
 	"log"
 	"os"
 	"time"
 )
 
 // seedAccountsFromFile 池为空时从 CLINE_ACCOUNTS_SEED_FILE 指定的 JSON 文件导入
-// cline 账号（[{refreshToken,email}] 数组），让容器在全新主机上无需 OAuth 点击即可重建。
-// 逐个校验 refresh token（换新 access token），失败的跳过并记录日志。
+// cline 账号，让容器在全新主机上无需 OAuth 点击即可重建。支持两种条目：
+//   - {"refreshToken": "...", "email": "..."}   OAuth 账号（逐个换新 token 校验）
+//   - {"apiToken": "sk_...", "email": "..."}    静态 API key（直接作为 Bearer，
+//     不刷新不校验；key 被吊销时首次 401 会标记 expired）
 func seedAccountsFromFile() {
 	path := envStr("CLINE_ACCOUNTS_SEED_FILE")
 	if path == "" {
@@ -29,6 +30,7 @@ func seedAccountsFromFile() {
 	}
 	var items []struct {
 		RefreshToken string `json:"refreshToken"`
+		APIToken     string `json:"apiToken"`
 		Email        string `json:"email"`
 	}
 	if err := json.Unmarshal(data, &items); err != nil {
@@ -40,6 +42,24 @@ func seedAccountsFromFile() {
 	}
 	added := 0
 	for _, item := range items {
+		email := item.Email
+		if email == "" {
+			email = "seeded_" + kit.RandHex(4)
+		}
+		acc := &Account{
+			AccountID: "acc_" + kit.RandHex(8),
+			Email:     email,
+			Status:    "active",
+			CreatedAt: time.Now(),
+		}
+		if item.APIToken != "" {
+			// 静态 API key 账号：无 refresh token，token 即凭证
+			acc.APIToken = item.APIToken
+			addAccount(acc)
+			log.Printf("  seed account added (api key): %s", email)
+			added++
+			continue
+		}
 		if item.RefreshToken == "" {
 			continue
 		}
@@ -48,19 +68,9 @@ func seedAccountsFromFile() {
 			log.Printf("  seed account skipped (invalid refreshToken): %v", err)
 			continue
 		}
-		email := item.Email
-		if email == "" {
-			email = fmt.Sprintf("seeded_%d", time.Now().UnixMilli())
-		}
-		acc := &Account{
-			AccountID:    "acc_" + kit.RandHex(8),
-			Email:        email,
-			RefreshToken: item.RefreshToken,
-			AccessToken:  "workos:" + resp.Data.AccessToken,
-			ExpiresAt:    clineExpiryMs(resp.Data.ExpiresAt),
-			Status:       "active",
-			CreatedAt:    time.Now(),
-		}
+		acc.RefreshToken = item.RefreshToken
+		acc.AccessToken = "workos:" + resp.Data.AccessToken
+		acc.ExpiresAt = clineExpiryMs(resp.Data.ExpiresAt)
 		if resp.Data.RefreshToken != "" {
 			acc.RefreshToken = resp.Data.RefreshToken
 		}

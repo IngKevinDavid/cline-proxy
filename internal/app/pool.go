@@ -180,6 +180,16 @@ var (
 )
 
 func doRefreshAccountToken(acc *Account) error {
+	if acc.APIToken != "" {
+		// 静态 key 无刷新能力 —— 只有在 key 被上游拒绝（401）后才会走到这里，
+		// 直接判失效，不再发无意义的刷新请求
+		poolMu.Lock()
+		acc.Status = "expired"
+		acc.LastReason = "api key rejected upstream (static key cannot refresh)"
+		savePoolLocked()
+		poolMu.Unlock()
+		return fmt.Errorf("static api key account cannot refresh")
+	}
 	resp, err := cline.RefreshClineToken(acc.RefreshToken)
 	if err != nil {
 		poolMu.Lock()
@@ -278,6 +288,10 @@ func pickAccount() *Account {
 }
 
 func ensureAccountToken(acc *Account) (string, error) {
+	// 静态 API key 账号：token 即凭证，永不过期、永不刷新
+	if acc.APIToken != "" {
+		return acc.APIToken, nil
+	}
 	if acc.AccessToken != "" && time.Now().UnixMilli() < acc.ExpiresAt {
 		return acc.AccessToken, nil
 	}

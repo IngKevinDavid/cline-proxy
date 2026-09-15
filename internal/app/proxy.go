@@ -70,8 +70,9 @@ func StartProxy(host string, port int) error {
 	activeCount := 0
 	for _, a := range p.Accounts {
 		if a.Status == "active" {
-			// Try to pre-warm tokens
-			if a.AccessToken == "" || time.Now().UnixMilli() >= a.ExpiresAt {
+			// 预热 token：APIToken 账号 token 恒有效（ensureAccountToken 直接返回），
+			// OAuth 账号仅在缺失/过期时刷新
+			if a.APIToken == "" && (a.AccessToken == "" || time.Now().UnixMilli() >= a.ExpiresAt) {
 				if err := refreshAccountToken(a); err != nil {
 					log.Printf("  Pre-warm failed for %s: %v", a.Email, err)
 					continue

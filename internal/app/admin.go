@@ -165,6 +165,7 @@ func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		RefreshToken string `json:"refreshToken"`
+		APIToken     string `json:"apiToken"`
 		Email        string `json:"email"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -172,8 +173,36 @@ func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.RefreshToken == "" {
-		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "refreshToken is required"})
+	if req.RefreshToken == "" && req.APIToken == "" {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "refreshToken or apiToken is required"})
+		return
+	}
+
+	// 静态 API key 账号（sk_...）：直接入池，不做校验调用（首次使用时验证，
+	// 被吊销的 key 会在 401 时自动标记 expired）
+	if req.APIToken != "" {
+		email := req.Email
+		if email == "" {
+			email = "apikey_" + kit.RandHex(3)
+		}
+		acc := &Account{
+			AccountID: "acc_" + kit.RandHex(8),
+			Email:     email,
+			APIToken:  req.APIToken,
+			Status:    "active",
+			CreatedAt: time.Now(),
+		}
+		addAccount(acc)
+		log.Printf("API-key account added: %s", email)
+		writeAPI(w, http.StatusOK, apiResponse{
+			Success: true,
+			Message: fmt.Sprintf("API-key account %s added", email),
+			Data: map[string]any{
+				"accountId": acc.AccountID,
+				"email":     acc.Email,
+				"kind":      "api_key",
+			},
+		})
 		return
 	}
 
@@ -1129,10 +1158,17 @@ func handleAccountsExport(w http.ResponseWriter, r *http.Request) {
 	p := loadPool()
 	items := make([]map[string]any, 0, len(p.Accounts))
 	for _, a := range p.Accounts {
-		items = append(items, map[string]any{
-			"refreshToken": a.RefreshToken,
-			"email":        a.Email,
-		})
+		item := map[string]any{
+			"email": a.Email,
+		}
+		// 两类账号都能完整导出：OAuth 账号带 refreshToken（可直接回导入），
+		// 静态 key 账号带 apiToken —— 导入端两者都认
+		if a.APIToken != "" {
+			item["apiToken"] = a.APIToken
+		} else {
+			item["refreshToken"] = a.RefreshToken
+		}
+		items = append(items, item)
 	}
 	data, _ := json.MarshalIndent(items, "", "  ")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

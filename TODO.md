@@ -191,3 +191,32 @@ combo from zen's list — cross-platform selection must be impossible).
 - [ ] Change admin password from the UI (hash in data/, overrides env).
 - [ ] Per-key/per-account usage dashboard improvements; zen key cooldown display.
 - [ ] Multi-arch images (arm64) via GitHub Actions.
+
+## M9 — Hardening round 1 (2026-09-15, done)
+
+Full-codebase audit (3 parallel review passes: proxy/zen core, protocol
+conversion, admin/auth/deploy) then patch of all confirmed findings.
+Commit `5b60cc3`. Highlights:
+
+- [x] Request body cap (MAX_BODY_MB=32) + 413 before handlers; envBool
+      fail-closed; admin keys from crypto/rand; wildcard CORS removed from
+      /admin/api/*; esc() quote-safe + data-attr event sinks; oauthSessions
+      and loginFails lifecycle; config update copy-on-write.
+- [x] callClineAPI rebuilds request per attempt (retry loops reused the
+      consumed body); account refresh single-flight + only 400/401/403
+      expires an account; token-expiry parse failure falls back to 55min
+      TTL; cooldowns capped 24h; mid-stream errors surface as 500.
+- [x] Anthropic/Responses translators: real usage passthrough, parallel
+      tool calls, deterministic tool order, orphaned tool-message guards
+      in compaction, temperature=0 / stop_sequences no longer dropped.
+- [x] Graceful shutdown (SIGTERM, 10s drain); Dockerfile go.sum; CI vet
+      gate; cline upstream UA + crypto-random session IDs; auth JSON
+      client 60s timeout; .env gitignored; raw SSE dump (STREAM_LOG)
+      default off.
+
+Known deferred (low risk, revisit if needed):
+- zen-stats.jsonl still grows unbounded (aggregate-rewrite idea).
+- Dead credentials subsystem in internal/cline/auth.go (GetToken /
+  LoadCredentials) — delete or mutex-guard before ever reusing.
+- main.go "already running" detection is Windows-only; releases auto-tag
+  every push to main.

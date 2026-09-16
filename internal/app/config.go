@@ -213,3 +213,15 @@ func ClineUseProxiesEnv() bool {
 	v, _ := envBool("CLINE_USE_PROXIES")
 	return v
 }
+
+// StrictModelMatchEnv STRICT_MODEL_MATCH 控制未知模型名的处理（默认 true）：
+// 开启时对既不在免费模型表也不是 zen 模型的名字返回 400；关闭时沿用旧行为，
+// 静默回退到默认模型 —— IDE 配错模型名时会拿到"另一个模型"的 200 响应，
+// 排查成本极高，因此默认显式报错。
+func StrictModelMatchEnv() bool {
+	v, ok := envBool("STRICT_MODEL_MATCH")
+	if ok {
+		return v
+	}
+	return true
+}

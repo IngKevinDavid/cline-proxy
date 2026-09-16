@@ -620,6 +620,13 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// cline 上游
+	// 未知模型名显式拒绝（与 chat 路径一致），不做静默替换
+	if msg := strictModelGate(chatModel); msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": map[string]string{"message": msg, "type": "invalid_request_error"},
+		})
+		return
+	}
 	stream := isStream
 	if !isStream && modelNeedsStream(normalizeRequestModel(chatModel)) {
 		stream = true

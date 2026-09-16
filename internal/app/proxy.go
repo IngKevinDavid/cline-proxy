@@ -271,6 +271,14 @@ func StartProxy(host string, port int) error {
 			return
 		}
 
+		// 走到这说明是 cline 路由：未知模型名显式拒绝，而不是静默替换成默认模型
+		if msg := strictModelGate(model); msg != "" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error": map[string]string{"message": msg, "type": "invalid_request_error"},
+			})
+			return
+		}
+
 		upstreamStream := isStream
 		if !isStream {
 			model := getDefaultModel()
@@ -324,6 +332,7 @@ func StartProxy(host string, port int) error {
 				usageFn(u)
 			}
 			out = normalizeOpenAIResponse(out)
+			truncateAtStopSequences(out, stopSequencesFrom(params))
 			contentStr, _ := getNested(out, "choices", 0, "message", "content").(string)
 			finishReason := getNested(out, "choices", 0, "finish_reason")
 			log.Printf("  nonstream (aggregated): model=%v content_len=%d finish=%v",
@@ -332,7 +341,7 @@ func StartProxy(host string, port int) error {
 			return
 		}
 
-		handleNonStreamResponseWithUsage(w, resp, usageFn)
+		handleNonStreamResponseWithUsage(w, resp, usageFn, stopSequencesFrom(params))
 	})
 	mux.HandleFunc("/v1/chat/completions", chatHandler)
 	mux.HandleFunc("/chat/completions", chatHandler)
@@ -524,7 +533,7 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 		tracker.finish(true, resp.StatusCode)
 		return
 	}
-	handleNonStreamResponseWithUsage(w, resp, usageFn)
+	handleNonStreamResponseWithUsage(w, resp, usageFn, nil)
 	tracker.finish(true, resp.StatusCode)
 }
 
@@ -951,7 +960,7 @@ func handleStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Respons
 	}
 }
 
-func handleNonStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Response, onUsage func(map[string]any)) {
+func handleNonStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Response, onUsage func(map[string]any), stops []string) {
 	var raw map[string]any
 	if err := json.NewDecoder(upstream.Body).Decode(&raw); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -975,6 +984,7 @@ func handleNonStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Resp
 	}
 
 	out = normalizeOpenAIResponse(out)
+	truncateAtStopSequences(out, stops)
 
 	if msg, ok := getNested(out, "choices", 0, "message").(map[string]any); ok {
 		tc, _ := msg["tool_calls"].([]any)
@@ -985,6 +995,59 @@ func handleNonStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Resp
 	}
 
 	writeJSON(w, http.StatusOK, out)
+}
+
+// stopSequencesFrom 从客户端请求中提取 stop 序列（OpenAI 允许 string 或 string[]）。
+func stopSequencesFrom(params map[string]any) []string {
+	var stops []string
+	switch v := params["stop"].(type) {
+	case string:
+		if v != "" {
+			stops = append(stops, v)
+		}
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				stops = append(stops, s)
+			}
+		}
+	}
+	return stops
+}
+
+// truncateAtStopSequences 在网关侧兜底执行 OpenAI 语义的 stop 截断：
+// cline 上游对 stop 的执行不可靠（实测时而不截断、时而整体吞掉内容），
+// 因此对非流式响应在返回前做确定性截断（截到最早出现的 stop 序列之前）。
+// 流式透传路径不做缓冲截断，避免破坏 SSE 的逐块转发。
+func truncateAtStopSequences(out map[string]any, stops []string) {
+	if len(stops) == 0 {
+		return
+	}
+	choices, ok := out["choices"].([]any)
+	if !ok || len(choices) == 0 {
+		return
+	}
+	choice, ok := choices[0].(map[string]any)
+	if !ok {
+		return
+	}
+	msg, ok := choice["message"].(map[string]any)
+	if !ok {
+		return
+	}
+	content, ok := msg["content"].(string)
+	if !ok || content == "" {
+		return
+	}
+	cut := -1
+	for _, s := range stops {
+		if i := strings.Index(content, s); i >= 0 && (cut < 0 || i < cut) {
+			cut = i
+		}
+	}
+	if cut >= 0 {
+		msg["content"] = content[:cut]
+	}
 }
 
 func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
@@ -1713,6 +1776,14 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// cline 路由：未知模型名显式拒绝（与 chat 路径一致）
+	if msg := strictModelGate(req.Model); msg != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error": map[string]string{"message": msg, "type": "invalid_request_error"},
+		})
+		return
+	}
+
 	activeCount := 0
 	p := loadPool()
 	for _, a := range p.Accounts {
@@ -1766,6 +1837,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 			usageFn(u)
 		}
 		out = normalizeOpenAIResponse(out)
+		truncateAtStopSequences(out, stopSequencesFrom(openAIReq))
 		anthropicResp := openAIToAnthropic(out)
 		if tc, ok := getNested(out, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
 			anthropicResp["stop_reason"] = "tool_use"
@@ -1791,6 +1863,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	out = normalizeOpenAIResponse(out)
+	truncateAtStopSequences(out, stopSequencesFrom(openAIReq))
 	anthropicResp := openAIToAnthropic(out)
 
 	if tc, ok := getNested(out, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {

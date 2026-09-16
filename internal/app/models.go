@@ -234,6 +234,34 @@ func normalizeRequestModel(id string) string {
 	return getDefaultModel()
 }
 
+func modelInFreeList(id string) bool {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return true
+	}
+	initModelsCache()
+	modelsMu.Lock()
+	_, ok := modelsCache[id]
+	modelsMu.Unlock()
+	return ok
+}
+
+// strictModelGate STRICT_MODEL_MATCH 开启时，对既不在 cline 免费模型表、
+// 也不是 zen 模型的名字返回错误提示；空串表示放行。zen 模型必须放行：
+// zen 故障转移时会把 zen 免费模型路由到 cline 池，由 normalizeRequestModel
+// 兜底为默认模型 —— 这是故障转移的既有机制。combo 别名由调用方先改写。
+func strictModelGate(model string) string {
+	if !StrictModelMatchEnv() || modelInFreeList(model) {
+		return ""
+	}
+	initZenModels()
+	if _, ok := resolveZenModel(model); ok {
+		return ""
+	}
+	return fmt.Sprintf("model %q is not available on this gateway (see /v1/models for the model list). "+
+		"Set STRICT_MODEL_MATCH=false to fall back to the default model instead", model)
+}
+
 func apiModelList() []map[string]any {
 	out := make([]map[string]any, 0, len(modelsCache))
 	for _, m := range getFreeModels() {

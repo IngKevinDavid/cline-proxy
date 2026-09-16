@@ -608,10 +608,12 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 			if ctx.Err() != nil {
 				return nil, rateLimited, fmt.Errorf("client aborted: %w", err)
 			}
-			// 死代理: 短冷却该出口,下一次尝试自动切换到其他代理
+			// 隧道层失败才冷却出口: 拨号/握手/连接被重置。冷却从 5m 缩到 2m ——
+			// 上游过载时 CF 重置连接的表现与死代理相同,5~10 分钟的冷却会让
+			// 几次慢模型测试就毒化整个池;2 分钟仍能跳过真死代理,又快速自愈。
 			if pidx >= 0 {
-				cooldownUpstreamProxy(pidx, 5*time.Minute)
-				log.Printf("  zen proxy failed (%v), cooldown exit %s", err, viaProxy)
+				cooldownUpstreamProxy(pidx, 2*time.Minute)
+				log.Printf("  zen proxy failed (%v), cooldown exit %s for 2m", err, viaProxy)
 			}
 			// 网络错误:退避重试(不计入故障转移,瞬时可恢复);ctx 取消时中断等待
 			if attempt < retries {
@@ -635,15 +637,10 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 
 		if isRateLimited(resp.StatusCode, bodyBytes) {
 			rateLimited++
-			// 冷却当前出口代理
-			if pidx >= 0 {
-				d := parseRetryAfter(resp.Header.Get("Retry-After"))
-				if d <= 0 {
-					d = 10 * time.Minute
-				}
-				cooldownUpstreamProxy(pidx, d)
-				log.Printf("  zen rate limited (%d), proxy cooldown %v", resp.StatusCode, d)
-			}
+			// 不冷却出口代理: 代理成功送达了 HTTP 响应,它没有故障。限流是 zen
+			// 对 key/身份/IP 组合的判定,把出口毒化 10 分钟只会让上游繁忙期
+			// (慢模型 503/429)把整个池打瘫;下一次尝试的轮转自然换到下一出口,
+			// key 冷却 + 轮转已足够分摊负载。
 			// 冷却当前 key；若还有其他未冷却 key 则立即切换重试（不睡眠）
 			rl := parseRetryAfter(resp.Header.Get("Retry-After"))
 			cooldownZenKey(key, rl)

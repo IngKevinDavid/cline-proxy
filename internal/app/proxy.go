@@ -720,8 +720,10 @@ func callClineAPI(ctx context.Context, params map[string]any, stream bool, usePr
 			return nil, acc, fmt.Errorf("client aborted: %w", lastErr)
 		}
 		if useProxies {
-			cooldownUpstreamProxy(pidx, 5*time.Minute)
-			log.Printf("  cline proxy failed (%v), cooldown exit, retrying on next", lastErr)
+			// 隧道层失败才冷却,且只冷 2 分钟: 上游过载也会表现为连接重置,
+			// 长冷却会让几次慢请求毒化整个池;2 分钟能跳过真死代理又快速自愈
+			cooldownUpstreamProxy(pidx, 2*time.Minute)
+			log.Printf("  cline proxy failed (%v), cooldown exit 2m, retrying on next", lastErr)
 			continue
 		}
 		// 直连网络错误：临时短冷却 5 分钟

@@ -25,15 +25,18 @@ type ZenModel struct {
 	Source  string   `json:"source"` // seed=内置 / synced=动态同步
 }
 
+// zenSeedModels 内置免费模型种子：仅收录 zen /v1/models 当前在线的免费模型。
+// 曾在此但已从上游下线的模型（ling-3.0-flash-free / longcat-2.0-free /
+// north-mini-code-free / laguna-s-2.1-free / big-pickle）已移除——syncZenModels
+// 会同步上游在线列表并修剪掉线下模型，种子只作为首次启动/同步失败的兜底。
 var zenSeedModels = []ZenModel{
-	{"deepseek-v4-flash-free", []string{"deepseek-v4-flash", "deepseek-v4"}, 200000, 128000, "seed"},
 	{"mimo-v2.5-free", []string{"mimo-v2.5", "mimo"}, 200000, 32000, "seed"},
-	{"ling-3.0-flash-free", []string{"ling-3.0-flash", "ling"}, 200000, 32768, "seed"},
 	{"nemotron-3-ultra-free", []string{"nemotron-3-ultra", "nemotron"}, 1000000, 128000, "seed"},
-	{"north-mini-code-free", []string{"north-mini-code", "north-mini"}, 256000, 64000, "seed"},
-	{"laguna-s-2.1-free", []string{"laguna-s-2.1", "laguna"}, 200000, 32768, "seed"},
-	{"longcat-2.0-free", []string{"longcat-2.0", "longcat"}, 200000, 32768, "seed"},
-	{"big-pickle", nil, 200000, 32000, "seed"},
+	{"nemotron-3.5-lightning-free", []string{"nemotron-3.5-lightning", "nemotron-lightning"}, 200000, 32768, "seed"},
+	{"ling-3.0-flash-fin-free", []string{"ling-3.0-flash-fin", "ling-fin", "ling"}, 200000, 32768, "seed"},
+	{"deepseek-v4-flash-free", []string{"deepseek-v4-flash", "deepseek-v4"}, 200000, 128000, "seed"},
+	{"muse-spark-1.3-contributor-free", []string{"muse-spark-contributor"}, 200000, 32768, "seed"},
+	{"muse-spark-1.2-contributor-free", []string{"muse-spark"}, 200000, 32768, "seed"},
 }
 
 var (
@@ -751,11 +754,13 @@ func syncZenModels() (int, error) {
 	zenModelsMu.Lock()
 	defer zenModelsMu.Unlock()
 	added := 0
+	live := make(map[string]bool, len(payload.Data))
 	for _, item := range payload.Data {
 		id := item.ID
 		if id == "" {
 			continue
 		}
+		live[id] = true
 		if _, ok := zenModels[id]; ok {
 			continue
 		}
@@ -771,6 +776,18 @@ func syncZenModels() (int, error) {
 			Source:  "synced",
 		}
 		added++
+	}
+	// 修剪已从上游下线的 synced 模型，避免 /v1/models 长期展示死模型。
+	// 种子模型是手工维护的兜底，不在修剪范围内。
+	pruned := 0
+	for id, m := range zenModels {
+		if m.Source == "synced" && !live[id] {
+			delete(zenModels, id)
+			pruned++
+		}
+	}
+	if pruned > 0 {
+		log.Printf("zen model sync: pruned %d model(s) no longer on upstream feed", pruned)
 	}
 	return added, nil
 }

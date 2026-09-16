@@ -131,6 +131,7 @@ func syncRecommendedModels() (int, error) {
 	modelsMu.Lock()
 	defer modelsMu.Unlock()
 
+	live := make(map[string]bool, len(payload.Free))
 	added := 0
 	for _, m := range payload.Free {
 		id := m.ID
@@ -138,6 +139,7 @@ func syncRecommendedModels() (int, error) {
 		if i := indexByte(id, '/'); i >= 0 {
 			provider = id[:i]
 		}
+		live[id] = true
 		if cached, ok := modelsCache[id]; ok {
 			cached.Source = "free"
 			cached.Cost = "free"
@@ -162,8 +164,32 @@ func syncRecommendedModels() (int, error) {
 		added++
 	}
 
+	// 修剪已从官方 feed 下线的模型，避免 /v1/models 长期展示死模型。
+	// 种子模型是手工维护的启动兜底，不在修剪范围内（与 zen 修剪语义一致）。
+	pruned := 0
+	for id := range modelsCache {
+		if !live[id] && !isClineSeedModel(id) {
+			delete(modelsCache, id)
+			pruned++
+		}
+	}
+	if pruned > 0 {
+		log.Printf("model sync: pruned %d model(s) no longer on official feed", pruned)
+	}
+
 	modelsLastSync = time.Now()
 	return added, nil
+}
+
+// isClineSeedModel 判断模型是否为内置种子候选（seedModelCandidates 的 ID）。
+// 种子条目 Source 与同步条目同为 "free"，只能按 ID 集合识别。
+func isClineSeedModel(id string) bool {
+	for _, m := range seedModelCandidates() {
+		if m.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func indexByte(s string, b byte) int {

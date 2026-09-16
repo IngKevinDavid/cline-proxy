@@ -530,6 +530,7 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 	}
 	delete(body, "reasoning_effort")
 	delete(body, "reasoningEffort")
+	enforceToolChoiceNone(body)
 	return body
 }
 

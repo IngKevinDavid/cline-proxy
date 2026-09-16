@@ -58,6 +58,15 @@ func responsesInputToMessages(input any) []any {
 			if !ok {
 				continue
 			}
+			// 无 type 字段但带 role+content 的条目是合法的 Responses 输入
+			//（OpenAI 同时接受简写形态）；缺失该分支会导致 messages 为空，
+			// 上游 400 "specify prompt or messages"
+			if m["type"] == nil {
+				if role, ok := m["role"].(string); ok && role != "" {
+					msgs = append(msgs, map[string]any{"role": role, "content": stringifyResponsesContent(m["content"])})
+				}
+				continue
+			}
 			switch m["type"] {
 			case "message":
 				role, _ := m["role"].(string)
@@ -421,19 +430,23 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, onUsa
 							if call.outIdx < 0 && call.name != "" {
 								emitCallAdded(call)
 							}
-							if a, ok := fn["arguments"].(string); ok && a != "" {
-								call.args.WriteString(a)
-								if call.outIdx >= 0 {
-									itemID := "fc_" + call.id
-									if call.id == "" {
-										itemID = "fc_" + call.name
+							// 空字符串分片必须整体跳过（否则序列化成字面量 ""
+							// 拼进参数，得到坏 JSON），见 collectStreamResponse 同注
+							if a, ok := fn["arguments"].(string); ok {
+								if a != "" {
+									call.args.WriteString(a)
+									if call.outIdx >= 0 {
+										itemID := "fc_" + call.id
+										if call.id == "" {
+											itemID = "fc_" + call.name
+										}
+										s.event("response.function_call_arguments.delta", map[string]any{
+											"type":         "response.function_call_arguments.delta",
+											"item_id":      itemID,
+											"output_index": call.outIdx,
+											"delta":        a,
+										})
 									}
-									s.event("response.function_call_arguments.delta", map[string]any{
-										"type":         "response.function_call_arguments.delta",
-										"item_id":      itemID,
-										"output_index": call.outIdx,
-										"delta":        a,
-									})
 								}
 							} else if aRaw, ok := fn["arguments"]; ok && aRaw != nil {
 								if b, merr := json.Marshal(aRaw); merr == nil {
@@ -484,13 +497,15 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, onUsa
 			}
 			emitCallAdded(call)
 		}
+		// 兜底修复上游偶发的损坏参数后再落事件
+		finalArgs := repairToolArguments(call.args.String())
 		itemID := "fc_" + call.id
 		if call.id == "" {
 			itemID = "fc_" + call.name
 		}
-		s.event("response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "item_id": itemID, "output_index": call.outIdx, "arguments": call.args.String()})
-		s.event("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": call.outIdx, "item": map[string]any{"type": "function_call", "id": itemID, "call_id": call.id, "name": call.name, "arguments": call.args.String(), "status": "completed"}})
-		finalOutput = append(finalOutput, map[string]any{"type": "function_call", "id": itemID, "call_id": call.id, "name": call.name, "arguments": call.args.String(), "status": "completed"})
+		s.event("response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "item_id": itemID, "output_index": call.outIdx, "arguments": finalArgs})
+		s.event("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": call.outIdx, "item": map[string]any{"type": "function_call", "id": itemID, "call_id": call.id, "name": call.name, "arguments": finalArgs, "status": "completed"}})
+		finalOutput = append(finalOutput, map[string]any{"type": "function_call", "id": itemID, "call_id": call.id, "name": call.name, "arguments": finalArgs, "status": "completed"})
 	}
 	// usage 用上游真实值 —— 客户端靠它做上下文与用量估算
 	usageOut := map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}

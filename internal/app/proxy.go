@@ -603,7 +603,20 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 		}
 	}
 
+	enforceToolChoiceNone(body)
+
 	return body
+}
+
+// enforceToolChoiceNone 保证 tool_choice:"none" 的语义。部分上游模型
+// （尤其 zen 免费档）会忽略该指令，仍然输出 tool_call —— 而客户端
+// （IDE）发出 none 时明确表示这一轮不要工具调用。最可靠的做法是
+// 网关侧直接把 tools 从上游请求中移除：模型看不到工具，只能文本回答。
+func enforceToolChoiceNone(body map[string]any) {
+	if tc, ok := body["tool_choice"].(string); ok && tc == "none" {
+		delete(body, "tools")
+		delete(body, "tool_choice")
+	}
 }
 
 func clineHeaders(token, sessionID string) http.Header {
@@ -1049,7 +1062,7 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 					}
 					if idx != toolCallIdx {
 						if curToolCall != nil {
-							curToolCall["function"].(map[string]any)["arguments"] = curArgs.String()
+							curToolCall["function"].(map[string]any)["arguments"] = repairToolArguments(curArgs.String())
 							toolCalls = append(toolCalls, curToolCall)
 						}
 						curToolCall = map[string]any{
@@ -1064,8 +1077,13 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 						if n, ok := fn["name"].(string); ok && n != "" {
 							curToolCall["function"].(map[string]any)["name"] = n
 						}
-						if a, ok := fn["arguments"].(string); ok && a != "" {
-							curArgs.WriteString(a)
+						// cline 上游在工具调用的起始分片发送 "arguments":""（空字符串）。
+						// 空串必须整体跳过：若走对象分支会把空串序列化成字面量 ""
+						// 追加进参数，最终得到 "\"\"\"\"{\"city\":...}" 这样的坏 JSON。
+						if a, ok := fn["arguments"].(string); ok {
+							if a != "" {
+								curArgs.WriteString(a)
+							}
 						} else if aRaw, ok := fn["arguments"]; ok && aRaw != nil {
 							// 某些上游一次性下发完整对象 —— 序列化后追加，不能丢弃
 							if bts, merr := json.Marshal(aRaw); merr == nil {
@@ -1081,7 +1099,7 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 		}
 	}
 	if curToolCall != nil {
-		curToolCall["function"].(map[string]any)["arguments"] = curArgs.String()
+		curToolCall["function"].(map[string]any)["arguments"] = repairToolArguments(curArgs.String())
 		toolCalls = append(toolCalls, curToolCall)
 	}
 
@@ -1364,6 +1382,25 @@ func anthropicToOpenAI(req anthropicReq) map[string]any {
 
 	openAI["messages"] = msgs
 	return openAI
+}
+
+// repairToolArguments 修复上游偶发的损坏 tool arguments（杂散 "" 前缀、
+// 整体被字符串包裹、截断 JSON —— parseToolArgs 注释记录的已知怪癖）。
+// 参数本身合法时原样返回；可修复时重新序列化为规范 JSON 字符串；
+// 修复失败时原样返回（不吞掉上游原始值）。
+func repairToolArguments(args string) string {
+	if args == "" || json.Valid([]byte(args)) {
+		return args
+	}
+	v, err := parseToolArgs(args)
+	if err != nil {
+		return args
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return args
+	}
+	return string(b)
 }
 
 // parseToolArgs 解析工具调用参数 JSON，带容错修复
@@ -2068,10 +2105,13 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 					if name, ok := fn["name"].(string); ok && name != "" {
 						acc.name = name
 					}
-					if args, ok := fn["arguments"].(string); ok && args != "" {
-						acc.args += args
+					// 空字符串分片整体跳过（否则序列化成字面量 "" 拼进参数，见
+					// collectStreamResponse 同注）；非字符串对象序列化后追加
+					if args, ok := fn["arguments"].(string); ok {
+						if args != "" {
+							acc.args += args
+						}
 					} else if argsRaw, ok := fn["arguments"]; ok && argsRaw != nil {
-						// 上游一次性下发完整对象：序列化后追加（覆盖会丢掉之前的分片）
 						if bts, err := json.Marshal(argsRaw); err == nil {
 							acc.args += string(bts)
 						}
@@ -2211,6 +2251,16 @@ func normalizeMessage(msg map[string]any) map[string]any {
 	if tc, ok := out["tool_calls"].([]any); ok && len(tc) > 0 {
 		if out["content"] == nil {
 			out["content"] = ""
+		}
+		// 非流式聚合路径的兜底修复：上游偶发损坏 arguments 在这里恢复
+		for _, t := range tc {
+			if tm, ok := t.(map[string]any); ok {
+				if fn, ok := tm["function"].(map[string]any); ok {
+					if a, ok := fn["arguments"].(string); ok {
+						fn["arguments"] = repairToolArguments(a)
+					}
+				}
+			}
 		}
 	}
 	if c, ok := out["content"].(string); ok {

@@ -1,45 +1,48 @@
-version: "3.9"
-
-# 公网部署必填: API_KEY 与 ADMIN_PASSWORD（否则容器拒绝启动，见 README 公网部署章节）
-# 可在同级目录放 .env 文件提供这些变量的值。
+# Public deployment requires API_KEY and ADMIN_PASSWORD (the container refuses
+# to start otherwise). Provide them in a sibling .env file.
+# PROXY_PORT customizes the listen/mapped port (default 3457).
 services:
   cline-proxy:
     build: .
     container_name: cline-proxy
     restart: unless-stopped
     ports:
-      - "3457:3457"
+      - "${PROXY_PORT:-3457}:${PROXY_PORT:-3457}"
     volumes:
       - ./data:/app/data
-      # 系统提示词覆盖默认关闭（APPLY_SYSTEM_PROMPT_OVERRIDE=false）。
-      # 需要时取消注释并设置环境变量 APPLY_SYSTEM_PROMPT_OVERRIDE=true：
+      # System-prompt override is off by default (APPLY_SYSTEM_PROMPT_OVERRIDE=false).
+      # Uncomment and set APPLY_SYSTEM_PROMPT_OVERRIDE=true to enable:
       # - ./override.md:/app/override.md:ro
     environment:
-      - PORT=3457
-      # /v1 接口唯一 API key（Bearer / x-api-key），公网部署必填
+      # Listen port inside the container (explicit -port flag wins over this)
+      - PORT=${PROXY_PORT:-3457}
+      # The single /v1 API key (Bearer / x-api-key); required for public deployment
       - API_KEY=${API_KEY:?set API_KEY in .env}
-      # 管理面板登录密码，公网部署必填
+      # Admin panel login password; required for public deployment
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
-      # opencode zen 多 key（逗号分隔，可选；也可在管理面板配置）
+      # opencode zen keys, comma-separated (optional; can also be set in the admin panel)
       - ZEN_KEYS=${ZEN_KEYS:-}
-      # 账号池策略，默认 round_robin（可选 fill / random）
+      # Account pool strategy, default round_robin (fill / random)
       - POOL_STRATEGY=${POOL_STRATEGY:-round_robin}
-      # 请求日志开关，默认开启（元数据，10MB 上限自动清空）
+      # Request-log switch, default on (metadata only, 10MB cap auto-wipe)
       - LOG_REQUESTS=${LOG_REQUESTS:-true}
       - LOG_FILE_MAX_MB=${LOG_FILE_MAX_MB:-10}
-      # cline 账号种子文件（池为空时自动导入，可选）
+      # Strict model matching: unknown model names return 400 instead of silently
+      # falling back to the default model (set false to restore the old catch-all)
+      - STRICT_MODEL_MATCH=${STRICT_MODEL_MATCH:-true}
+      # cline account seed file (auto-imported when the pool is empty, optional)
       - CLINE_ACCOUNTS_SEED_FILE=${CLINE_ACCOUNTS_SEED_FILE:-}
-      # cline 上游走出口代理池（zen 配置 proxies 后默认走池；可选）
+      # Route cline upstream through the egress proxy pool (optional)
       - CLINE_USE_PROXIES=${CLINE_USE_PROXIES:-false}
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3457/health"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${PROXY_PORT:-3457}/health"]
       interval: 30s
       timeout: 5s
       start_period: 10s
       retries: 3
 
-  # 可选：Caddy 反向代理自动 HTTPS（公网暴露推荐）。
-  # 取消注释、设置 DOMAIN 并 `docker compose --profile tls up -d`。
+  # Optional: Caddy reverse proxy with automatic HTTPS (recommended for public exposure).
+  # Uncomment, set DOMAIN in .env, then `docker compose --profile tls up -d`.
   # caddy:
   #   image: caddy:2-alpine
   #   container_name: cline-proxy-tls

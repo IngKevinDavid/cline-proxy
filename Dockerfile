@@ -1,10 +1,15 @@
 FROM golang:1.26-alpine AS builder
 
+# BuildKit supplies these on multi-arch builds: cross-compile the Go binary
+# natively on the builder arch instead of running the whole compile under QEMU.
+ARG TARGETOS
+ARG TARGETARCH
+
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o cline-proxy .
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -ldflags="-s -w" -o cline-proxy .
 
 FROM alpine:3.21
 

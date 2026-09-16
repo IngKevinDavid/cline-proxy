@@ -16,10 +16,46 @@ var (
 	poolMu     sync.Mutex
 	poolSaveMu sync.Mutex
 	poolPath   string
+	poolDirty  bool // 热路径变更标记，由后台 flusher 周期落盘
 )
 
 func init() {
 	poolPath = kit.ResolveDataPath(".cline-accounts.json")
+}
+
+// markPoolDirtyLocked 标记池有待落盘变更（调用方必须持有 poolMu）。
+// 热路径（选号/计数）不再每次全量写盘 —— poolMu 是全局锁，磁盘 I/O
+// 会把所有在途请求串行化；后台 flusher 每 2s 补一次写。
+func markPoolDirtyLocked() {
+	poolDirty = true
+}
+
+// startPoolFlusher 启动池文件后台落盘循环；进程退出由 flushPoolNow 兜底。
+func startPoolFlusher() {
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			poolMu.Lock()
+			dirty := poolDirty
+			poolDirty = false
+			poolMu.Unlock()
+			if dirty {
+				savePool()
+			}
+		}
+	}()
+}
+
+// flushPoolNow 立即落盘（优雅停机时调用，防止丢最后 2s 的状态变更）。
+func flushPoolNow() {
+	poolMu.Lock()
+	dirty := poolDirty
+	poolDirty = false
+	poolMu.Unlock()
+	if dirty {
+		savePool()
+	}
 }
 
 // kit.ResolveDataPath 数据文件路径解析：优先可执行文件目录，其次当前工作目录。
@@ -41,6 +77,14 @@ func loadPool() *AccountPool {
 
 	var p AccountPool
 	if err := json.Unmarshal(data, &p); err != nil {
+		// 损坏的池文件绝不能被空池静默覆盖 —— 先把原文件改名留档，
+		// 否则一次崩溃中途写入就会永久丢失全部账号凭证
+		stamp := time.Now().Format("20060102-150405")
+		if renErr := os.Rename(poolPath, poolPath+".corrupt-"+stamp); renErr == nil {
+			log.Printf("SEVERE: account pool file is corrupt JSON; moved to %s.corrupt-%s for manual recovery; starting with an EMPTY pool", poolPath, stamp)
+		} else {
+			log.Printf("SEVERE: account pool file is corrupt JSON (quarantine rename failed: %v); starting with an EMPTY pool", renErr)
+		}
 		pool = &AccountPool{Accounts: []*Account{}, Keys: []string{}}
 		return pool
 	}
@@ -83,6 +127,48 @@ func poolAccountCount() int {
 	return len(p.Accounts)
 }
 
+// poolStatusSnapshot 线程安全地返回 (账号总数, 活跃数) 快照。
+// Status/Accounts 由池锁保护，任何请求路径的读取都必须走这里。
+func poolStatusSnapshot() (total, active int) {
+	total, active, _, _ = poolStatusCounts()
+	return total, active
+}
+
+// poolStatusCounts 线程安全地返回 (总数, active, cooldown, expired) 快照。
+func poolStatusCounts() (total, active, cooldown, expired int) {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	for _, a := range p.Accounts {
+		total++
+		switch a.Status {
+		case "active":
+			active++
+		case "cooldown":
+			cooldown++
+		case "expired":
+			expired++
+		}
+	}
+	return
+}
+
+// poolCurrentIdx 线程安全地读取账号轮转游标。
+func poolCurrentIdx() int {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	return p.CurrentIdx
+}
+
+// poolClineUseProxies 线程安全地读取 cline 走代理池开关。
+func poolClineUseProxies() bool {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	return p.ClineUseProxies
+}
+
 // poolKeysSnapshot 线程安全地返回客户端 API key 列表副本。
 func poolKeysSnapshot() []string {
 	p := loadPool()
@@ -98,13 +184,23 @@ func savePool() {
 }
 
 // savePoolLocked 持久化账号池；调用方必须已经持有 poolMu。
+// 原子写: 先写临时文件再 rename，崩溃中途写入不会留下截断的 JSON。
 func savePoolLocked() {
 	poolSaveMu.Lock()
 	defer poolSaveMu.Unlock()
 
-	data, _ := json.MarshalIndent(pool, "", "  ")
-	if err := os.WriteFile(poolPath, data, 0600); err != nil {
+	data, err := json.MarshalIndent(pool, "", "  ")
+	if err != nil {
+		log.Printf("Failed to marshal accounts: %v", err)
+		return
+	}
+	tmp := poolPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		log.Printf("Failed to save accounts: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, poolPath); err != nil {
+		log.Printf("Failed to save accounts (rename): %v", err)
 	}
 }
 
@@ -161,7 +257,9 @@ func refreshAccountToken(acc *Account) error {
 	refreshFlightMu.Unlock()
 
 	c.err = doRefreshAccountToken(acc)
-	close(c.done)
+	// panic 安全: 中途 panic 也要 close(done)，否则该账号的所有后续
+	// 刷新调用方会永久阻塞在 <-c.done 上
+	defer close(c.done)
 
 	refreshFlightMu.Lock()
 	delete(refreshFlight, acc)
@@ -282,7 +380,7 @@ func pickAccount() *Account {
 		p.CurrentIdx = (p.CurrentIdx + 1) % len(active)
 	}
 
-	savePoolLocked()
+	markPoolDirtyLocked()
 	poolMu.Unlock()
 	return acc
 }
@@ -292,15 +390,23 @@ func ensureAccountToken(acc *Account) (string, error) {
 	if acc.APIToken != "" {
 		return acc.APIToken, nil
 	}
-	if acc.AccessToken != "" && time.Now().UnixMilli() < acc.ExpiresAt {
-		return acc.AccessToken, nil
+	// 快照读: AccessToken/ExpiresAt 由刷新协程在 poolMu 下写入
+	poolMu.Lock()
+	tok := acc.AccessToken
+	exp := acc.ExpiresAt
+	poolMu.Unlock()
+	if tok != "" && time.Now().UnixMilli() < exp {
+		return tok, nil
 	}
 
 	if err := refreshAccountToken(acc); err != nil {
 		return "", err
 	}
 
-	return acc.AccessToken, nil
+	poolMu.Lock()
+	tok = acc.AccessToken
+	poolMu.Unlock()
+	return tok, nil
 }
 
 func ListAccounts() []*Account {
@@ -343,7 +449,7 @@ func ListAccounts() []*Account {
 			LastReason:      a.LastReason,
 		}
 	}
-	savePoolLocked()
+	markPoolDirtyLocked()
 	poolMu.Unlock()
 	return result
 }
@@ -387,7 +493,7 @@ func bumpUsage(acc *Account) {
 	acc.UsageCountToday++
 	acc.UsageCount++
 	acc.LastUsed = now
-	savePoolLocked()
+	markPoolDirtyLocked()
 	poolMu.Unlock()
 }
 
@@ -421,7 +527,7 @@ func recordAccountTokens(acc *Account, tokens int64) {
 	}
 	acc.TokensToday += tokens
 	acc.TokensTotal += tokens
-	savePoolLocked()
+	markPoolDirtyLocked()
 	poolMu.Unlock()
 }
 

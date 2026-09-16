@@ -87,6 +87,7 @@ func StartProxy(host string, port int) error {
 
 	startModelsRefresher()
 	startZenModelsRefresher()
+	startPoolFlusher()
 	initStats()
 	LoadRequestLogsFromFile()
 	go cleanupCompactStates()
@@ -401,6 +402,7 @@ func StartProxy(host string, port int) error {
 		if err := server.Shutdown(ctx); err != nil {
 			return fmt.Errorf("graceful shutdown: %w", err)
 		}
+		flushPoolNow()
 		log.Printf("  shutdown complete")
 		return nil
 	}
@@ -566,13 +568,8 @@ func asInt(v any) int {
 // liveActiveAccountCount /health 的实时活跃账号数（启动时算一次会让
 // 健康检查永远显示旧值）。
 func liveActiveAccountCount() int {
-	live := 0
-	for _, a := range loadPool().Accounts {
-		if a.Status == "active" {
-			live++
-		}
-	}
-	return live
+	_, active := poolStatusSnapshot()
+	return active
 }
 
 func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
@@ -745,24 +742,27 @@ func callClineAPI(ctx context.Context, params map[string]any, stream bool, usePr
 				return nil, acc, fmt.Errorf("create request: %w", cerr)
 			}
 			req2.Header = clineHeaders(token, sessionID)
-			resp, derr := client.Do(req2)
+			// 注意: 不能用 := —— 那会在 if 块内遮蔽外层 resp，重试成功的
+			// 响应被丢弃（body 泄漏）而调用方仍拿到旧的 401
+			resp2, derr := client.Do(req2)
 			if derr != nil {
 				return nil, acc, fmt.Errorf("upstream retry: %w", derr)
 			}
-			if resp.StatusCode == 401 {
-				resp.Body.Close()
+			if resp2.StatusCode == 401 {
+				resp2.Body.Close()
 				poolMu.Lock()
 				acc.Status = "expired"
 				savePoolLocked()
 				poolMu.Unlock()
-				return nil, acc, fmt.Errorf("account %s token expired permanently", acc.Email)
+				return nil, acc, fmt.Errorf("account %s token expired permanently", truncateEmail(acc.Email))
 			}
+			resp = resp2
 		} else {
 			poolMu.Lock()
 			acc.Status = "expired"
 			savePoolLocked()
 			poolMu.Unlock()
-			return nil, acc, fmt.Errorf("account %s refresh failed: %w", acc.Email, err)
+			return nil, acc, fmt.Errorf("account %s refresh failed: %w", truncateEmail(acc.Email), rerr)
 		}
 	}
 
@@ -892,7 +892,12 @@ func handleStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Respons
 		chunkJSON, _ := json.Marshal(chunk)
 		w.Write([]byte("data: " + string(chunkJSON) + "\n\n"))
 
-		// Done chunk
+		// Done chunk —— finish_reason 透传上游真实值（tool_calls/length 等），
+		// 硬编码 "stop" 会让依赖 finish_reason 的客户端误判工具调用回合
+		doneFR := getNested(out, "choices", 0, "finish_reason")
+		if s, ok := doneFR.(string); !ok || s == "" {
+			doneFR = "stop"
+		}
 		doneChunk := map[string]any{
 			"id":      out["id"],
 			"object":  "chat.completion.chunk",
@@ -902,7 +907,7 @@ func handleStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Respons
 				{
 					"index":         0,
 					"delta":         map[string]any{},
-					"finish_reason": "stop",
+					"finish_reason": doneFR,
 				},
 			},
 		}
@@ -1011,18 +1016,40 @@ func handleNonStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Resp
 }
 
 // stopSequencesFrom 从客户端请求中提取 stop 序列（OpenAI 允许 string 或 string[]）。
+// json.RawMessage 也是 string 的底层类型但不能直接断言成 string —— Anthropic
+// 转换路径写入的 stop 就是 RawMessage，漏掉它会让 /v1/messages 的
+// stop_sequences 截断兜底整个失效。
 func stopSequencesFrom(params map[string]any) []string {
 	var stops []string
+	addString := func(s string) {
+		if s != "" {
+			stops = append(stops, s)
+		}
+	}
 	switch v := params["stop"].(type) {
 	case string:
-		if v != "" {
-			stops = append(stops, v)
+		addString(v)
+	case json.RawMessage:
+		var one string
+		if json.Unmarshal(v, &one) == nil {
+			addString(one)
+			break
+		}
+		var many []string
+		if json.Unmarshal(v, &many) == nil {
+			for _, s := range many {
+				addString(s)
+			}
 		}
 	case []any:
 		for _, item := range v {
-			if s, ok := item.(string); ok && s != "" {
-				stops = append(stops, s)
+			if s, ok := item.(string); ok {
+				addString(s)
 			}
+		}
+	case []string:
+		for _, s := range v {
+			addString(s)
 		}
 	}
 	return stops
@@ -1063,16 +1090,21 @@ func truncateAtStopSequences(out map[string]any, stops []string) {
 	}
 }
 
+// toolAccum 流式工具调用累积器（按上游 index 分桶）
+type toolAccum struct {
+	call map[string]any
+	args strings.Builder
+}
+
 func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 	var (
 		model        string
 		content      strings.Builder
 		finishReason string
 		usage        map[string]any
-		toolCalls    []any
-		toolCallIdx  = -1
-		curToolCall  map[string]any
-		curArgs      strings.Builder
+		// 并行工具调用按上游 index 分桶累积（与 chatStreamToResponses 一致），
+		// 上游交错下发 index 0/1/0/1 片段时单桶会互相污染
+		pendingTools = map[int]*toolAccum{}
 	)
 
 	reader := bufio.NewReader(upstream.Body)
@@ -1136,34 +1168,30 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 					if i, ok := tcMap["index"].(float64); ok {
 						idx = int(i)
 					}
-					if idx != toolCallIdx {
-						if curToolCall != nil {
-							curToolCall["function"].(map[string]any)["arguments"] = repairToolArguments(curArgs.String())
-							toolCalls = append(toolCalls, curToolCall)
-						}
-						curToolCall = map[string]any{
+					acc := pendingTools[idx]
+					if acc == nil {
+						acc = &toolAccum{call: map[string]any{
 							"id":       tcMap["id"],
 							"type":     "function",
 							"function": map[string]any{"name": "", "arguments": ""},
-						}
-						curArgs.Reset()
-						toolCallIdx = idx
+						}}
+						pendingTools[idx] = acc
 					}
 					if fn, ok := tcMap["function"].(map[string]any); ok {
 						if n, ok := fn["name"].(string); ok && n != "" {
-							curToolCall["function"].(map[string]any)["name"] = n
+							acc.call["function"].(map[string]any)["name"] = n
 						}
 						// cline 上游在工具调用的起始分片发送 "arguments":""（空字符串）。
 						// 空串必须整体跳过：若走对象分支会把空串序列化成字面量 ""
 						// 追加进参数，最终得到 "\"\"\"\"{\"city\":...}" 这样的坏 JSON。
 						if a, ok := fn["arguments"].(string); ok {
 							if a != "" {
-								curArgs.WriteString(a)
+								acc.args.WriteString(a)
 							}
 						} else if aRaw, ok := fn["arguments"]; ok && aRaw != nil {
 							// 某些上游一次性下发完整对象 —— 序列化后追加，不能丢弃
 							if bts, merr := json.Marshal(aRaw); merr == nil {
-								curArgs.WriteString(string(bts))
+								acc.args.WriteString(string(bts))
 							}
 						}
 					}
@@ -1174,9 +1202,16 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 			break
 		}
 	}
-	if curToolCall != nil {
-		curToolCall["function"].(map[string]any)["arguments"] = repairToolArguments(curArgs.String())
-		toolCalls = append(toolCalls, curToolCall)
+	// 按 index 顺序汇出工具调用
+	toolCalls := make([]any, 0, len(pendingTools))
+	for i := 0; len(pendingTools) > 0; i++ {
+		acc, ok := pendingTools[i]
+		if !ok {
+			break
+		}
+		acc.call["function"].(map[string]any)["arguments"] = repairToolArguments(acc.args.String())
+		toolCalls = append(toolCalls, acc.call)
+		delete(pendingTools, i)
 	}
 
 	message := map[string]any{
@@ -1797,15 +1832,9 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	activeCount := 0
-	p := loadPool()
-	for _, a := range p.Accounts {
-		if a.Status == "active" {
-			activeCount++
-		}
-	}
+	total, activeCount := poolStatusSnapshot()
 
-	if activeCount == 0 && len(p.Accounts) == 0 {
+	if total == 0 && activeCount == 0 {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{
 			"error": map[string]string{
 				"message": "No accounts in pool",
@@ -2074,7 +2103,8 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 			argsObj = filterToolInput(acc.name, inputMap, toolSchemas)
 		}
 		parsed, _ := json.Marshal(argsObj)
-		log.Printf("  tool_use emit: name=%s id=%s input=%s", acc.name, id, string(parsed))
+		// 只记名字/长度: 完整工具入参（文件内容等）不该无条件进日志
+		log.Printf("  tool_use emit: name=%s id=%s input_len=%d", acc.name, id, len(parsed))
 		emit("content_block_start", map[string]any{
 			"type":  "content_block_start",
 			"index": idx,
@@ -2216,6 +2246,7 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 		}
 	}
 
+	var streamErr error
 	reader := bufio.NewReader(upstream.Body)
 
 	for {
@@ -2224,6 +2255,9 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 			processSSELine(line)
 		}
 		if err != nil {
+			if err != io.EOF {
+				streamErr = err
+			}
 			break
 		}
 	}
@@ -2247,6 +2281,18 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 		if acc := pendingTools[i]; !acc.emitted {
 			emitToolBlock(acc)
 		}
+	}
+
+	// 上游中途断流（非 EOF 的真实读错误）: 不能继续伪造 message_delta/end_turn
+	// + message_stop —— 那会把截断的响应当成完整成功消息交给客户端
+	//（Responses 路径对此发 response.failed，这里按 Anthropic 规范发 error 事件）
+	if streamErr != nil {
+		log.Printf("  anthropic stream upstream error: %v", streamErr)
+		emit("error", map[string]any{
+			"type":  "error",
+			"error": map[string]any{"type": "api_error", "message": kit.Truncate("upstream stream interrupted: "+streamErr.Error(), 300)},
+		})
+		return
 	}
 
 	// 上游 usage 透传给 Anthropic 客户端（Claude Code / ZCode 用它做
@@ -2378,7 +2424,13 @@ func getNested(obj map[string]any, keys ...any) any {
 	return current
 }
 
+// freePort 开发便利：Windows 上强杀占用端口的进程。仅当显式设置
+// KILL_PORT_ON_START=true 时启用 —— 默认关闭，生产环境无差别强杀
+// 未知进程是危险的（可能干掉合法持有端口的服务）。
 func freePort(port int) {
+	if v, ok := envBool("KILL_PORT_ON_START"); !ok || !v {
+		return
+	}
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 	if err != nil {

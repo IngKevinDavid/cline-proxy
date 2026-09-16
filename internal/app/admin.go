@@ -145,7 +145,7 @@ func handleAdminAccounts(w http.ResponseWriter, r *http.Request) {
 		Data: map[string]any{
 			"accounts":  accounts,
 			"total":     len(accounts),
-			"poolIndex": loadPool().CurrentIdx,
+			"poolIndex": poolCurrentIdx(),
 		},
 	})
 }
@@ -214,7 +214,7 @@ func handleAdminAccountAdd(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Email == "" {
-		req.Email = fmt.Sprintf("user_%d", len(loadPool().Accounts)+1)
+		req.Email = fmt.Sprintf("user_%d", poolAccountCount()+1)
 	}
 
 	acc := &Account{
@@ -938,14 +938,39 @@ func setProxyConfig(c *proxyConfigData) {
 	proxyConfig = c
 }
 
+// validHeaderName 仅接受 token 字符（字母/数字/连字符），阻止头部注入。
+func validHeaderName(k string) bool {
+	if k == "" {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		c := k[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// validHeaderValue 拒绝 CR/LF 及其他控制字符（可见 ASCII 与空格/制表除外）。
+func validHeaderValue(v string) bool {
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if (c < 0x20 && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 // GET /admin/api/keys
 func handleAdminGetKeys(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
 		return
 	}
-	p := loadPool()
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"keys": p.Keys}})
+	// poolKeysSnapshot: 在池锁内取副本，避免与并发的 key 增删竞态
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{"keys": poolKeysSnapshot()}})
 }
 
 // POST /admin/api/keys/generate
@@ -1020,7 +1045,7 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		"poolPath":        poolPath,
 		"defaultModel":    getDefaultModel(),
 		"headers":         cfg.Headers,
-		"clineUseProxies": loadPool().ClineUseProxies,
+		"clineUseProxies": poolClineUseProxies(),
 	}})
 }
 
@@ -1071,6 +1096,12 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	if req.Headers != nil {
 		for k, v := range req.Headers {
+			// 自定义头最终会被 Set 到上游请求上：注入 CR/LF 或控制字符
+			// 可能造成请求走私，格式不合法直接拒绝
+			if !validHeaderName(k) || !validHeaderValue(v) {
+				writeAPI(w, http.StatusBadRequest, apiResponse{Error: fmt.Sprintf("invalid header %q: name allows letters/digits/hyphen, value must not contain control characters", k)})
+				return
+			}
 			newCfg.Headers[k] = v
 		}
 		changed = true
@@ -1150,27 +1181,16 @@ func handleAdminStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p := loadPool()
-	active, cooldown, expired := 0, 0, 0
-	for _, a := range p.Accounts {
-		switch a.Status {
-		case "active":
-			active++
-		case "cooldown":
-			cooldown++
-		case "expired":
-			expired++
-		}
-	}
+	total, active, cooldown, expired := poolStatusCounts()
 
 	writeAPI(w, http.StatusOK, apiResponse{
 		Success: true,
 		Data: map[string]any{
-			"total":    len(p.Accounts),
+			"total":    total,
 			"active":   active,
 			"cooldown": cooldown,
 			"expired":  expired,
-			"strategy": "round_robin",
+			"strategy": getProxyConfig().Strategy,
 			"version":  "go-1.1",
 		},
 	})
@@ -1183,6 +1203,8 @@ func handleAccountsExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := loadPool()
+	// 池锁内构建导出项：Accounts 元素字段的并发读写由 poolMu 保护
+	poolMu.Lock()
 	items := make([]map[string]any, 0, len(p.Accounts))
 	for _, a := range p.Accounts {
 		item := map[string]any{
@@ -1197,7 +1219,11 @@ func handleAccountsExport(w http.ResponseWriter, r *http.Request) {
 		}
 		items = append(items, item)
 	}
+	poolMu.Unlock()
 	data, _ := json.MarshalIndent(items, "", "  ")
+	// 凭证响应绝不允许被中间层缓存；nosniff 防止 MIME 嗅探误判
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="cline-accounts-export.json"`)
 	w.WriteHeader(http.StatusOK)

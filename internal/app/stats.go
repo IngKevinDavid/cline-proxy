@@ -78,7 +78,7 @@ func (t *zenStatsTracker) finish(ok bool, status int) {
 
 func initStats() {
 	statsFileInit.Do(func() {
-		f, err := os.OpenFile(kit.ResolveDataPath("zen-stats.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		f, err := os.OpenFile(kit.ResolveDataPath("zen-stats.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 		if err != nil {
 			log.Printf("zen stats file open failed: %v", err)
 			return
@@ -166,6 +166,18 @@ func recordZenStats(rec zenStatsRecord) {
 		b, err := json.Marshal(rec)
 		if err == nil {
 			statsFile.Write(append(b, '\n'))
+			// 大小上限（与 requests.jsonl 同一配置）：超出清空重建。
+			// 累计口径在内存聚合里，清文件只影响重启后的重建输入。
+			if st, err := statsFile.Stat(); err == nil && st.Size() > LogFileMaxBytes() {
+				path := statsFile.Name()
+				statsFile.Close()
+				if nf, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600); err == nil {
+					statsFile = nf
+				} else {
+					log.Printf("zen stats file truncate failed: %v", err)
+					statsFile = nil
+				}
+			}
 		}
 	}
 	statsFileMu.Unlock()

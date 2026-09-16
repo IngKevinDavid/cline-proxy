@@ -42,9 +42,26 @@ func responsesToChat(body map[string]any) map[string]any {
 		out["tools"] = responsesToolsToChat(tools)
 	}
 	if tc, ok := body["tool_choice"]; ok {
-		out["tool_choice"] = tc
+		out["tool_choice"] = responsesToolChoiceToChat(tc)
 	}
 	return out
+}
+
+// responsesToolChoiceToChat Responses 的 tool_choice 函数形式是扁平的
+// {"type":"function","name":x}；chat completions 要求嵌套
+// {"type":"function","function":{"name":x}}。具名形式必须转换，否则
+// 上游 400；其余形态（"auto"/"none"/"required"）原样透传。
+func responsesToolChoiceToChat(tc any) any {
+	m, ok := tc.(map[string]any)
+	if !ok {
+		return tc
+	}
+	if t, _ := m["type"].(string); t == "function" {
+		if name, _ := m["name"].(string); name != "" {
+			return map[string]any{"type": "function", "function": map[string]any{"name": name}}
+		}
+	}
+	return tc
 }
 
 func responsesInputToMessages(input any) []any {
@@ -299,6 +316,11 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, onUsa
 	textOutIdx := 0
 	nextOutIdx := 0
 	var outText strings.Builder
+	// 推理内容独立成 output item：reasoning 常先于正文到达，若挂在文本
+	// item 的 index 上，文本 item 尚未 added，客户端收到的是孤儿 delta
+	reasoningEmitted := false
+	reasoningOutIdx := 0
+	var outReasoning strings.Builder
 	calls := map[int]*respCall{}
 	order := []int{}
 	var upUsage map[string]any
@@ -394,10 +416,21 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, onUsa
 				}
 				// 推理
 				if r, ok := delta["reasoning_content"].(string); ok && r != "" {
+					if !reasoningEmitted {
+						reasoningEmitted = true
+						reasoningOutIdx = nextOutIdx
+						nextOutIdx++
+						s.event("response.output_item.added", map[string]any{
+							"type":         "response.output_item.added",
+							"output_index": reasoningOutIdx,
+							"item":         map[string]any{"id": "rs_" + s.msgID, "type": "reasoning", "summary": []any{}},
+						})
+					}
+					outReasoning.WriteString(r)
 					s.event("response.reasoning_summary_text.delta", map[string]any{
 						"type":          "response.reasoning_summary_text.delta",
-						"item_id":       s.msgID,
-						"output_index":  textOutIdx,
+						"item_id":       "rs_" + s.msgID,
+						"output_index":  reasoningOutIdx,
 						"content_index": 0,
 						"delta":         r,
 					})
@@ -480,12 +513,19 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, onUsa
 	}
 
 	// 收尾
+	if reasoningEmitted {
+		s.event("response.reasoning_summary_text.done", map[string]any{"type": "response.reasoning_summary_text.done", "item_id": "rs_" + s.msgID, "output_index": reasoningOutIdx, "content_index": 0, "text": outReasoning.String()})
+		s.event("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": reasoningOutIdx, "item": map[string]any{"id": "rs_" + s.msgID, "type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": outReasoning.String()}}}})
+	}
 	if textEmitted {
 		s.event("response.output_text.done", map[string]any{"type": "response.output_text.done", "item_id": s.msgID, "output_index": textOutIdx, "content_index": 0, "text": outText.String()})
 		s.event("response.content_part.done", map[string]any{"type": "response.content_part.done", "item_id": s.msgID, "output_index": textOutIdx, "content_index": 0, "part": map[string]any{"type": "output_text", "text": outText.String(), "annotations": []any{}}})
 		s.event("response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": textOutIdx, "item": map[string]any{"id": s.msgID, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": outText.String(), "annotations": []any{}}}}})
 	}
 	finalOutput := []any{}
+	if reasoningEmitted {
+		finalOutput = append(finalOutput, map[string]any{"id": "rs_" + s.msgID, "type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": outReasoning.String()}}})
+	}
 	if textEmitted {
 		finalOutput = append(finalOutput, map[string]any{"id": s.msgID, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": outText.String(), "annotations": []any{}}}})
 	}
@@ -676,5 +716,6 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			out = d
 		}
 	}
-	writeJSON(w, http.StatusOK, chatToResponses(out))
+	// 与 zen 路径一致：先归一化再转换，剥掉上游私有字段并保证 choices 结构
+	writeJSON(w, http.StatusOK, chatToResponses(normalizeOpenAIResponse(out)))
 }

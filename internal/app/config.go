@@ -218,7 +218,7 @@ func ClineUseProxiesEnv() bool {
 // 管理面板的持久化开关或 CLINE_USE_PROXIES env 任一开启即启用（env 优先）。
 // 代理列表本身由 zen 配置的 proxies 提供 —— 两个上游共用同一个池。
 func clineProxiesEnabled() bool {
-	return ClineUseProxiesEnv() || loadPool().ClineUseProxies
+	return ClineUseProxiesEnv() || poolClineUseProxies()
 }
 
 // StrictModelMatchEnv STRICT_MODEL_MATCH 控制未知模型名的处理（默认 true）：

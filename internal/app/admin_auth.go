@@ -70,14 +70,26 @@ func loadSessionSecret() []byte {
 	return sessionSecret
 }
 
+// sessionHMACKey 会话签名密钥 = sha256(sessionSecret || adminPassword)。
+// 绑定当前密码：改密码后旧会话令牌全部失效，无需额外清理。
+func sessionHMACKey() []byte {
+	h := sha256.New()
+	h.Write(loadSessionSecret())
+	h.Write([]byte(AdminPasswordEnv()))
+	return h.Sum(nil)
+}
+
 // mintSessionToken 生成 "base64url(payload).hmac" 形式的会话令牌。
-func mintSessionToken() string {
+func mintSessionToken() (string, error) {
 	nonce := make([]byte, 12)
-	rand.Read(nonce)
+	if _, err := rand.Read(nonce); err != nil {
+		// crypto/rand 失败时绝不能签发可预测的会话令牌
+		return "", fmt.Errorf("generate session nonce: %w", err)
+	}
 	payload := fmt.Sprintf("v1|%d|%s", time.Now().Add(sessionTTL).Unix(), hex.EncodeToString(nonce))
-	mac := hmac.New(sha256.New, loadSessionSecret())
+	mac := hmac.New(sha256.New, sessionHMACKey())
 	mac.Write([]byte(payload))
-	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + hex.EncodeToString(mac.Sum(nil))
+	return base64.RawURLEncoding.EncodeToString([]byte(payload)) + "." + hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 // verifySessionToken 校验令牌签名与有效期。
@@ -95,7 +107,7 @@ func verifySessionToken(token string) bool {
 	if err != nil {
 		return false
 	}
-	mac := hmac.New(sha256.New, loadSessionSecret())
+	mac := hmac.New(sha256.New, sessionHMACKey())
 	mac.Write(payload)
 	if subtle.ConstantTimeCompare(sig, mac.Sum(nil)) != 1 {
 		return false
@@ -211,7 +223,15 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	loginRateReset(ip)
-	token := mintSessionToken()
+	token, err := mintSessionToken()
+	if err != nil {
+		writeAPI(w, http.StatusInternalServerError, apiResponse{Error: "session mint failed"})
+		return
+	}
+	// Secure 标记：直连 TLS 或反代(X-Forwarded-Proto: https)都视为 HTTPS。
+	// 该头仅在明文直连时可被伪造，伪造只会让 cookie 变成 https-only，
+	// 不产生任何提权面
+	secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    token,
@@ -219,7 +239,7 @@ func handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   int(sessionTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   r.TLS != nil,
+		Secure:   secure,
 	})
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "logged in", Data: map[string]any{"token": token, "expiresInSeconds": int(sessionTTL.Seconds())}})
 }
@@ -243,11 +263,13 @@ func handleAdminLogout(w http.ResponseWriter, r *http.Request) {
 
 // clientIP 客户端真实 IP：默认取 RemoteAddr（不信任任何请求头，防止
 // 伪造 X-Forwarded-For 绕过登录限流）。反代部署可设 CLIENT_IP_HEADER
-// （如 X-Real-IP 或 X-Forwarded-For），仅在该环境下取该头第一个值。
+// （如 X-Real-IP 或 X-Forwarded-For），取该头最后一个值 —— XFF 链路中
+// 最靠近服务器的代理追加在最右，最右值最难被客户端伪造。
 func clientIP(r *http.Request) string {
 	if h := envStr("CLIENT_IP_HEADER"); h != "" {
 		if v := r.Header.Get(h); v != "" {
-			return strings.TrimSpace(strings.Split(v, ",")[0])
+			parts := strings.Split(v, ",")
+			return strings.TrimSpace(parts[len(parts)-1])
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)

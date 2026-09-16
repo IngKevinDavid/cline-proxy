@@ -37,9 +37,17 @@ var ZenUserAgents = []string{
 	"opencode/latest/1.18.13/desktop",
 }
 
+// mustRand 读满 n 字节加密随机数；crypto/rand 失败说明系统熵源异常，
+// 此时身份/防抖动全部失效，宁可 panic 也不静默使用全零字节。
+func mustRand(b []byte) {
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
+}
+
 func RandHex(n int) string {
 	b := make([]byte, n)
-	rand.Read(b)
+	mustRand(b)
 	return hex.EncodeToString(b)
 }
 
@@ -48,7 +56,7 @@ func RandIntn(n int) int {
 		return 0
 	}
 	b := make([]byte, 4)
-	rand.Read(b)
+	mustRand(b)
 	v := int(b[0])<<24 | int(b[1])<<16 | int(b[2])<<8 | int(b[3])
 	if v < 0 {
 		v = -v

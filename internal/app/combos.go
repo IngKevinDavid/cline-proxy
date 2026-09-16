@@ -45,19 +45,35 @@ func loadCombosLocked() {
 		return
 	}
 	var list []*Combo
-	if json.Unmarshal(data, &list) == nil {
-		for _, c := range list {
-			if c != nil && c.ID != "" && c.Target != "" {
-				combosList = append(combosList, c)
-			}
+	if err := json.Unmarshal(data, &list); err != nil {
+		// 损坏文件改名留档，绝不让后续保存静默覆盖掉（可能可手工恢复的）数据
+		stamp := time.Now().Format("20060102-150405")
+		if renErr := os.Rename(combosPath(), combosPath()+".corrupt-"+stamp); renErr == nil {
+			log.Printf("combos.json is corrupt JSON; moved to combos.json.corrupt-%s", stamp)
+		}
+		return
+	}
+	for _, c := range list {
+		if c != nil && c.ID != "" && c.Target != "" {
+			combosList = append(combosList, c)
 		}
 	}
 }
 
 func saveCombosLocked() {
-	data, _ := json.MarshalIndent(combosList, "", "  ")
-	if err := os.WriteFile(combosPath(), data, 0600); err != nil {
+	data, err := json.MarshalIndent(combosList, "", "  ")
+	if err != nil {
+		log.Printf("combos marshal failed: %v", err)
+		return
+	}
+	// 原子写: 临时文件 + rename，崩溃中途写入不会截断原文件
+	tmp := combosPath() + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		log.Printf("combos save failed: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, combosPath()); err != nil {
+		log.Printf("combos save failed (rename): %v", err)
 	}
 }
 
@@ -149,6 +165,13 @@ func addCombo(id, platform, target string, useProxies bool) (*Combo, error) {
 	combosMu.Lock()
 	defer combosMu.Unlock()
 	loadCombosLocked()
+	// validateCombo 里的存在性检查在 combosMu 之外，并发 addCombo 可能双双通过；
+	// 这里在锁内重查一次，保证同一 ID 只能存在一条
+	for _, e := range combosList {
+		if e.ID == id {
+			return nil, fmt.Errorf("combo id %q already exists", id)
+		}
+	}
 	combosList = append(combosList, c)
 	saveCombosLocked()
 	return c, nil

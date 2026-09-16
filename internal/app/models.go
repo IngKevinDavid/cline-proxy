@@ -166,12 +166,24 @@ func syncRecommendedModels() (int, error) {
 
 	// 修剪已从官方 feed 下线的模型，避免 /v1/models 长期展示死模型。
 	// 种子模型是手工维护的启动兜底，不在修剪范围内（与 zen 修剪语义一致）。
-	pruned := 0
+	// 防御: feed 短暂为空/残缺时不清空本地列表 —— live 数量不足现有可修剪
+	// 模型一半时跳过本轮修剪。
+	pruneEligible := 0
 	for id := range modelsCache {
-		if !live[id] && !isClineSeedModel(id) {
-			delete(modelsCache, id)
-			pruned++
+		if !isClineSeedModel(id) {
+			pruneEligible++
 		}
+	}
+	pruned := 0
+	if len(live) > 0 && len(live)*2 >= pruneEligible {
+		for id := range modelsCache {
+			if !live[id] && !isClineSeedModel(id) {
+				delete(modelsCache, id)
+				pruned++
+			}
+		}
+	} else if pruneEligible > 0 {
+		log.Printf("model sync: live feed too small (%d live vs %d cached), skipping prune", len(live), pruneEligible)
 	}
 	if pruned > 0 {
 		log.Printf("model sync: pruned %d model(s) no longer on official feed", pruned)
@@ -292,15 +304,15 @@ func apiModelList() []map[string]any {
 	out := make([]map[string]any, 0, len(modelsCache))
 	for _, m := range getFreeModels() {
 		out = append(out, map[string]any{
-			"id":         m.ID,
-			"object":     "model",
-			"created":    time.Now().UnixMilli(),
-			"owned_by":   m.Provider,
-			"source":     m.Source,
-			"status":     m.Status,
-			"cost":       m.Cost,
+			"id":             m.ID,
+			"object":         "model",
+			"created":        time.Now().UnixMilli(),
+			"owned_by":       m.Provider,
+			"source":         m.Source,
+			"status":         m.Status,
+			"cost":           m.Cost,
 			"requiresStream": m.RequiresStream,
-			"syncedAt":   m.SyncedAt,
+			"syncedAt":       m.SyncedAt,
 		})
 	}
 	return out

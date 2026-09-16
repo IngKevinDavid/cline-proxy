@@ -240,6 +240,12 @@ func dialViaProxy(ctx context.Context, raw, network, addr string) (net.Conn, err
 		}()
 		select {
 		case <-ctx.Done():
+			// 后台拨号可能已成功: 异步取出并关闭,避免连接泄漏
+			go func() {
+				if r := <-ch; r.c != nil {
+					r.c.Close()
+				}
+			}()
 			return nil, ctx.Err()
 		case r := <-ch:
 			return r.c, r.err
@@ -275,6 +281,18 @@ func dialHTTPProxy(ctx context.Context, u *url.URL, network, addr string) (net.C
 		cred := base64.StdEncoding.EncodeToString([]byte(u.User.String()))
 		req.Header.Set("Proxy-Authorization", "Basic "+cred)
 	}
+	// CONNECT 握手阶段加截止时间: 代理接受 TCP 却不响应 CONNECT 时不能永久
+	// 挂起; 客户端取消(ctx.Done)时同步中断。隧道建立后清除截止,不影响后续使用
+	rawConn.SetDeadline(time.Now().Add(30 * time.Second))
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			rawConn.Close()
+		case <-stop:
+		}
+	}()
 	if err := req.Write(rawConn); err != nil {
 		rawConn.Close()
 		return nil, err
@@ -292,5 +310,6 @@ func dialHTTPProxy(ctx context.Context, u *url.URL, network, addr string) (net.C
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return nil, fmt.Errorf("proxy CONNECT %s: %s %s", u.Host, resp.Status, strings.TrimSpace(string(b)))
 	}
+	rawConn.SetDeadline(time.Time{})
 	return rawConn, nil
 }

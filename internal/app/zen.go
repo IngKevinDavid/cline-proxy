@@ -313,6 +313,11 @@ func loadZenConfig() *zenConfigData {
 	if data, err := os.ReadFile(path); err == nil {
 		fileExists = true
 		if err := json.Unmarshal(data, cfg); err != nil {
+			// 损坏配置改名留档，避免下次保存把可手工恢复的原文覆盖掉
+			stamp := time.Now().Format("20060102-150405")
+			if renErr := os.Rename(path, path+".corrupt-"+stamp); renErr == nil {
+				log.Printf("zen config is corrupt JSON; moved to %s.corrupt-%s", path, stamp)
+			}
 			log.Printf("zen config parse failed: %v", err)
 		}
 	}
@@ -333,9 +338,20 @@ func loadZenConfig() *zenConfigData {
 func saveZenConfig() {
 	zenConfigMu.Lock()
 	defer zenConfigMu.Unlock()
-	data, _ := json.MarshalIndent(zenConfig, "", "  ")
-	if err := os.WriteFile(kit.ResolveDataPath(".zen-config.json"), data, 0600); err != nil {
+	data, err := json.MarshalIndent(zenConfig, "", "  ")
+	if err != nil {
+		log.Printf("zen config marshal failed: %v", err)
+		return
+	}
+	// 原子写: 临时文件 + rename，崩溃中途写入不会截断原文件
+	path := kit.ResolveDataPath(".zen-config.json")
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		log.Printf("zen config save failed: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		log.Printf("zen config save failed (rename): %v", err)
 	}
 }
 
@@ -348,6 +364,7 @@ func getZenConfig() *zenConfigData {
 func setZenConfig(c *zenConfigData) {
 	normalizeZenKeys(c)
 	zenConfigMu.Lock()
+	old := zenConfig
 	zenConfig = c
 	zenConfigMu.Unlock()
 	saveZenConfig()
@@ -371,6 +388,40 @@ func setZenConfig(c *zenConfigData) {
 	}
 	zenKeyIdx = 0
 	zenKeyMu.Unlock()
+	// 代理列表变化时: 索引会位移,按索引记录的冷却整体失效,直接清空;
+	// 同时驱逐已移除代理的钉定客户端,释放其空闲连接
+	if proxiesChanged(old.Proxies, c.Proxies) {
+		zenProxyCooldownsMu.Lock()
+		zenProxyCooldowns = map[int]time.Time{}
+		zenProxyCooldownsMu.Unlock()
+	}
+	validProxy := map[string]bool{"": true}
+	for _, p := range c.Proxies {
+		validProxy[p] = true
+	}
+	proxyClientCacheMu.Lock()
+	for u, cl := range proxyClientCache {
+		if !validProxy[u] {
+			delete(proxyClientCache, u)
+			if cl != nil {
+				cl.CloseIdleConnections()
+			}
+		}
+	}
+	proxyClientCacheMu.Unlock()
+}
+
+// proxiesChanged 按顺序比较两个代理列表是否不同（数量或任一位置变化都算）。
+func proxiesChanged(a, b []string) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return true
+		}
+	}
+	return false
 }
 
 // validateProxyList 校验代理列表格式: 支持 http/https/socks5/socks5h, 必须包含 host:port。
@@ -429,15 +480,24 @@ func pickZenKey() string {
 		k := keys[idx]
 		if _, cooling := zenKeyCool[k]; !cooling {
 			zenKeyIdx = (idx + 1) % len(keys)
-			zenKeyUsage[k]++
 			return k
 		}
 	}
 	// 全部冷却中：仍按轮转返回（保持请求流动，上游会再次限流）
 	k := keys[zenKeyIdx%len(keys)]
 	zenKeyIdx = (zenKeyIdx + 1) % len(keys)
-	zenKeyUsage[k]++
 	return k
+}
+
+// markZenKeySuccess 在上游 200 后累计 key 的成功调用数（仅内存态，面板展示用）。
+// 计数放在成功路径而非选取路径，失败重试才不会虚增用量。
+func markZenKeySuccess(key string) {
+	if key == "" {
+		return
+	}
+	zenKeyMu.Lock()
+	zenKeyUsage[key]++
+	zenKeyMu.Unlock()
 }
 
 // cooldownZenKey 将 key 置为冷却，冷却期内 round-robin 跳过它。
@@ -627,6 +687,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 			return nil, rateLimited, fmt.Errorf("zen request: %w", err)
 		}
 		if resp.StatusCode == http.StatusOK {
+			markZenKeySuccess(key)
 			markZenSuccess()
 			return resp, rateLimited, nil
 		}
@@ -776,12 +837,24 @@ func syncZenModels() (int, error) {
 	}
 	// 修剪已从上游下线的 synced 模型，避免 /v1/models 长期展示死模型。
 	// 种子模型是手工维护的兜底，不在修剪范围内。
-	pruned := 0
-	for id, m := range zenModels {
-		if m.Source == "synced" && !live[id] {
-			delete(zenModels, id)
-			pruned++
+	// 防御: 上游短暂返回空表/残表(网关抖动、接口变更)时不得清空本地列表 ——
+	// live 数量不足现有 synced 一半时跳过本轮修剪。
+	syncedCount := 0
+	for _, m := range zenModels {
+		if m.Source == "synced" {
+			syncedCount++
 		}
+	}
+	pruned := 0
+	if len(live) > 0 && len(live)*2 >= syncedCount {
+		for id, m := range zenModels {
+			if m.Source == "synced" && !live[id] {
+				delete(zenModels, id)
+				pruned++
+			}
+		}
+	} else if syncedCount > 0 {
+		log.Printf("zen model sync: live feed too small (%d live vs %d synced), skipping prune", len(live), syncedCount)
 	}
 	if pruned > 0 {
 		log.Printf("zen model sync: pruned %d model(s) no longer on upstream feed", pruned)

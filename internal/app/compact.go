@@ -224,8 +224,11 @@ func generateSummary(modelID, prompt string, maxSummary int) (string, error) {
 		"max_tokens": maxSummary,
 		"stream":     false,
 	}
-	// 后台摘要生成与客户端请求无关,用独立 context,不受客户端 abort 影响
-	resp, _, err := callZenAPI(context.Background(), body, false)
+	// 后台摘要生成与客户端请求无关,用独立 context,不受客户端 abort 影响。
+	// 必须带超时: 上游连接挂起时否则永久占住请求与 zen 并发槽位
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	resp, _, err := callZenAPI(ctx, body, false)
 	if err != nil {
 		return "", err
 	}
@@ -268,19 +271,16 @@ func estimateJSON(v any) int {
 
 // ============ 会话状态 ============
 
+// loadCompactState 只读查询会话压缩状态；不存在返回 nil（不插入）。
+// 插入只发生在 updateCompactState —— 防止客户端伪造海量 session ID
+// 把 compactStates 撑爆（条目只在真正压缩过的会话上创建）。
 func loadCompactState(sessionID string) *compactState {
 	if sessionID == "" {
 		return nil
 	}
 	compactStatesMu.Lock()
 	defer compactStatesMu.Unlock()
-	st := compactStates[sessionID]
-	if st != nil {
-		return st
-	}
-	st = &compactState{}
-	compactStates[sessionID] = st
-	return st
+	return compactStates[sessionID]
 }
 
 func updateCompactState(sessionID string, summary, recent string) {
@@ -382,14 +382,23 @@ func maybeCompact(params map[string]any, m *ZenModel, sessionID string) compactO
 	// 尾部不能以 tool 结果消息开头 —— 它对应的 assistant tool_calls 消息
 	// 在被丢弃的头部里，OpenAI 方言上游会 400 拒绝；compaction 对同一会话
 	// 是确定性的，不修正会变成每次重试都失败的死循环
-	for sel.split > 0 {
+	// 注意: sel.split == len(orig) 是合法状态 —— 最后一条消息本身超预算被
+	// 拆分，recent 没有完整原始消息（尾部全部进了摘要），索引前必须判界
+	for sel.split > 0 && sel.split < len(orig) {
 		mm, ok := messages[orig[sel.split]].(map[string]any)
 		if !ok || strField(mm, "role") != "tool" {
 			break
 		}
 		sel.split--
 	}
-	if sel.split <= 0 {
+	hasTail := sel.split > 0 && sel.split < len(orig)
+	tailOrig := 0
+	if hasTail {
+		tailOrig = orig[sel.split]
+	} else {
+		sel.split = len(orig)
+	}
+	if !hasTail && len(sel.head) == 0 {
 		return compactOutcome{}
 	}
 	sel.recent = append([]string{}, serialized[sel.split:]...)
@@ -403,7 +412,7 @@ func maybeCompact(params map[string]any, m *ZenModel, sessionID string) compactO
 		previousRecent = st.recent
 	}
 	if previousSummary == "" {
-		previousSummary = findExistingSummary(messages, orig[sel.split])
+		previousSummary = findExistingSummary(messages, tailOrig)
 	}
 
 	head := strings.Join(sel.head, "\n\n")
@@ -445,13 +454,19 @@ func maybeCompact(params map[string]any, m *ZenModel, sessionID string) compactO
 	})
 	// 旧摘要已由 buildSummaryPrompt 合并进新摘要，这里不再重复注入
 	//（重复注入会在每次 compact 后浪费真实上下文）
-	newMsgs = append(newMsgs, messages[orig[sel.split]:]...)
+	if hasTail {
+		newMsgs = append(newMsgs, messages[tailOrig:]...)
+	}
 
 	updateCompactState(sessionID, summary, strings.Join(sel.recent, "\n\n"))
 	params["messages"] = newMsgs
+	kept := 0
+	if hasTail {
+		kept = len(messages) - tailOrig
+	}
 	return compactOutcome{
 		changed:       true,
-		note:          fmt.Sprintf("[compacted via summary] summary_model=%s kept=%d msgs", summaryModel, len(messages)-orig[sel.split]),
+		note:          fmt.Sprintf("[compacted via summary] summary_model=%s kept=%d msgs", summaryModel, kept),
 		compactTokens: estimateText(prompt) + estimateText(summary),
 	}
 }

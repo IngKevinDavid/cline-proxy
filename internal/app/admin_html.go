@@ -750,7 +750,8 @@ async function loadStats() {
     _('statCooldown').textContent = s.cooldown;
     _('statExpired').textContent = s.expired;
     if (s.version) _('settingVersion').value = s.version;
-    if (s.strategy) _('settingStrategy').value = s.strategy;
+    // 策略下拉由 /config 加载填写（loadConfig），统计刷新不回写表单，
+    // 避免把用户正在编辑的选项覆盖掉
   } catch (e) { /* ignore */ }
 }
 
@@ -774,9 +775,10 @@ async function loadAccounts() {
         const until = a.cooldownUntil ? new Date(a.cooldownUntil).toLocaleString('en-US') : '';
         statusExtra = until ? '<div style="font-size:10px;color:var(--text3);margin-top:2px">Recovers ' + esc(until) + '</div>' : '';
       }
+      const st = esc(a.status);
       return '<tr>' +
         '<td>' + esc(a.email) + '</td>' +
-        '<td><span class="status ' + a.status + '"><span class="status-dot ' + a.status + '"></span>' + (sn[a.status] || a.status) + '</span>' + statusExtra + '</td>' +
+        '<td><span class="status ' + st + '"><span class="status-dot ' + st + '"></span>' + (sn[a.status] || st) + '</span>' + statusExtra + '</td>' +
           '<td title="Today ' + fmtNum(a.tokensToday) + ' / total ' + fmtNum(a.tokensTotal) + ' tokens (exact when upstream returns usage, otherwise estimated)">' + fmtTokens(a.tokensToday) + ' / ' + fmtTokens(a.tokensTotal) + '</td>' +
         '<td class="mono" style="font-size:11px">' + lu + '</td>' +
         '<td class="mono" style="font-size:11px">' + cr + '</td>' +
@@ -882,13 +884,18 @@ async function startOAuth() {
     const s = d.data;
     _('oauthStatus').textContent = 'Open the link in your browser and enter the code';
     const u = _('oauthUrl');
-    u.textContent = s.verificationUri;
-    u.href = s.verificationUri;
+    const vuri = String(s.verificationUri || '');
+    u.textContent = vuri;
+    // 仅对 https 链接设置 href：非 https 的 verificationUri 只展示不可点，
+    // 防止 javascript: 等异常 scheme 成为注入面
+    if (/^https:\/\//i.test(vuri)) { u.href = vuri; } else { u.removeAttribute('href'); }
     _('oauthUserCode').textContent = s.userCode;
+    let pollFails = 0;
     const poll = setInterval(async () => {
       try {
         const r = await api('GET', '/oauth/status?sessionId=' + s.sessionId);
-        if (r.data.done) {
+        pollFails = 0;
+        if (r.data && r.data.done) {
           clearInterval(poll);
           btn.disabled = false;
           btn.innerHTML = 'Start OAuth login';
@@ -903,7 +910,17 @@ async function startOAuth() {
             toast('OAuth failed', 'error');
           }
         }
-      } catch(e) {}
+      } catch(e) {
+        // 连续失败(会话丢失/服务重启)后停止轮询并恢复按钮，避免永久卡死；
+        // 偶发网络抖动在 5 次(约10s)内自愈
+        if (++pollFails >= 5) {
+          clearInterval(poll);
+          btn.disabled = false;
+          btn.innerHTML = 'Start OAuth login';
+          _('oauthStatus').textContent = 'Polling failed: ' + (e && e.message ? e.message : 'session not found');
+          toast('OAuth polling stopped', 'error');
+        }
+      }
     }, 2000);
   } catch (e) {
     btn.disabled = false;
@@ -1070,7 +1087,7 @@ async function loadLogs() {
         '<td class="mono" style="font-size:12px">' + esc(l.model || '-') + '</td>' +
         '<td><span class="model-tag">' + esc(route) + '</span></td>' +
         '<td style="font-weight:600;color:' + STATUS_CLASS(st) + '">' + st + '</td>' +
-        '<td class="mono" style="font-size:11px">' + (l.durationMs != null ? l.durationMs + ' ms' : '-') + '</td>' +
+        '<td class="mono" style="font-size:11px">' + (l.duration_ms != null ? l.duration_ms + ' ms' : '-') + '</td>' +
       '</tr>';
     }).join('');
   } catch (e) { tbody.innerHTML = '<tr><td colspan="8" class="empty">Failed to load</td></tr>'; }
@@ -1340,7 +1357,7 @@ async function loadOcModels() {
     const d = await api('GET', '/opencode/models');
     const models = d.data.models || [];
     _('ocModelsList').innerHTML = '<div class="table-wrap"><table><thead><tr><th style="text-align:left">Model ID</th><th>Context</th><th>Output</th><th>Source</th></tr></thead><tbody>' +
-      models.map(m => '<tr><td style="text-align:left;font-family:monospace">' + esc(m.id) + '</td><td>' + m.context + '</td><td>' + m.output + '</td><td>' + m.source + '</td></tr>').join('') +
+      models.map(m => '<tr><td style="text-align:left;font-family:monospace">' + esc(m.id) + '</td><td>' + esc(m.context) + '</td><td>' + esc(m.output) + '</td><td>' + esc(m.source) + '</td></tr>').join('') +
       '</tbody></table></div><div class="hint">' + models.length + ' free models total (auto-synced every 10 minutes)</div>';
   } catch (e) { _('ocModelsList').textContent = 'Failed to load'; }
 }

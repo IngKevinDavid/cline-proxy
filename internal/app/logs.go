@@ -66,11 +66,15 @@ func AppendReqLog(l RequestLog) {
 	}()
 }
 
-// LoadRequestLogs 返回最近的请求日志（内存优先，启动后从落盘文件补载）
+// LoadRequestLogs 返回最近的请求日志（内存优先，启动后从落盘文件补载）。
+// 必须返回副本：调用方（admin 面板）会原地反转切片，共享底层数组会
+// 与 AppendReqLog 的 append 产生数据竞争。
 func LoadRequestLogs() []RequestLog {
 	reqLogsMu.Lock()
 	defer reqLogsMu.Unlock()
-	return reqLogs
+	out := make([]RequestLog, len(reqLogs))
+	copy(out, reqLogs)
+	return out
 }
 
 // LoadRequestLogsFromFile 启动时从落盘文件读取尾部记录（日志关闭时跳过）

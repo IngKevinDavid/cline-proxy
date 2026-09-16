@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -58,8 +59,8 @@ func main() {
 		}
 		fmt.Printf("\n=== Account Pool (%d accounts) ===\n\n", len(accounts))
 		for i, a := range accounts {
-		fmt.Printf("  %d. [%s] %s (status: %s, used: %d, tokens: %d today / %d total)\n",
-			i+1, a.AccountID, a.Email, a.Status, a.UsageCount, a.TokensToday, a.TokensTotal)
+			fmt.Printf("  %d. [%s] %s (status: %s, used: %d, tokens: %d today / %d total)\n",
+				i+1, a.AccountID, a.Email, a.Status, a.UsageCount, a.TokensToday, a.TokensTotal)
 		}
 		fmt.Println()
 		return
@@ -67,7 +68,6 @@ func main() {
 
 	if err := app.StartProxy(*host, *port); err != nil {
 		log.Fatalf("Proxy failed: %v", err)
-		os.Exit(1)
 	}
 }
 
@@ -92,6 +92,13 @@ func buildAndStart(host string, port int) {
 		out, _ := exec.Command("powershell", "-Command",
 			"Get-Process cline-proxy -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id").Output()
 		if len(out) > 0 {
+			running = true
+		}
+	} else {
+		// Linux/macOS: 用端口探测代替进程名检查（二进制名可能不同）
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+		if err == nil {
+			conn.Close()
 			running = true
 		}
 	}

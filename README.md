@@ -82,6 +82,8 @@ Environment variables to define in the Portainer stack UI:
 
 To seed Cline accounts on first boot, drop a `cline-seed.json` file into the volume (see [Seeding accounts](#seeding-accounts)).
 
+> **Bind-mount note (Portainer/NAS users):** the container runs as a non-root user, so a **named volume** (`-v cline-proxy-data:/app/data`) is preferred. If you bind-mount a host directory (e.g. `-v /opt/cline-proxy-data:/app/data`), pre-create it and chown it to UID 1000 (`chown -R 1000:1000 /opt/cline-proxy-data`) or the gateway cannot write its state files and will fail to persist accounts.
+
 ## Configuration
 
 All state lives in the `/app/data` volume (`cline-accounts.json`, `zen-config.json`, `combos.json`, `requests.jsonl`). Backup = copy the volume.

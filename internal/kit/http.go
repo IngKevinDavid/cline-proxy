@@ -55,8 +55,10 @@ func HTTPPostJSON(rawURL string, body any) (*http.Response, error) {
 	return JSONHTTPClient.Do(req)
 }
 
+// ReadBody 读取错误响应体用于日志/报错展示。上限 1MB：这些路径只做
+// 截断展示，一个恶意/异常上游返回 GB 级 body 时不能拖垮进程内存。
 func ReadBody(resp *http.Response) string {
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return fmt.Sprintf("<read error: %v>", err)
 	}

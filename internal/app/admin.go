@@ -645,24 +645,24 @@ func handleAdminAccountReset(w http.ResponseWriter, r *http.Request) {
 		resetTodayUsage(acc)
 		writeAPI(w, http.StatusOK, apiResponse{
 			Success: true,
-			Message: "检测通过：上游未限流，已解除冷却并重置今日统计",
+			Message: "Check passed: upstream not rate-limited; cooldown lifted and today's stats reset",
 			Data:    result,
 		})
 		return
 	}
 
 	// 仍限流/失效：保持冷却，重置无效
-	msg := "上游仍限流，重置无效，保持冷却"
+	msg := "Upstream still rate-limited; reset ineffective, staying in cooldown"
 	if status == "expired" {
-		msg = "Token 已失效，重置无效"
+		msg = "Token expired; reset ineffective"
 	} else if status == "error" {
-		msg = "探测异常，请稍后重试"
+		msg = "Probe error; try again later"
 	}
 	if until, ok := result["cooldownUntil"].(string); ok && until != "" {
-		msg += "（预计恢复 " + until + "）"
+		msg += " (estimated recovery " + until + ")"
 	}
 	if remaining, ok := result["remaining"].(string); ok && remaining != "" {
-		msg += "（剩余 " + remaining + "）"
+		msg += " (remaining " + remaining + ")"
 	}
 	writeAPI(w, http.StatusOK, apiResponse{
 		Success: false,

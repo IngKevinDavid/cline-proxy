@@ -259,7 +259,7 @@ func clientIP(r *http.Request) string {
 
 // adminLoginPageHTML 未认证时 /admin/ 返回的独立登录页（不暴露完整面板 HTML）。
 const adminLoginPageHTML = `<!DOCTYPE html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Cline Proxy - Login</title>
 <style>
 body{font-family:system-ui,sans-serif;background:#0f1115;color:#e6e6e6;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
@@ -270,10 +270,10 @@ button{width:100%;padding:10px;border-radius:8px;border:0;background:#4f7cff;col
 button:disabled{opacity:.6;cursor:wait}
 #err{color:#ff6b6b;font-size:13px;min-height:18px;margin-bottom:8px;text-align:center}
 </style></head><body>
-<div class="card"><h1>Cline Proxy 管理登录</h1>
+<div class="card"><h1>Cline Proxy Admin Login</h1>
 <div id="err"></div>
-<input type="password" id="pw" placeholder="管理员密码 (ADMIN_PASSWORD)" autofocus>
-<button id="go">登录</button></div>
+<input type="password" id="pw" placeholder="Admin password (ADMIN_PASSWORD)" autofocus>
+<button id="go">Log in</button></div>
 <script>
 const b=document.getElementById('go'),e=document.getElementById('err');
 async function login(){b.disabled=true;e.textContent='';

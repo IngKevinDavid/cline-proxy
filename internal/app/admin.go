@@ -516,6 +516,7 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Tokens []struct {
 			RefreshToken string `json:"refreshToken"`
+			APIToken     string `json:"apiToken"`
 			Email        string `json:"email"`
 		} `json:"tokens"`
 	}
@@ -539,6 +540,23 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 	errors := []string{}
 
 	for _, t := range req.Tokens {
+		email := t.Email
+		if email == "" {
+			email = "batch_" + kit.RandHex(4)
+		}
+		// 静态 API key：直接入池，不做校验调用（与单个添加接口语义一致）
+		if t.APIToken != "" {
+			acc := &Account{
+				AccountID: "acc_" + kit.RandHex(8),
+				Email:     email,
+				APIToken:  t.APIToken,
+				Status:    "active",
+				CreatedAt: time.Now(),
+			}
+			addAccount(acc)
+			imported++
+			continue
+		}
 		if t.RefreshToken == "" {
 			continue
 		}
@@ -546,10 +564,6 @@ func handleBatchImport(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", t.Email, err))
 			continue
-		}
-		email := t.Email
-		if email == "" {
-			email = "batch_" + kit.RandHex(4)
 		}
 		acc := &Account{
 			AccountID:    "acc_" + kit.RandHex(8),
@@ -1000,16 +1014,17 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		address = proxyListenAddress
 	}
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: map[string]any{
-		"address":      address,
-		"strategy":     cfg.Strategy,
-		"version":      "go-1.1",
-		"poolPath":     poolPath,
-		"defaultModel": getDefaultModel(),
-		"headers":      cfg.Headers,
+		"address":         address,
+		"strategy":        cfg.Strategy,
+		"version":         "go-1.1",
+		"poolPath":        poolPath,
+		"defaultModel":    getDefaultModel(),
+		"headers":         cfg.Headers,
+		"clineUseProxies": loadPool().ClineUseProxies,
 	}})
 }
 
-// POST /admin/api/config  body: { strategy?, headers?, defaultModel? }
+// POST /admin/api/config  body: { strategy?, headers?, defaultModel?, clineUseProxies? }
 func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
@@ -1023,9 +1038,10 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
 	var req struct {
-		Strategy     string            `json:"strategy"`
-		Headers      map[string]string `json:"headers"`
-		DefaultModel string            `json:"defaultModel"`
+		Strategy        string            `json:"strategy"`
+		Headers         map[string]string `json:"headers"`
+		DefaultModel    string            `json:"defaultModel"`
+		ClineUseProxies *bool             `json:"clineUseProxies"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
@@ -1070,6 +1086,17 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		setDefaultModel(req.DefaultModel)
+		changed = true
+	}
+
+	// cline 走共享出口代理池的开关：持久化到池文件，重启后保留。
+	// CLINE_USE_PROXIES env 为 true 时 env 优先（见 clineProxiesEnabled）。
+	if req.ClineUseProxies != nil {
+		p := loadPool()
+		poolMu.Lock()
+		p.ClineUseProxies = *req.ClineUseProxies
+		poolMu.Unlock()
+		savePool()
 		changed = true
 	}
 

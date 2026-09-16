@@ -214,6 +214,13 @@ func ClineUseProxiesEnv() bool {
 	return v
 }
 
+// clineProxiesEnabled cline 上游是否走共享出口代理池：
+// 管理面板的持久化开关或 CLINE_USE_PROXIES env 任一开启即启用（env 优先）。
+// 代理列表本身由 zen 配置的 proxies 提供 —— 两个上游共用同一个池。
+func clineProxiesEnabled() bool {
+	return ClineUseProxiesEnv() || loadPool().ClineUseProxies
+}
+
 // StrictModelMatchEnv STRICT_MODEL_MATCH 控制未知模型名的处理（默认 true）：
 // 开启时对既不在免费模型表也不是 zen 模型的名字返回 400；关闭时沿用旧行为，
 // 静默回退到默认模型 —— IDE 配错模型名时会拿到"另一个模型"的 200 响应，

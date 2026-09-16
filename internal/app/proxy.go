@@ -102,18 +102,17 @@ func StartProxy(host string, port int) error {
 	})
 
 	mux.HandleFunc("/v1/health", corsHandler(func(w http.ResponseWriter, r *http.Request) {
-		info := map[string]any{
+		writeJSON(w, http.StatusOK, map[string]any{
 			"status":         "ok",
 			"version":        "go-1.1",
-			"activeAccounts": activeCount,
-		}
-		writeJSON(w, http.StatusOK, info)
+			"activeAccounts": liveActiveAccountCount(),
+		})
 	}))
 	mux.HandleFunc("/health", corsHandler(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":         "ok",
 			"version":        "go-1.1",
-			"activeAccounts": activeCount,
+			"activeAccounts": liveActiveAccountCount(),
 		})
 	}))
 
@@ -247,7 +246,7 @@ func StartProxy(host string, port int) error {
 
 		// combo 别名模型：改写为平台上游真实模型后按平台路由;
 		// combo 可声明 useProxies 让该别名走出口代理池
-		useProxies := ClineUseProxiesEnv()
+		useProxies := clineProxiesEnabled()
 		if c := resolveCombo(model); c != nil {
 			log.Printf("  combo %q -> %s model %q (useProxies=%v)", model, c.Platform, c.Target, c.UseProxies)
 			params["model"] = c.Target
@@ -562,6 +561,18 @@ func asInt(v any) int {
 		return int(n)
 	}
 	return 0
+}
+
+// liveActiveAccountCount /health 的实时活跃账号数（启动时算一次会让
+// 健康检查永远显示旧值）。
+func liveActiveAccountCount() int {
+	live := 0
+	for _, a := range loadPool().Accounts {
+		if a.Status == "active" {
+			live++
+		}
+	}
+	return live
 }
 
 func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
@@ -1752,7 +1763,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// combo 别名模型：改写为目标上游模型（anthropicToOpenAI 取 req.Model）
-	useProxies := ClineUseProxiesEnv()
+	useProxies := clineProxiesEnabled()
 	if c := resolveCombo(req.Model); c != nil {
 		log.Printf("  anthropic combo %q -> %s model %q (useProxies=%v)", req.Model, c.Platform, c.Target, c.UseProxies)
 		req.Model = c.Target

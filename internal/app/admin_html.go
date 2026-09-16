@@ -220,10 +220,11 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 <div class="nav-item active" data-tab="dashboard"><span class="nav-ico"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg></span> Dashboard</div>
 <div class="nav-group">Account pool</div>
 <div class="nav-item" data-tab="accounts"><span class="nav-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/></svg></span> Accounts</div>
-<div class="nav-item" data-tab="import"><span class="nav-ico"><svg viewBox="0 0 24 24"><path d="M12 3v10m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></span> Import accounts</div>
+<div class="nav-item" data-tab="import"><span class="nav-ico"><svg viewBox="0 0 24 24"><path d="M12 3v10m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></span> Add accounts</div>
 <div class="nav-group">Services</div>
-<div class="nav-item" data-tab="settings"><span class="nav-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg></span> Proxy settings</div>
+<div class="nav-item" data-tab="settings"><span class="nav-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg></span> Gateway settings</div>
 <div class="nav-item" data-tab="logs"><span class="nav-ico"><svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg></span> Request logs</div>
+<div class="nav-item" data-tab="proxypool"><span class="nav-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="19" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="M12 7.5v4m0 0-5.5 5m5.5-5 5.5 5"/></svg></span> Proxy pool</div>
 <div class="nav-item" data-tab="opencode"><span class="nav-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14.5 14.5 0 0 1 0 18 14.5 14.5 0 0 1 0-18z"/></svg></span> opencode free models</div>
 <div class="nav-item" data-tab="combos"><span class="nav-ico"><svg viewBox="0 0 24 24"><path d="M8 3v5a4 4 0 0 1-4 4 4 4 0 0 1 4 4v5M16 3v5a4 4 0 0 0 4 4 4 4 0 0 0-4 4v5"/></svg></span> Combos</div>
 <div class="sidebar-footer">
@@ -256,7 +257,7 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
   <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></span> Quick start</div>
   <div class="section-body">
     <div class="steps">
-      <div class="step"><div class="step-no">1</div><div class="step-body"><div class="step-title">Import Cline accounts</div><div class="step-desc">Use the Import page to log in via OAuth or paste a token — accounts are the proxy's upstream quota.</div></div></div>
+      <div class="step"><div class="step-no">1</div><div class="step-body"><div class="step-title">Add Cline accounts</div><div class="step-desc">On the Add accounts page: browser OAuth, a refreshToken, or a static API key (<code>sk_...</code>) — accounts are the proxy's upstream quota.</div></div></div>
       <div class="step"><div class="step-no">2</div><div class="step-body"><div class="step-title">Generate an API key</div><div class="step-desc">Generate a key under Proxy settings → API keys to authenticate clients; with no keys configured, unauthenticated access is allowed.</div></div></div>
       <div class="step"><div class="step-no">3</div><div class="step-body"><div class="step-title">Configure your client</div><div class="step-desc">Set the Base URL to <code id="quickstartApi">http://127.0.0.1:3457/v1</code> and pick any model ID from the available models list.</div></div></div>
     </div>
@@ -304,16 +305,16 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 </div>
 
 <div id="tab-import" class="tab-panel" style="display:none">
-<h2>Import accounts</h2>
+<h2>Add accounts</h2>
 <div class="section">
   <div class="tabs" id="importTabs">
     <div class="tab active" data-tab="oauth">OAuth browser login</div>
-    <div class="tab" data-tab="token">Manual token</div>
+    <div class="tab" data-tab="token">Manual entry</div>
     <div class="tab" data-tab="batch">Batch import</div>
   </div>
 
   <div id="import-oauth" class="tab-content active">
-    <p class="hint">Complete OAuth in your browser — Google/GitHub/email sign-in supported; the refreshToken is captured automatically.</p>
+    <p class="hint">Cline accounts via browser OAuth — Google/GitHub/email sign-in supported; the refreshToken is captured automatically.</p>
     <div class="form-actions">
       <button class="btn btn-primary" onclick="startOAuth()" id="oauthBtn">Start OAuth login</button>
     </div>
@@ -333,14 +334,14 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
   </div>
 
   <div id="import-token" class="tab-content">
-    <p class="hint">Paste an existing Cline refreshToken; it is verified and added to the pool automatically.</p>
+    <p class="hint">Paste a Cline OAuth refreshToken or a static Cline API key (<code>sk_...</code>) — the type is detected automatically. API keys are used as-is (no validation call); refresh tokens are verified against the upstream first.</p>
     <div class="form-row">
       <div class="field">
-        <label>Refresh Token *</label>
-        <input type="text" id="tokenInput" placeholder="paste refreshToken" style="font-family:'JetBrains Mono',Consolas,monospace">
+        <label>Token or API key *</label>
+        <input type="text" id="tokenInput" placeholder="workos-... refreshToken or sk_... API key" style="font-family:'JetBrains Mono',Consolas,monospace">
       </div>
       <div class="field">
-        <label>Email (optional; auto-generated if empty)</label>
+        <label>Email / label (optional; auto-generated if empty)</label>
         <input type="text" id="tokenEmail" placeholder="user@example.com">
       </div>
     </div>
@@ -351,11 +352,11 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
   </div>
 
   <div id="import-batch" class="tab-content">
-    <p class="hint">Import multiple accounts at once. Accepts a JSON array or one token per line.</p>
+    <p class="hint">Import multiple accounts at once. Accepts a JSON array (entries with <code>refreshToken</code> or <code>apiToken</code>) or one credential per line — lines starting with <code>sk_</code> are treated as API keys, everything else as refresh tokens.</p>
     <div class="form-row">
       <div class="field">
-        <label>JSON array format: [{"refreshToken":"...","email":"..."}]</label>
-        <textarea id="batchInput" placeholder='[{"refreshToken":"xxx","email":"u1@x.com"},{"refreshToken":"yyy","email":"u2@x.com"}]'></textarea>
+        <label>JSON array or one credential per line</label>
+        <textarea id="batchInput" placeholder='[{"refreshToken":"xxx","email":"u1@x.com"},{"apiToken":"sk_yyy","email":"u2@x.com"}]'></textarea>
       </div>
     </div>
     <div class="form-actions">
@@ -368,8 +369,52 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 </div>
 </div>
 
+<div id="tab-proxypool" class="tab-panel" style="display:none">
+<h2>Proxy pool</h2>
+<div class="section">
+  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="19" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="M12 7.5v4m0 0-5.5 5m5.5-5 5.5 5"/></svg></span> Shared egress proxies</div>
+  <div class="section-body">
+    <div class="hint" style="margin-bottom:10px">One proxy list serves every upstream that opts in below. One proxy per line: <code>http://user:pass@host:port</code> or <code>socks5://host:port</code>. Requests rotate across healthy proxies per request; a proxy that hits a rate limit is cooled down and skipped automatically.</div>
+    <div class="form-row">
+      <div class="field" style="flex:3"><label>Proxy list</label>
+        <textarea id="ppProxies" rows="4" placeholder="one per line: http://user:pass@host:port or socks5://host:port"></textarea>
+      </div>
+      <div class="field"><label>Rotation strategy</label>
+        <select id="ppStrategy"><option value="round_robin">Round-robin (round_robin)</option><option value="random">Random (random)</option><option value="fill">Fill (fill)</option></select>
+      </div>
+    </div>
+    <div class="form-actions"><button class="btn btn-primary" onclick="saveProxyPool()">Save proxy pool</button></div>
+    <div id="ppSaveResult" style="margin-top:8px"></div>
+  </div>
+</div>
+<div class="section">
+  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span> Where this pool is used</div>
+  <div class="section-body">
+    <div class="form-row">
+      <div class="field"><label>Cline upstream</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <select id="ppCline" style="flex:1"><option value="true">Use proxy pool</option><option value="false">Direct connection</option></select>
+          <button class="btn btn-sm btn-primary" onclick="saveClineProxies()">Save</button>
+        </div>
+        <div class="hint">Off (direct) by default. The <code>CLINE_USE_PROXIES=true</code> env var always forces this on. Individual Combos can also opt in from the Combos page.</div>
+      </div>
+      <div class="field"><label>opencode zen upstream</label>
+        <div class="hint" style="margin-top:6px" id="ppZenState">-</div>
+        <div class="hint">Zen automatically routes through the pool above whenever the list is non-empty — no separate switch needed.</div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="section">
+  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v4m0 4h.01"/></svg></span> Cooldown status</div>
+  <div class="section-body">
+    <div class="hint" id="ppCooldownInfo" style="margin:0">-</div>
+  </div>
+</div>
+</div>
+
 <div id="tab-settings" class="tab-panel" style="display:none">
-<h2>Proxy settings</h2>
+<h2>Gateway settings</h2>
 
 <div class="section">
   <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 1-7.78 7.78 5.5 5.5 0 0 1 7.78-7.78zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></span> API keys</div>
@@ -518,17 +563,11 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
     <div class="hint" id="ocKeyStates" style="margin-bottom:8px"></div>
     <div class="form-row">
       <div class="field"><label>Base URL</label><input type="text" id="ocBaseURL" placeholder="https://opencode.ai/zen/v1"></div>
-      <div class="field"><label>Proxy strategy</label>
-        <select id="ocStrategy"><option value="round_robin">Round-robin (round_robin)</option><option value="random">Random (random)</option><option value="fill">Fill (fill)</option></select>
+      <div class="field">
+        <label>Egress proxies</label>
+        <div class="hint" style="margin-top:6px" id="ocProxyState">-</div>
+        <div class="hint">Managed on the <a href="#" onclick="switchTab('proxypool');return false" style="color:var(--accent);cursor:pointer">Proxy pool</a> page — shared with the Cline upstream.</div>
       </div>
-    </div>
-    <div class="form-row">
-      <div class="field"><label>Proxy list</label>
-        <textarea id="ocProxies" rows="3" placeholder="one per line: http://user:pass@host:port or socks5://host:port"></textarea>
-      </div>
-    </div>
-    <div class="form-row">
-      <div class="field"><label>Proxy cooldown</label><span id="ocCooldownInfo" class="hint" style="margin:0;align-self:center">-</span></div>
     </div>
     <div class="form-actions"><button class="btn btn-primary" onclick="saveOcConfig()">Save config</button></div>
   </div>
@@ -659,6 +698,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.tab === 'accounts') loadAccounts();
     if (el.dataset.tab === 'settings') { loadKeys(); loadModels(); loadConfig(); }
     if (el.dataset.tab === 'logs') loadLogs();
+    if (el.dataset.tab === 'proxypool') loadProxyPool();
     if (el.dataset.tab === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); }
     if (el.dataset.tab === 'combos') { loadCombos(); fillComboModels(); }
   });
@@ -674,6 +714,7 @@ function switchTab(name) {
   if (name === 'accounts') loadAccounts();
   if (name === 'settings') { loadKeys(); loadModels(); }
   if (name === 'logs') loadLogs();
+  if (name === 'proxypool') loadProxyPool();
   if (name === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); }
   if (name === 'combos') { loadCombos(); fillComboModels(); }
 }
@@ -720,7 +761,7 @@ async function loadAccounts() {
     const list = d.data.accounts;
     const tbody = _('accountTableBody');
     if (!list || list.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty">No accounts yet — add one on the <a href="#" onclick="switchTab(\'import\')" style="color:var(--accent);cursor:pointer">Import accounts</a> page</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">No accounts yet — add one on the <a href="#" onclick="switchTab(\'import\')" style="color:var(--accent);cursor:pointer">Add accounts</a> page</td></tr>';
       return;
     }
     const sn = { active: 'Active', cooldown: 'Cooldown', expired: 'Expired' };
@@ -873,12 +914,17 @@ async function startOAuth() {
 }
 
 // ========== Token import ==========
+// Credential type auto-detection: "sk_..." = static Cline API key, anything
+// else = OAuth refreshToken (the backend validates refresh tokens upstream;
+// API keys are pooled as-is).
+const credPayload = t => t.startsWith('sk_') ? { apiToken: t } : { refreshToken: t };
+
 async function addByToken() {
   const token = _('tokenInput').value.trim();
-  if (!token) { toast('Enter a refreshToken', 'error'); return; }
+  if (!token) { toast('Enter a token or API key', 'error'); return; }
   const email = _('tokenEmail').value.trim();
   try {
-    const d = await api('POST', '/accounts/add', { refreshToken: token, email: email || undefined });
+    const d = await api('POST', '/accounts/add', { ...credPayload(token), email: email || undefined });
     toast('Account added: ' + (d.data.email || ''), 'success');
     _('tokenInput').value = '';
     _('tokenEmail').value = '';
@@ -887,12 +933,20 @@ async function addByToken() {
 }
 
 // ========== Batch import ==========
+const parseBatchInput = raw => {
+  try {
+    let tokens = JSON.parse(raw);
+    if (!Array.isArray(tokens)) tokens = [tokens];
+    return tokens;
+  } catch {
+    return raw.split('\n').map(t => t.trim()).filter(Boolean).map(credPayload);
+  }
+};
+
 async function batchImport() {
   const raw = _('batchInput').value.trim();
   if (!raw) { toast('Enter account data', 'error'); return; }
-  let tokens;
-  try { tokens = JSON.parse(raw); if (!Array.isArray(tokens)) tokens = [tokens]; }
-  catch { tokens = raw.split('\n').filter(t => t.trim()).map(t => ({ refreshToken: t.trim() })); }
+  const tokens = parseBatchInput(raw);
   try {
     const d = await api('POST', '/batch-import', { tokens });
     toast(d.message || 'Import complete', 'success');
@@ -905,9 +959,7 @@ async function handleFileImport(event) {
   const file = event.target.files[0];
   if (!file) return;
   const text = await file.text();
-  let tokens;
-  try { tokens = JSON.parse(text); if (!Array.isArray(tokens)) tokens = [tokens]; }
-  catch { tokens = text.split('\n').filter(t => t.trim()).map(t => ({ refreshToken: t.trim() })); }
+  const tokens = parseBatchInput(text);
   try {
     const d = await api('POST', '/batch-import', { tokens });
     toast(d.message || 'Imported ' + tokens.length + ' accounts', 'success');
@@ -1175,10 +1227,15 @@ async function loadConfig() {
 }
 
 // ========== opencode free models ==========
+// Last-seen zen config; the proxy pool fields live on the Proxy pool page now,
+// so saves must carry the cached values instead of removed form inputs.
+let ocCfgCache = {};
+
 async function loadOcConfig() {
   try {
     const d = await api('GET', '/opencode/config');
     const c = d.data;
+    ocCfgCache = c;
     _('ocEnabled').value = String(c.enabled);
     _('ocKeys').value = (c.keys && c.keys.length ? c.keys : [c.key || 'public']).join('\n');
     const ks = c.keyStates || [];
@@ -1186,8 +1243,9 @@ async function loadOcConfig() {
       ? ks.map(k => '#' + (k.index + 1) + ' ' + k.keyMask + ' · ' + (k.usage || 0) + ' calls' + (k.cooling ? ' · cooling' : '') + (k.current ? ' · next' : '')).join('  |  ')
       : '';
     _('ocBaseURL').value = c.baseURL || '';
-    _('ocProxies').value = (c.proxies || []).join('\n');
-    _('ocStrategy').value = c.proxyStrategy || 'round_robin';
+    _('ocProxyState').textContent = (c.proxies && c.proxies.length)
+      ? c.proxies.length + ' prox' + (c.proxies.length === 1 ? 'y' : 'ies') + ' configured (' + (c.proxyStrategy || 'round_robin') + ')'
+      : 'none configured';
     _('ocMaxConc').value = c.maxConcurrency || 8;
     _('ocRetries').value = c.retries || 3;
     _('ocFailover').value = String(c.failover);
@@ -1202,27 +1260,18 @@ async function loadOcConfig() {
     _('ocFailoverInfo').innerHTML = rt.failoverActive
       ? '<span style="color:var(--danger)">Failover active (opencode unavailable, requests go to the cline pool)</span>'
       : '<span style="color:var(--accent2)">Normal</span>';
-    const cd = rt.proxyCooldowns || {};
-    const keys = Object.keys(cd);
-    _('ocCooldownInfo').textContent = keys.length
-      ? keys.map(k => k + ' cooldown until ' + cd[k]).join('; ')
-      : 'No proxies cooling down';
   } catch (e) { /* ignore */ }
 }
 
 async function saveOcConfig() {
-  const proxies = _('ocProxies').value.split('\n').map(s => s.trim()).filter(Boolean);
-  const PROXY_RE = /^(https?|socks5h?):\/\/[^\s]+:\d+/;
-  const bad = proxies.find(p => !PROXY_RE.test(p));
-  if (bad) { toast('Invalid proxy format: ' + bad + ' (need http(s)://host:port or socks5://host:port)', 'error'); return; }
   const keys = _('ocKeys').value.split('\n').map(s => s.trim()).filter(Boolean);
   if (!keys.length) { toast('API keys must not be empty (use "public" if you have no key)', 'error'); return; }
   const body = {
     enabled: _('ocEnabled').value === 'true',
-    keys: _('ocKeys').value.split('\n').map(s => s.trim()).filter(Boolean),
+    keys: keys,
     baseURL: _('ocBaseURL').value.trim(),
-    proxies: proxies,
-    proxyStrategy: _('ocStrategy').value,
+    proxies: ocCfgCache.proxies || [],
+    proxyStrategy: ocCfgCache.proxyStrategy || 'round_robin',
     maxConcurrency: parseInt(_('ocMaxConc').value) || 8,
     retries: parseInt(_('ocRetries').value) || 3,
     failover: _('ocFailover').value === 'true',
@@ -1240,6 +1289,49 @@ async function saveOcConfig() {
     const d = await api('POST', '/opencode/config/update', body);
     toast('opencode config saved', 'success');
     loadOcConfig();
+  } catch (e) { toast('Save failed: ' + e.message, 'error'); }
+}
+
+// ========== Proxy pool ==========
+async function loadProxyPool() {
+  try {
+    const [oc, cfg] = await Promise.all([api('GET', '/opencode/config'), api('GET', '/config')]);
+    const c = oc.data;
+    _('ppProxies').value = (c.proxies || []).join('\n');
+    _('ppStrategy').value = c.proxyStrategy || 'round_robin';
+    _('ppCline').value = String(!!cfg.data.clineUseProxies);
+    _('ppZenState').innerHTML = c.enabled
+      ? ((c.proxies && c.proxies.length)
+          ? '<span style="color:var(--accent2)">routing through the pool</span>'
+          : '<span style="color:var(--text2)">direct (pool list is empty)</span>')
+      : '<span style="color:var(--text2)">upstream disabled</span>';
+    const cd = (c.runtime || {}).proxyCooldowns || {};
+    const keys = Object.keys(cd);
+    _('ppCooldownInfo').textContent = keys.length
+      ? keys.map(k => k + ' cooldown until ' + cd[k]).join('; ')
+      : 'No proxies cooling down';
+  } catch (e) { /* ignore */ }
+}
+
+async function saveProxyPool() {
+  const proxies = _('ppProxies').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const PROXY_RE = /^(https?|socks5h?):\/\/[^\s]+:\d+/;
+  const bad = proxies.find(p => !PROXY_RE.test(p));
+  if (bad) { toast('Invalid proxy format: ' + bad + ' (need http(s)://host:port or socks5://host:port)', 'error'); return; }
+  try {
+    await api('POST', '/opencode/config/update', { proxies: proxies, proxyStrategy: _('ppStrategy').value });
+    _('ppSaveResult').innerHTML = '<div style="color:var(--accent2);font-size:12px">Saved ' + proxies.length + ' proxies</div>';
+    setTimeout(() => _('ppSaveResult').innerHTML = '', 5000);
+    toast('Proxy pool saved', 'success');
+    loadProxyPool();
+  } catch (e) { toast('Save failed: ' + e.message, 'error'); }
+}
+
+async function saveClineProxies() {
+  try {
+    await api('POST', '/config/update', { clineUseProxies: _('ppCline').value === 'true' });
+    toast('Cline proxy setting saved', 'success');
+    loadProxyPool();
   } catch (e) { toast('Save failed: ' + e.message, 'error'); }
 }
 

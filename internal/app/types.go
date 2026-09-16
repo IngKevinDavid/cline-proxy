@@ -26,10 +26,11 @@ type Account struct {
 }
 
 type AccountPool struct {
-	Accounts     []*Account `json:"accounts"`
-	CurrentIdx   int        `json:"currentIdx"`
-	Keys         []string   `json:"keys,omitempty"`
-	DefaultModel string     `json:"defaultModel,omitempty"` // 用户自定义默认模型，持久化
+	Accounts        []*Account `json:"accounts"`
+	CurrentIdx      int        `json:"currentIdx"`
+	Keys            []string   `json:"keys,omitempty"`
+	DefaultModel    string     `json:"defaultModel,omitempty"` // 用户自定义默认模型，持久化
+	ClineUseProxies bool       `json:"clineUseProxies,omitempty"` // cline 上游走共享出口代理池（面板开关；CLINE_USE_PROXIES env 为 true 时强制开启）
 }
 
 type LoginMethod int

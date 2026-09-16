@@ -557,7 +557,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	chat := responsesToChat(params)
 	chatModel, _ := chat["model"].(string)
 	// combo 别名模型：改写为平台上游真实模型
-	useProxies := ClineUseProxiesEnv()
+	useProxies := clineProxiesEnabled()
 	if c := resolveCombo(chatModel); c != nil {
 		log.Printf("  responses combo %q -> %s model %q (useProxies=%v)", chatModel, c.Platform, c.Target, c.UseProxies)
 		chat["model"] = c.Target

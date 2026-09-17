@@ -88,6 +88,7 @@ func StartProxy(host string, port int) error {
 	startModelsRefresher()
 	startZenModelsRefresher()
 	startPoolFlusher()
+	loadZenEndpoints()
 	startZenHarvester()
 	initStats()
 	LoadRequestLogsFromFile()
@@ -504,14 +505,25 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 		log.Printf("  zen: %s", out.note)
 	}
 
-	// 原生 responses 端点模型（如 muse-spark）：chat/completions 上游 500，
-	// 必须经原生 /v1/responses 调用后再转回 chat 形态（官方 CLI 实测只用该端点）
+	// 端点自适应：Upstream=="" 的模型先走 chat/completions；若上游报
+	// "wrong-endpoint"（500/400 系列 + 端点错误特征），学习为 responses 并
+	// 本次直接改走原生 responses 路径重试。muse-spark 等已知 responses 模型
+	// 仍由 Upstream 字段直达，无额外探测开销。
+	// （trade-off 记录：曾考虑按目录 provider.npm 推断端点，但 29 个免费模型
+	// 中 23 个无 npm 字段、无规律可循——运行时探测是唯一可靠信号。）
 	if zm.Upstream == "responses" {
 		handleZenResponsesNative(w, r, params, zm, tracker)
 		return
 	}
 
 	resp, rateLimited, err := callZenAPI(r.Context(), params, isStream)
+	if err != nil && isWrongEndpoint(err) {
+		learnZenEndpoint(zm.ID, "responses")
+		log.Printf("  zen endpoint auto-learn: model=%s chat/completions rejected (%v), retrying responses",
+			zm.ID, kit.Truncate(err.Error(), 120))
+		handleZenResponsesNative(w, r, params, zm, tracker)
+		return
+	}
 	if err != nil {
 		log.Printf("  zen api error: %v", err)
 		tracker.rec.RateLimited = rateLimited
@@ -546,6 +558,37 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 	tracker.finish(true, resp.StatusCode)
 }
 
+// handleZenChatDirect chat/completions 直调（端点自适应的反向纠错口：
+// responses 路径上报"该用 chat"时，学回 chat 后经此重试，避免递归回主入口）。
+func handleZenChatDirect(w http.ResponseWriter, r *http.Request, params map[string]any, zm *ZenModel, tracker *zenStatsTracker) {
+	isStream, _ := params["stream"].(bool)
+	resp, rateLimited, err := callZenAPI(r.Context(), params, isStream)
+	if err != nil {
+		log.Printf("  zen api error: %v", err)
+		tracker.rec.RateLimited = rateLimited
+		writeJSON(w, http.StatusBadGateway, map[string]any{
+			"error": map[string]string{"message": err.Error(), "type": "api_error"},
+		})
+		tracker.finish(false, http.StatusBadGateway)
+		return
+	}
+	tracker.rec.RateLimited = rateLimited
+	defer resp.Body.Close()
+	tracker.rec.Status = resp.StatusCode
+	usageFn := func(u map[string]any) {
+		if ct, ok := u["completion_tokens"].(float64); ok {
+			tracker.rec.CompletionTokens = int(ct)
+		}
+	}
+	if isStream {
+		handleStreamResponseWithUsage(w, resp, usageFn)
+		tracker.finish(true, resp.StatusCode)
+		return
+	}
+	handleNonStreamResponseWithUsage(w, resp, usageFn, nil)
+	tracker.finish(true, resp.StatusCode)
+}
+
 // handleZenResponsesNative 原生 responses 端点模型（Upstream=="responses"）的
 // chat 入口：上游走 callZenResponsesAPI，流式时把原生 SSE 转成 chat SSE
 // 即时下发，非流式时把聚合好的 chat 直接呈现。统计/日志语义与 chat 路径一致。
@@ -568,6 +611,15 @@ func handleZenResponsesNative(w http.ResponseWriter, r *http.Request, params map
 	// 定一致），客户端仍按非流式接收。
 	resp, rateLimited, err := callZenResponsesAPI(r.Context(), params, true)
 	if err != nil {
+		// 反向纠错：若 responses 路径上报"该用 chat"（未来反向模型），
+		// 学回 chat 并改走 chat 路径重试一次。
+		if isWrongEndpointResponses(err) {
+			learnZenEndpoint(zm.ID, "")
+			log.Printf("  zen endpoint auto-learn: model=%s responses rejected (%v), retrying chat",
+				zm.ID, kit.Truncate(err.Error(), 120))
+			handleZenChatDirect(w, r, params, zm, tracker)
+			return
+		}
 		log.Printf("  zen responses api error: %v", err)
 		tracker.rec.RateLimited = rateLimited
 		writeJSON(w, http.StatusBadGateway, map[string]any{

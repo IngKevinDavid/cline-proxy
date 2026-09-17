@@ -1374,70 +1374,122 @@ func zenModelList() []map[string]any {
 // 替代 zen /v1/models，后者用 "public" key 恒失败，只能靠种子兜底）。
 const opencodeModelsRegistry = "https://models.opencode.ai/api.json"
 
-// syncZenModels 从公共模型目录同步免费模型（opencode provider 下 id 含
-// "free" 的条目），合并 limit.context/output 与能力旗标；种子继续做兜底。
-// 返回新增模型数。目录不可达/解析失败时返回错误并保留旧表。
+// syncZenModels 同步免费模型，两层来源：
+//  1. 真源（membership）：GET zen /v1/models（Bearer "public" 即可，无需认证），
+//     id 含 "free" 的条目 = 当前真正可用的免费模型（2026-09-17 实测 7 个，
+//     与官方 CLI /models 一致；公共目录 models.opencode.ai 滞后，列 29 个多为
+//     已下线）。只有该层能增删模型。
+//  2. 限额覆盖（overlay）：公共目录的 limit.context/output + tool_call /
+//     reasoning / attachment 旗标（zen 真源条目只有 id，无限额字段）。
+// 返回新增模型数。真源不可达时返回错误并保留旧表（种子兜底）。
 func syncZenModels() (int, error) {
 	initZenModels()
-	client := &http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequest("GET", opencodeModelsRegistry, nil)
+	cfg := getZenConfig()
+	client := &http.Client{Timeout: 25 * time.Second}
+
+	// --- 层 1：zen 真源 membership ---
+	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/models"
+	req, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("User-Agent", "opencode/latest/cli")
+	req.Header.Set("Authorization", "Bearer "+cfg.Key)
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return 0, fmt.Errorf("registry HTTP %d", resp.StatusCode)
+		return 0, fmt.Errorf("zen models HTTP %d", resp.StatusCode)
 	}
-
-	var payload map[string]struct {
-		Models map[string]struct {
-			ID         string `json:"id"`
-			ToolCall   bool   `json:"tool_call"`
-			Reasoning  bool   `json:"reasoning"`
-			Attachment bool   `json:"attachment"`
-			Limit      struct {
-				Context int `json:"context"`
-				Output  int `json:"output"`
-			} `json:"limit"`
-		} `json:"models"`
+	var live struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&live); err != nil {
 		return 0, err
 	}
-	prov, ok := payload["opencode"]
-	if !ok || len(prov.Models) == 0 {
-		return 0, fmt.Errorf("registry: no opencode provider block")
+	liveFree := map[string]bool{}
+	for _, item := range live.Data {
+		if item.ID != "" && strings.Contains(strings.ToLower(item.ID), "free") {
+			liveFree[item.ID] = true
+		}
+	}
+	if len(liveFree) == 0 {
+		return 0, fmt.Errorf("zen models: empty free list (feed anomaly, keeping old table)")
+	}
+
+	// --- 层 2：公共目录限额 overlay（失败不致命：保留种子估算） ---
+	overlay := map[string]struct {
+		Context, Output       int
+		ToolCall, Reasoning   bool
+		Attachment            bool
+	}{}
+	if oreq, err := http.NewRequest("GET", opencodeModelsRegistry, nil); err == nil {
+		oreq.Header.Set("User-Agent", "opencode/latest/cli")
+		if oresp, err := client.Do(oreq); err == nil {
+			func() {
+				defer oresp.Body.Close()
+				if oresp.StatusCode != 200 {
+					return
+				}
+				var payload map[string]struct {
+					Models map[string]struct {
+						ID         string `json:"id"`
+						ToolCall   bool   `json:"tool_call"`
+						Reasoning  bool   `json:"reasoning"`
+						Attachment bool   `json:"attachment"`
+						Limit      struct {
+							Context int `json:"context"`
+							Output  int `json:"output"`
+						} `json:"limit"`
+					} `json:"models"`
+				}
+				if json.NewDecoder(oresp.Body).Decode(&payload) != nil {
+					return
+				}
+				prov, ok := payload["opencode"]
+				if !ok {
+					return
+				}
+				for id, m := range prov.Models {
+					if m.ID != "" {
+						id = m.ID
+					}
+					overlay[id] = struct {
+						Context, Output     int
+						ToolCall, Reasoning bool
+						Attachment          bool
+					}{m.Limit.Context, m.Limit.Output, m.ToolCall, m.Reasoning, m.Attachment}
+				}
+			}()
+		}
 	}
 
 	zenModelsMu.Lock()
 	defer zenModelsMu.Unlock()
 	added := 0
-	live := make(map[string]bool, len(prov.Models))
-	for id, m := range prov.Models {
-		if id == "" || !strings.Contains(strings.ToLower(id), "free") {
-			continue
-		}
-		if m.ID != "" {
-			id = m.ID
-		}
-		live[id] = true
+	for id := range liveFree {
+		ov := overlay[id]
 		if cur, ok := zenModels[id]; ok {
-			// 存量模型：目录限额覆盖种子估算（种子只保 ID/别名/Upstream），
-			// Source 升级为 registry（修剪只动 registry/synced，不动 seed）。
-			if m.Limit.Context > 0 {
-				cur.Context = m.Limit.Context
+			// 存量模型：overlay 限额覆盖种子估算（种子只保 ID/别名/Upstream），
+			// Source 升级为 live（修剪只动 live/registry/synced，不动 seed）。
+			if ov.Context > 0 {
+				cur.Context = ov.Context
 			}
-			if m.Limit.Output > 0 {
-				cur.Output = m.Limit.Output
+			if ov.Output > 0 {
+				cur.Output = ov.Output
 			}
-			cur.ToolCall, cur.Reasoning, cur.Attach = m.ToolCall, m.Reasoning, m.Attachment
+			if ov != (struct {
+				Context, Output     int
+				ToolCall, Reasoning bool
+				Attachment          bool
+			}{}) {
+				cur.ToolCall, cur.Reasoning, cur.Attach = ov.ToolCall, ov.Reasoning, ov.Attachment
+			}
 			if cur.Source == "seed" {
-				cur.Source = "registry"
+				cur.Source = "live"
 			}
 			continue
 		}
@@ -1445,9 +1497,10 @@ func syncZenModels() (int, error) {
 		if _, conflict := zenAliases[id]; conflict {
 			continue
 		}
-		// 新模型：目录限额为准（缺失才回退 200K/32K）；Upstream 按家族规则：
-		// muse-spark 走原生 responses（实测 chat/completions 500），其余默认。
-		ctx, out := m.Limit.Context, m.Limit.Output
+		// 新模型：overlay 限额为准（缺失才回退 200K/32K）；Upstream 按家族规则：
+		// muse-spark 走原生 responses（实测 chat/completions 500），其余默认
+		// （端点自适应会在走错时自动学习，无需手动维护）。
+		ctx, out := ov.Context, ov.Output
 		if ctx <= 0 {
 			ctx = 200000
 		}
@@ -1462,40 +1515,41 @@ func syncZenModels() (int, error) {
 			ID:        id,
 			Context:   ctx,
 			Output:    out,
-			Source:    "registry",
+			Source:    "live",
 			Upstream:  upstream,
-			ToolCall:  m.ToolCall,
-			Reasoning: m.Reasoning,
-			Attach:    m.Attachment,
+			ToolCall:  ov.ToolCall,
+			Reasoning: ov.Reasoning,
+			Attach:    ov.Attachment,
 		}
 		added++
 	}
-	// 修剪已从目录下线的 registry/synced 模型，避免 /v1/models 长期展示死模型。
+	// 修剪已从真源下线的 live/registry/synced 模型，避免 /v1/models 展示死模型。
 	// seed 模型是手工维护的兜底，不在修剪范围内（只升级 Source，不删除）。
-	// 防御: 目录短暂返回空表/残表(网关抖动、接口变更)时不得清空本地列表 ——
-	// live 数量不足现有 registry/synced 一半时跳过本轮修剪。
+	// 防御: 真源短暂返回空表/残表(网关抖动、接口变更)时不得清空本地列表 ——
+	// liveFree 为空已在上游提前返回错误；此处再要求 liveFree 数量不低于
+	// 现有 managed 一半才修剪。
 	managedCount := 0
 	for _, m := range zenModels {
-		if m.Source == "registry" || m.Source == "synced" {
+		if m.Source == "live" || m.Source == "registry" || m.Source == "synced" {
 			managedCount++
 		}
 	}
 	pruned := 0
-	if len(live) > 0 && len(live)*2 >= managedCount {
+	if len(liveFree) > 0 && len(liveFree)*2 >= managedCount {
 		for id, m := range zenModels {
-			if (m.Source == "registry" || m.Source == "synced") && !live[id] {
+			if (m.Source == "live" || m.Source == "registry" || m.Source == "synced") && !liveFree[id] {
 				delete(zenModels, id)
 				pruned++
 			}
 		}
 	} else if managedCount > 0 {
-		log.Printf("zen model sync: live feed too small (%d live vs %d managed), skipping prune", len(live), managedCount)
+		log.Printf("zen model sync: live feed too small (%d live vs %d managed), skipping prune", len(liveFree), managedCount)
 	}
 	if pruned > 0 {
 		log.Printf("zen model sync: pruned %d model(s) no longer on upstream feed", pruned)
 	}
 	if added > 0 {
-		log.Printf("zen model sync: %d new free model(s) from registry", added)
+		log.Printf("zen model sync: %d new free model(s) from zen feed", added)
 	}
 	return added, nil
 }

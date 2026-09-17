@@ -1100,6 +1100,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		if resp.StatusCode == http.StatusOK {
 			markZenKeySuccess(key)
 			markZenSuccess()
+			harvestMarkSuccess(key)
 			if stream {
 				return resp, rateLimited, nil
 			}
@@ -1157,8 +1158,10 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		// 会话失效（FreeTier 403 且非限流）：该 key 的 sess_ 已被服务端
 		// 遗忘，复用只会持续 403。换新会话后按轮转换 key（retryKey 语义：
 		// 同一 attempt 链内 pick 出来的就是下一个 key）继续重试。
+		// 收割机启用时后台 mint 真会话补上（本地随机 ID 只是止损）。
 		if resp.StatusCode == http.StatusForbidden {
 			MarkZenSessionDead(key)
+			go harvestOnForbidden(key)
 			if attempt < retries {
 				if next := pickZenKey(); next != "" && !zenKeyCooling(next) {
 					key = next

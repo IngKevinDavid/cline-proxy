@@ -2240,6 +2240,47 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 	}
 
 	resp, rateLimited, err := callZenAPI(r.Context(), openAIReq, isStream)
+	if err != nil && isWrongEndpoint(err) {
+		learnZenEndpoint(zm.ID, "responses")
+		log.Printf("  anthropic zen endpoint auto-learn: model=%s chat/completions rejected (%v), retrying responses",
+			zm.ID, kit.Truncate(err.Error(), 120))
+		resp2, rateLimited2, rerr := callZenResponsesAPI(r.Context(), openAIReq, true)
+		if rerr != nil {
+			log.Printf("  anthropic zen responses api error: %v", rerr)
+			tracker.rec.RateLimited = rateLimited2
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"error": map[string]string{"message": rerr.Error(), "type": "api_error"},
+			})
+			tracker.finish(false, http.StatusBadGateway)
+			return
+		}
+		defer resp2.Body.Close()
+		chat, aerr := responsesSSEToChat(resp2)
+		if aerr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{
+				"error": map[string]string{"message": aerr.Error(), "type": "parse_error"},
+			})
+			tracker.finish(false, http.StatusInternalServerError)
+			return
+		}
+		tracker.rec.RateLimited = rateLimited2
+		tracker.rec.Status = http.StatusOK
+		if u, ok := chat["usage"].(map[string]any); ok && len(u) > 0 {
+			if ct, ok := u["completion_tokens"].(float64); ok {
+				tracker.rec.CompletionTokens = int(ct)
+			}
+		}
+		chat["model"] = zm.ID
+		chat = normalizeOpenAIResponse(chat)
+		truncateAtStopSequences(chat, stopSequencesFrom(openAIReq))
+		anthropicResp := openAIToAnthropic(chat)
+		if tc, ok := getNested(chat, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
+			anthropicResp["stop_reason"] = "tool_use"
+		}
+		tracker.finish(true, http.StatusOK)
+		writeJSON(w, http.StatusOK, anthropicResp)
+		return
+	}
 	if err != nil {
 		log.Printf("  anthropic zen api error: %v", err)
 		tracker.rec.RateLimited = rateLimited

@@ -1356,9 +1356,9 @@ async function loadOcModels() {
   try {
     const d = await api('GET', '/opencode/models');
     const models = d.data.models || [];
-    _('ocModelsList').innerHTML = '<div class="table-wrap"><table><thead><tr><th style="text-align:left">Model ID</th><th>Context</th><th>Output</th><th>Source</th></tr></thead><tbody>' +
-      models.map(m => '<tr><td style="text-align:left;font-family:monospace">' + esc(m.id) + '</td><td>' + esc(m.context) + '</td><td>' + esc(m.output) + '</td><td>' + esc(m.source) + '</td></tr>').join('') +
-      '</tbody></table></div><div class="hint">' + models.length + ' free models total (auto-synced every 10 minutes)</div>';
+    _('ocModelsList').innerHTML = '<div class="table-wrap"><table><thead><tr><th style="text-align:left">Model ID</th><th>Context</th><th>Output</th><th>Tools</th><th>Reason</th><th>Attach</th><th>Endpoint</th><th>Source</th></tr></thead><tbody>' +
+      models.map(m => '<tr><td style="text-align:left;font-family:monospace">' + esc(m.id) + '</td><td>' + esc(m.context) + '</td><td>' + esc(m.output) + '</td><td>' + (m.toolCall ? '✓' : '-') + '</td><td>' + (m.reasoning ? '✓' : '-') + '</td><td>' + (m.attach ? '✓' : '-') + '</td><td style="font-family:monospace;font-size:11px">' + esc(m.upstream === 'responses' ? 'responses' : 'chat') + '</td><td>' + esc(m.source) + '</td></tr>').join('') +
+      '</tbody></table></div><div class="hint">' + models.length + ' free models total (auto-synced every 10 minutes from public registry)</div>';
   } catch (e) { _('ocModelsList').textContent = 'Failed to load'; }
 }
 

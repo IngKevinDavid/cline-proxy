@@ -173,11 +173,15 @@ func handleZenModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		models = append(models, map[string]any{
-			"id":      m.ID,
-			"aliases": m.Aliases,
-			"context": m.Context,
-			"output":  m.Output,
-			"source":  m.Source,
+			"id":        m.ID,
+			"aliases":   m.Aliases,
+			"context":   m.Context,
+			"output":    m.Output,
+			"source":    m.Source,
+			"upstream":  m.Upstream,
+			"toolCall":  m.ToolCall,
+			"reasoning": m.Reasoning,
+			"attach":    m.Attach,
 		})
 	}
 	zenModelsMu.RUnlock()

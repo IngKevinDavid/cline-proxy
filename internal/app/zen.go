@@ -21,12 +21,15 @@ import (
 
 // ZenModel opencode zen 免费模型定义
 type ZenModel struct {
-	ID       string   `json:"id"`
-	Aliases  []string `json:"aliases,omitempty"`
-	Context  int      `json:"context"`
-	Output   int      `json:"output"`
-	Source   string   `json:"source"` // seed=内置 / synced=动态同步
-	Upstream string   `json:"upstream,omitempty"` // 强制原生上游端点: "responses"；空=默认 chat/completions
+	ID        string   `json:"id"`
+	Aliases   []string `json:"aliases,omitempty"`
+	Context   int      `json:"context"`
+	Output    int      `json:"output"`
+	Source    string   `json:"source"` // seed=内置 / registry=公共目录同步 / synced=zen 上游同步
+	Upstream  string   `json:"upstream,omitempty"` // 强制原生上游端点: "responses"；空=默认 chat/completions
+	ToolCall  bool     `json:"toolCall,omitempty"` // 目录声明的 tool_call 能力
+	Reasoning bool     `json:"reasoning,omitempty"` // 目录声明的 reasoning 能力
+	Attach    bool     `json:"attachment,omitempty"` // 目录声明的图片/附件输入能力
 }
 
 // zenSeedModels 内置免费模型种子：仅收录 zen /v1/models 当前在线的免费模型。
@@ -34,16 +37,16 @@ type ZenModel struct {
 // north-mini-code-free / laguna-s-2.1-free / big-pickle）已移除——syncZenModels
 // 会同步上游在线列表并修剪掉线下模型，种子只作为首次启动/同步失败的兜底。
 var zenSeedModels = []ZenModel{
-	{"mimo-v2.5-free", []string{"mimo-v2.5", "mimo"}, 200000, 32000, "seed", ""},
-	{"nemotron-3-ultra-free", []string{"nemotron-3-ultra", "nemotron"}, 1000000, 128000, "seed", ""},
-	{"nemotron-3.5-lightning-free", []string{"nemotron-3.5-lightning", "nemotron-lightning"}, 200000, 32768, "seed", ""},
-	{"ling-3.0-flash-fin-free", []string{"ling-3.0-flash-fin", "ling-fin", "ling"}, 200000, 32768, "seed", ""},
-	{"deepseek-v4-flash-free", []string{"deepseek-v4-flash", "deepseek-v4"}, 200000, 128000, "seed", ""},
+	{ID: "mimo-v2.5-free", Aliases: []string{"mimo-v2.5", "mimo"}, Context: 200000, Output: 32000, Source: "seed"},
+	{ID: "nemotron-3-ultra-free", Aliases: []string{"nemotron-3-ultra", "nemotron"}, Context: 1000000, Output: 128000, Source: "seed"},
+	{ID: "nemotron-3.5-lightning-free", Aliases: []string{"nemotron-3.5-lightning", "nemotron-lightning"}, Context: 200000, Output: 32768, Source: "seed"},
+	{ID: "ling-3.0-flash-fin-free", Aliases: []string{"ling-3.0-flash-fin", "ling-fin", "ling"}, Context: 200000, Output: 32768, Source: "seed"},
+	{ID: "deepseek-v4-flash-free", Aliases: []string{"deepseek-v4-flash", "deepseek-v4"}, Context: 200000, Output: 128000, Source: "seed"},
 	// muse-spark 只在原生 /v1/responses 端点上可用：官方 opencode CLI 实测
 	// 对该模型只发 POST /zen/v1/responses（带 tools + reason、返回 SSE），
 	// chat/completions 上该模型 500（需经 responses 原生调用再转回 chat 形态）
-	{"muse-spark-1.3-contributor-free", []string{"muse-spark-contributor"}, 200000, 32768, "seed", "responses"},
-	{"muse-spark-1.2-contributor-free", []string{"muse-spark"}, 200000, 32768, "seed", "responses"},
+	{ID: "muse-spark-1.3-contributor-free", Aliases: []string{"muse-spark-contributor"}, Context: 200000, Output: 32768, Source: "seed", Upstream: "responses"},
+	{ID: "muse-spark-1.2-contributor-free", Aliases: []string{"muse-spark"}, Context: 200000, Output: 32768, Source: "seed", Upstream: "responses"},
 }
 
 var (
@@ -1353,94 +1356,146 @@ func zenModelList() []map[string]any {
 		}
 		cp := *m
 		out = append(out, map[string]any{
-			"id":      cp.ID,
-			"context": cp.Context,
-			"output":  cp.Output,
-			"source":  cp.Source,
+			"id":        cp.ID,
+			"context":   cp.Context,
+			"output":    cp.Output,
+			"source":    cp.Source,
+			"upstream":  cp.Upstream,
+			"toolCall":  cp.ToolCall,
+			"reasoning": cp.Reasoning,
+			"attach":    cp.Attach,
 		})
 	}
 	zenModelsMu.RUnlock()
 	return out
 }
 
-// syncZenModels 拉取 zen /v1/models,动态合并到模型表
+// opencodeModelsRegistry 公共模型目录（官方 CLI 同源，无需认证；
+// 替代 zen /v1/models，后者用 "public" key 恒失败，只能靠种子兜底）。
+const opencodeModelsRegistry = "https://models.opencode.ai/api.json"
+
+// syncZenModels 从公共模型目录同步免费模型（opencode provider 下 id 含
+// "free" 的条目），合并 limit.context/output 与能力旗标；种子继续做兜底。
+// 返回新增模型数。目录不可达/解析失败时返回错误并保留旧表。
 func syncZenModels() (int, error) {
 	initZenModels()
-	cfg := getZenConfig()
-	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/models"
-	req, err := http.NewRequest("GET", endpoint, nil)
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequest("GET", opencodeModelsRegistry, nil)
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Key)
-	client := &http.Client{Timeout: 25 * time.Second}
+	req.Header.Set("User-Agent", "opencode/latest/cli")
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
+		return 0, fmt.Errorf("registry HTTP %d", resp.StatusCode)
 	}
 
-	var payload struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
+	var payload map[string]struct {
+		Models map[string]struct {
+			ID         string `json:"id"`
+			ToolCall   bool   `json:"tool_call"`
+			Reasoning  bool   `json:"reasoning"`
+			Attachment bool   `json:"attachment"`
+			Limit      struct {
+				Context int `json:"context"`
+				Output  int `json:"output"`
+			} `json:"limit"`
+		} `json:"models"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
 		return 0, err
+	}
+	prov, ok := payload["opencode"]
+	if !ok || len(prov.Models) == 0 {
+		return 0, fmt.Errorf("registry: no opencode provider block")
 	}
 
 	zenModelsMu.Lock()
 	defer zenModelsMu.Unlock()
 	added := 0
-	live := make(map[string]bool, len(payload.Data))
-	for _, item := range payload.Data {
-		id := item.ID
-		if id == "" {
+	live := make(map[string]bool, len(prov.Models))
+	for id, m := range prov.Models {
+		if id == "" || !strings.Contains(strings.ToLower(id), "free") {
 			continue
 		}
+		if m.ID != "" {
+			id = m.ID
+		}
 		live[id] = true
-		if _, ok := zenModels[id]; ok {
+		if cur, ok := zenModels[id]; ok {
+			// 存量模型：目录限额覆盖种子估算（种子只保 ID/别名/Upstream），
+			// Source 升级为 registry（修剪只动 registry/synced，不动 seed）。
+			if m.Limit.Context > 0 {
+				cur.Context = m.Limit.Context
+			}
+			if m.Limit.Output > 0 {
+				cur.Output = m.Limit.Output
+			}
+			cur.ToolCall, cur.Reasoning, cur.Attach = m.ToolCall, m.Reasoning, m.Attachment
+			if cur.Source == "seed" {
+				cur.Source = "registry"
+			}
 			continue
 		}
 		// 跳过与免费模型别名冲突的 ID(如付费的 deepseek-v4-flash),保证别名解析不被覆盖
 		if _, conflict := zenAliases[id]; conflict {
 			continue
 		}
-		// 新模型:默认按 200K 上下文接入,输出按 32K
+		// 新模型：目录限额为准（缺失才回退 200K/32K）；Upstream 按家族规则：
+		// muse-spark 走原生 responses（实测 chat/completions 500），其余默认。
+		ctx, out := m.Limit.Context, m.Limit.Output
+		if ctx <= 0 {
+			ctx = 200000
+		}
+		if out <= 0 {
+			out = 32768
+		}
+		upstream := ""
+		if strings.Contains(strings.ToLower(id), "muse-spark") {
+			upstream = "responses"
+		}
 		zenModels[id] = &ZenModel{
-			ID:      id,
-			Context: 200000,
-			Output:  32768,
-			Source:  "synced",
+			ID:        id,
+			Context:   ctx,
+			Output:    out,
+			Source:    "registry",
+			Upstream:  upstream,
+			ToolCall:  m.ToolCall,
+			Reasoning: m.Reasoning,
+			Attach:    m.Attachment,
 		}
 		added++
 	}
-	// 修剪已从上游下线的 synced 模型，避免 /v1/models 长期展示死模型。
-	// 种子模型是手工维护的兜底，不在修剪范围内。
-	// 防御: 上游短暂返回空表/残表(网关抖动、接口变更)时不得清空本地列表 ——
-	// live 数量不足现有 synced 一半时跳过本轮修剪。
-	syncedCount := 0
+	// 修剪已从目录下线的 registry/synced 模型，避免 /v1/models 长期展示死模型。
+	// seed 模型是手工维护的兜底，不在修剪范围内（只升级 Source，不删除）。
+	// 防御: 目录短暂返回空表/残表(网关抖动、接口变更)时不得清空本地列表 ——
+	// live 数量不足现有 registry/synced 一半时跳过本轮修剪。
+	managedCount := 0
 	for _, m := range zenModels {
-		if m.Source == "synced" {
-			syncedCount++
+		if m.Source == "registry" || m.Source == "synced" {
+			managedCount++
 		}
 	}
 	pruned := 0
-	if len(live) > 0 && len(live)*2 >= syncedCount {
+	if len(live) > 0 && len(live)*2 >= managedCount {
 		for id, m := range zenModels {
-			if m.Source == "synced" && !live[id] {
+			if (m.Source == "registry" || m.Source == "synced") && !live[id] {
 				delete(zenModels, id)
 				pruned++
 			}
 		}
-	} else if syncedCount > 0 {
-		log.Printf("zen model sync: live feed too small (%d live vs %d synced), skipping prune", len(live), syncedCount)
+	} else if managedCount > 0 {
+		log.Printf("zen model sync: live feed too small (%d live vs %d managed), skipping prune", len(live), managedCount)
 	}
 	if pruned > 0 {
 		log.Printf("zen model sync: pruned %d model(s) no longer on upstream feed", pruned)
+	}
+	if added > 0 {
+		log.Printf("zen model sync: %d new free model(s) from registry", added)
 	}
 	return added, nil
 }

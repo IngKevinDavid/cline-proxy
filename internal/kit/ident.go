@@ -35,6 +35,9 @@ var ZenUserAgents = []string{
 	"opencode/1.18.11/cli",
 	"opencode/latest/1.18.14/desktop",
 	"opencode/latest/1.18.13/desktop",
+	// 原生 responses 路径实测：官方 CLI 发 ai-sdk 形态 UA；网关轮换列表
+	// 加入该条目以匹配官方客户端指纹（连同 TLS 指纹见 tls_bun.go）
+	"opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14",
 }
 
 // mustRand 读满 n 字节加密随机数；crypto/rand 失败说明系统熵源异常，
@@ -64,9 +67,22 @@ func RandIntn(n int) int {
 	return v % n
 }
 
-// FreshZenIdentity 生成一组全新客户端身份 (session, request, user-agent)
+// FreshZenIdentity 生成一组全新客户端身份 (session, request, user-agent)。
+// 格式经官方 CLI 实际流量核对：session 为 sess_<26 大小写字母+数字>，
+// request 为 msg_<26 大小写字母+数字>（与官方 msg_ 前缀一致）。
 func FreshZenIdentity() (string, string, string) {
-	return "sess_" + RandHex(16),
-		"user_" + RandHex(8),
+	return "sess_" + RandAlphaNum(26),
+		"msg_" + RandAlphaNum(26),
 		ZenUserAgents[RandIntn(len(ZenUserAgents))]
+}
+
+// RandAlphaNum 生成 n 个大小写字母+数字（匹配官方 CLI 的 sess_/msg_ ID 字符集）。
+func RandAlphaNum(n int) string {
+	const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, n)
+	mustRand(b)
+	for i := range b {
+		b[i] = chars[int(b[i])%len(chars)]
+	}
+	return string(b)
 }

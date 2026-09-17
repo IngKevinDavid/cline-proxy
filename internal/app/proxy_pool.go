@@ -164,7 +164,10 @@ func buildZenTransport() *http.Transport {
 	})
 }
 
-// buildTransport 构造 uTLS Chrome 指纹 + HTTP/2 的 Transport，拨号函数可注入。
+// buildTransport 构造 Bun/BoringSSL 指纹(h1,官方 CLI 实测只用 http/1.1)+
+// 可注入拨号的 Transport。注意: Bun 指纹 ALPN 只报 http/1.1,握手协商出 h1,
+// 因此不能再 RegisterProtocol("https"→h2),否则 h2 帧解析器会对 h1 明文
+// 连接报错(frame too large)。标准 Transport 按 ALPN 自动走 h1。
 func buildTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
 	t := &http.Transport{
 		MaxIdleConns:        100,
@@ -173,11 +176,34 @@ func buildTransport(dial func(ctx context.Context, network, addr string) (net.Co
 		DisableCompression:  false,
 	}
 	t.DialContext = dial
-	// https 走 HTTP/2 + uTLS Chrome 指纹: 完整浏览器指纹(含 h2),避免 Go 原生指纹被 CF 风控
-	t.RegisterProtocol("https", http2TransportWithDial(dial))
+	t.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		raw, err := dial(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			raw.Close()
+			return nil, err
+		}
+		uconn := utls.UClient(raw, &utls.Config{
+			ServerName: host,
+			NextProtos: []string{"http/1.1"},
+		}, utls.HelloCustom)
+		if err := uconn.ApplyPreset(bunSpecForConn()); err != nil {
+			raw.Close()
+			return nil, err
+		}
+		if err := uconn.HandshakeContext(ctx); err != nil {
+			raw.Close()
+			return nil, err
+		}
+		return uconn, nil
+	}
 	return t
 }
 
+// http2TransportWithDial 保留给 cline 上游等仍需 h2+Chrome 指纹的调用方。
 func http2TransportWithDial(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http2.Transport {
 	return &http2.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {

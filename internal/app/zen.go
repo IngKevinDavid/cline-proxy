@@ -1,16 +1,19 @@
 package app
 
 import (
+	"bufio"
 	"bytes"
 	"cline-go-proxy/internal/kit"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -18,11 +21,12 @@ import (
 
 // ZenModel opencode zen 免费模型定义
 type ZenModel struct {
-	ID      string   `json:"id"`
-	Aliases []string `json:"aliases,omitempty"`
-	Context int      `json:"context"`
-	Output  int      `json:"output"`
-	Source  string   `json:"source"` // seed=内置 / synced=动态同步
+	ID       string   `json:"id"`
+	Aliases  []string `json:"aliases,omitempty"`
+	Context  int      `json:"context"`
+	Output   int      `json:"output"`
+	Source   string   `json:"source"` // seed=内置 / synced=动态同步
+	Upstream string   `json:"upstream,omitempty"` // 强制原生上游端点: "responses"；空=默认 chat/completions
 }
 
 // zenSeedModels 内置免费模型种子：仅收录 zen /v1/models 当前在线的免费模型。
@@ -30,13 +34,16 @@ type ZenModel struct {
 // north-mini-code-free / laguna-s-2.1-free / big-pickle）已移除——syncZenModels
 // 会同步上游在线列表并修剪掉线下模型，种子只作为首次启动/同步失败的兜底。
 var zenSeedModels = []ZenModel{
-	{"mimo-v2.5-free", []string{"mimo-v2.5", "mimo"}, 200000, 32000, "seed"},
-	{"nemotron-3-ultra-free", []string{"nemotron-3-ultra", "nemotron"}, 1000000, 128000, "seed"},
-	{"nemotron-3.5-lightning-free", []string{"nemotron-3.5-lightning", "nemotron-lightning"}, 200000, 32768, "seed"},
-	{"ling-3.0-flash-fin-free", []string{"ling-3.0-flash-fin", "ling-fin", "ling"}, 200000, 32768, "seed"},
-	{"deepseek-v4-flash-free", []string{"deepseek-v4-flash", "deepseek-v4"}, 200000, 128000, "seed"},
-	{"muse-spark-1.3-contributor-free", []string{"muse-spark-contributor"}, 200000, 32768, "seed"},
-	{"muse-spark-1.2-contributor-free", []string{"muse-spark"}, 200000, 32768, "seed"},
+	{"mimo-v2.5-free", []string{"mimo-v2.5", "mimo"}, 200000, 32000, "seed", ""},
+	{"nemotron-3-ultra-free", []string{"nemotron-3-ultra", "nemotron"}, 1000000, 128000, "seed", ""},
+	{"nemotron-3.5-lightning-free", []string{"nemotron-3.5-lightning", "nemotron-lightning"}, 200000, 32768, "seed", ""},
+	{"ling-3.0-flash-fin-free", []string{"ling-3.0-flash-fin", "ling-fin", "ling"}, 200000, 32768, "seed", ""},
+	{"deepseek-v4-flash-free", []string{"deepseek-v4-flash", "deepseek-v4"}, 200000, 128000, "seed", ""},
+	// muse-spark 只在原生 /v1/responses 端点上可用：官方 opencode CLI 实测
+	// 对该模型只发 POST /zen/v1/responses（带 tools + reason、返回 SSE），
+	// chat/completions 上该模型 500（需经 responses 原生调用再转回 chat 形态）
+	{"muse-spark-1.3-contributor-free", []string{"muse-spark-contributor"}, 200000, 32768, "seed", "responses"},
+	{"muse-spark-1.2-contributor-free", []string{"muse-spark"}, 200000, 32768, "seed", "responses"},
 }
 
 var (
@@ -568,6 +575,21 @@ func maxInt(a, b int) int {
 	return b
 }
 
+// pinnedZenKey 取 ZEN_PIN_KEY 指定的固定 key（1-based 序号，如 "2"）。
+// 排障/单 key 直测用：所有 attempt 都用该 key，避免轮换污染归因。
+// 未设置或越界时返回 ""（正常轮转）。
+func pinnedZenKey() string {
+	n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("ZEN_PIN_KEY")))
+	if err != nil || n < 1 {
+		return ""
+	}
+	keys := getZenConfig().Keys
+	if n > len(keys) {
+		return ""
+	}
+	return keys[n-1]
+}
+
 // ============ zen 上游调用 ============
 
 // buildZenBody 构造 zen 请求体:只带 OpenAI 兼容字段,改写模型为 zen ID
@@ -595,6 +617,559 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 	delete(body, "reasoningEffort")
 	enforceToolChoiceNone(body)
 	return body
+}
+
+// ============ zen 上游调用：原生 /v1/responses 端点 ============
+//
+// 背景: 部分 zen 免费模型（如 muse-spark）在 chat/completions 端点上 500，
+// 官方 opencode CLI 对它们只发原生 POST /zen/v1/responses（Responses 形态
+// 请求体 + SSE 事件流响应）。网关对这类模型走同样路径：请求体按 Responses
+// 形态构造，响应再转回 chat completions 形态，上下游都不感知差异。
+
+// buildZenResponsesBody 把 chat 请求参数映射为 Responses 形态请求体：
+// messages -> input（system/developer 指令并入 instructions），
+// max_tokens/max_completion_tokens -> max_output_tokens。
+// 字段经官方 CLI 实际请求逐字段核对：reasoning.summary=auto、
+// include=[reasoning.encrypted_content]、tool_choice 缺省 auto、
+// prompt_cache_key=会话 ID 均为 CLI 常发字段，缺省会与原生形态不一致。
+// promptKey 为本次上游会话 ID（调用方传入本次请求的 sess_ 值）。
+func buildZenResponsesBody(params map[string]any, stream bool, modelID string, promptKey string) map[string]any {
+	body := map[string]any{
+		"model":  modelID,
+		"stream": stream,
+		"store":  false,
+	}
+	if promptKey != "" {
+		body["prompt_cache_key"] = promptKey
+	}
+	var input []any
+	if msgs, ok := params["messages"].([]any); ok {
+		for _, m := range msgs {
+			mm, ok := m.(map[string]any)
+			if !ok {
+				continue
+			}
+			role, _ := mm["role"].(string)
+			content := responsesContentToInput(mm["content"])
+			if role == "system" || role == "developer" {
+				// system/developer 指令提升为顶层 instructions（Responses 标准字段；
+				// 官方 CLI 发 role=developer 条目且无顶层 instructions——网关把
+				// 历史 system/developer 内容并入 instructions 保持等价）
+				if s, ok := content.(string); ok && s != "" {
+					if prev, _ := body["instructions"].(string); prev != "" {
+						body["instructions"] = prev + "\n\n" + s
+					} else {
+						body["instructions"] = s
+					}
+				}
+				continue
+			}
+			if role == "tool" {
+				// tool 结果 -> function_call_output（Responses 标准形态）
+				callID, _ := mm["tool_call_id"].(string)
+				out := ""
+				switch o := content.(type) {
+				case string:
+					out = o
+				default:
+					if b, err := json.Marshal(content); err == nil {
+						out = string(b)
+					}
+				}
+				input = append(input, map[string]any{
+					"type":    "function_call_output",
+					"call_id": callID,
+					"output":  out,
+				})
+				continue
+			}
+			entry := map[string]any{"role": role, "content": content}
+			// assistant 历史 tool_calls -> function_call 条目（保留调用链）
+			if role == "assistant" {
+				if tcs, ok := mm["tool_calls"].([]any); ok {
+					for _, tc := range tcs {
+						tcm, ok := tc.(map[string]any)
+						if !ok {
+							continue
+						}
+						fn, _ := tcm["function"].(map[string]any)
+						id, _ := tcm["id"].(string)
+						name, _ := fn["name"].(string)
+						args := ""
+						if fn != nil {
+							args, _ = fn["arguments"].(string)
+						}
+						entry = map[string]any{
+							"type":      "function_call",
+							"id":        id,
+							"call_id":   id,
+							"name":      name,
+							"arguments": args,
+						}
+						break
+					}
+				}
+			}
+			input = append(input, entry)
+		}
+	}
+	if len(input) == 0 {
+		input = []any{map[string]any{"role": "user", "content": ""}}
+	}
+	body["input"] = input
+	// 输出上限：Responses 字段名是 max_output_tokens（官方 CLI 实测发送该字段）
+	if mt := asInt(params["max_tokens"]); mt > 0 {
+		body["max_output_tokens"] = mt
+	} else if mt := asInt(params["max_completion_tokens"]); mt > 0 {
+		body["max_output_tokens"] = mt
+	}
+	// 透传采样参数（Responses 与 chat 同名）
+	for _, k := range []string{"temperature", "top_p"} {
+		if v, ok := params[k]; ok {
+			body[k] = v
+		}
+	}
+	// reasoning_effort 在 Responses 形态下保留为 reasoning.effort（官方 CLI 实测发送）
+	if eff, ok := params["reasoning_effort"].(string); ok && eff != "" {
+		body["reasoning"] = map[string]any{"effort": eff, "summary": "auto"}
+	} else if eff, ok := params["reasoningEffort"].(string); ok && eff != "" {
+		body["reasoning"] = map[string]any{"effort": eff, "summary": "auto"}
+	} else {
+		// 官方 CLI 即使无 effort 也发 reasoning.summary=auto；缺该字段的
+		// 请求与原生形态不一致，补默认值保持一致
+		body["reasoning"] = map[string]any{"summary": "auto"}
+	}
+	// include 原生字段：官方 CLI 实测发送 reasoning.encrypted_content；
+	// 缺省时补齐以匹配原生请求形态
+	body["include"] = []any{"reasoning.encrypted_content"}
+	// 工具转换：chat 形态 tools[].function.{name,description,parameters}
+	// -> Responses 形态 tools[].{type,name,description,parameters,strict}
+	//（官方 CLI 发后者；chat 嵌套形态上游报 tools[0] missing name）。
+	// tool_choice 缺省 auto 与 CLI 一致。
+	if tools, ok := params["tools"].([]any); ok && len(tools) > 0 {
+		var rt []any
+		for _, t := range tools {
+			tm, ok := t.(map[string]any)
+			if !ok {
+				continue
+			}
+			if fn, ok := tm["function"].(map[string]any); ok {
+				nt := map[string]any{"type": "function"}
+				if name, _ := fn["name"].(string); name != "" {
+					nt["name"] = name
+				} else if name, _ := tm["name"].(string); name != "" {
+					nt["name"] = name
+				}
+				if desc, _ := fn["description"].(string); desc != "" {
+					nt["description"] = desc
+				} else if desc, _ := tm["description"].(string); desc != "" {
+					nt["description"] = desc
+				}
+				if p, ok := fn["parameters"]; ok {
+					nt["parameters"] = p
+				} else if p, ok := tm["parameters"]; ok {
+					nt["parameters"] = p
+				}
+				if s, ok := tm["strict"].(bool); ok {
+					nt["strict"] = s
+				} else {
+					nt["strict"] = false
+				}
+				rt = append(rt, nt)
+				continue
+			}
+			rt = append(rt, t)
+		}
+		if len(rt) > 0 {
+			body["tools"] = rt
+			if tc, ok := params["tool_choice"]; ok {
+				body["tool_choice"] = tc
+			} else {
+				body["tool_choice"] = "auto"
+			}
+		}
+	}
+	return body
+}
+
+// responsesContentToInput chat content -> Responses input content。
+// 字符串原样；parts 数组只保留文本/图片两种 Responses 原生类型。
+func responsesContentToInput(content any) any {
+	if s, ok := content.(string); ok {
+		return s
+	}
+	parts, ok := content.([]any)
+	if !ok {
+		return ""
+	}
+	out := make([]any, 0, len(parts))
+	for _, p := range parts {
+		pm, ok := p.(map[string]any)
+		if !ok {
+			continue
+		}
+		t, _ := pm["type"].(string)
+		switch t {
+		case "text", "input_text":
+			txt, _ := pm["text"].(string)
+			out = append(out, map[string]any{"type": "input_text", "text": txt})
+		case "image_url":
+			url := ""
+			if u, ok := pm["image_url"].(map[string]any); ok {
+				url, _ = u["url"].(string)
+			}
+			if url != "" {
+				out = append(out, map[string]any{"type": "image_url", "image_url": url})
+			}
+		}
+	}
+	if len(out) == 1 {
+		if one, ok := out[0].(map[string]any); ok && one["type"] == "input_text" {
+			txt, _ := one["text"].(string)
+			return txt
+		}
+	}
+	return out
+}
+
+// responsesSSEToChat 把原生 responses SSE 事件流聚合成 chat completions 形态。
+// 处理两种事件风格（上游按次返回其一）：
+//   - delta 流：response.output_text.delta / function_call_arguments.delta /
+//     reasoning_summary_text.delta（逐块增量文本）
+//   - output_item.done：response.output_item.done 内 item.content[].text 全量
+//     文本（muse-spark 对纯文本问答只发该事件，无 delta 流）
+// usage 从 response.completed 或 response.incomplete 提取；
+// incomplete_details.reason 映射为 finish 原因（length→length）。
+func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
+	defer resp.Body.Close()
+	var text, args, reasoning strings.Builder
+	var usage map[string]any
+	var incompleteReason string
+	toolName, toolCallID, itemID := "", "", ""
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, err := reader.ReadString('\n')
+		if line != "" {
+			line = strings.TrimRight(line, "\r\n")
+			if strings.HasPrefix(line, "data:") {
+				payload := strings.TrimSpace(line[5:])
+				if payload != "" && payload != "[DONE]" {
+					var ev map[string]any
+					if json.Unmarshal([]byte(payload), &ev) == nil {
+						typ, _ := ev["type"].(string)
+						switch typ {
+						case "response.output_text.delta":
+							if d, _ := ev["delta"].(string); d != "" {
+								text.WriteString(d)
+							}
+						case "response.reasoning_summary_text.delta":
+							if d, _ := ev["delta"].(string); d != "" {
+								reasoning.WriteString(d)
+							}
+						case "response.function_call_arguments.delta":
+							if d, _ := ev["delta"].(string); d != "" {
+								args.WriteString(d)
+							}
+						case "response.output_item.added":
+							if item, ok := ev["item"].(map[string]any); ok {
+								if it, _ := item["type"].(string); it == "function_call" {
+									if id, _ := item["id"].(string); id != "" {
+										itemID = id
+									}
+									if cid, _ := item["call_id"].(string); cid != "" {
+										toolCallID = cid
+									}
+									if n, _ := item["name"].(string); n != "" {
+										toolName = n
+									}
+								}
+							}
+						case "response.output_item.done":
+							// 全量输出项：message 条目 content[].output_text/text 即最终文本
+							if item, ok := ev["item"].(map[string]any); ok {
+								if it, _ := item["type"].(string); it == "message" {
+									if content, ok := item["content"].([]any); ok {
+										for _, part := range content {
+											pm, ok := part.(map[string]any)
+											if !ok {
+												continue
+											}
+											pt, _ := pm["type"].(string)
+											if pt != "output_text" && pt != "text" {
+												continue
+											}
+											if t, _ := pm["text"].(string); t != "" {
+												text.WriteString(t)
+											}
+										}
+									}
+								}
+							}
+						case "response.completed", "response.incomplete", "response.failed":
+							if r, ok := ev["response"].(map[string]any); ok {
+								if u, ok := r["usage"].(map[string]any); ok {
+									usage = u
+								}
+								if det, ok := r["incomplete_details"].(map[string]any); ok {
+									if reason, _ := det["reason"].(string); reason != "" {
+										incompleteReason = reason
+									}
+								}
+								if typ == "response.failed" && incompleteReason == "" {
+									incompleteReason = "error"
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	textStr := text.String()
+	msg := map[string]any{"role": "assistant", "content": textStr}
+	finish := "stop"
+	if incompleteReason == "max_output_tokens" || incompleteReason == "length" {
+		finish = "length"
+	} else if incompleteReason != "" {
+		finish = "stop"
+	}
+	if args.Len() > 0 || toolName != "" {
+		fixed := repairToolArguments(args.String())
+		id := toolCallID
+		if id == "" {
+			id = itemID
+		}
+		if id == "" {
+			id = fmt.Sprintf("call_%x", time.Now().UnixNano())
+		}
+		msg["tool_calls"] = []any{map[string]any{
+			"id":   id,
+			"type": "function",
+			"function": map[string]any{
+				"name":      toolName,
+				"arguments": fixed,
+			},
+		}}
+		finish = "tool_calls"
+	}
+	if reasoning.Len() > 0 {
+		msg["reasoning_content"] = reasoning.String()
+	}
+	out := map[string]any{
+		"id":      fmt.Sprintf("chatcmpl-%x", time.Now().UnixNano()),
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   "",
+		"choices": []any{map[string]any{
+			"index":         0,
+			"message":       msg,
+			"finish_reason": finish,
+		}},
+		"usage": map[string]any{
+			"prompt_tokens":     0,
+			"completion_tokens": 0,
+			"total_tokens":      0,
+		},
+	}
+	if usage != nil {
+		u := map[string]any{
+			"prompt_tokens":     0,
+			"completion_tokens": 0,
+			"total_tokens":      0,
+		}
+		if v, ok := usage["input_tokens"].(float64); ok {
+			u["prompt_tokens"] = int(v)
+		}
+		if v, ok := usage["output_tokens"].(float64); ok {
+			u["completion_tokens"] = int(v)
+		}
+		if v, ok := usage["total_tokens"].(float64); ok {
+			u["total_tokens"] = int(v)
+		} else {
+			u["total_tokens"] = u["prompt_tokens"].(int) + u["completion_tokens"].(int)
+		}
+		out["usage"] = u
+	}
+	return out, nil
+}
+
+// callZenResponsesAPI 原生 /v1/responses 端点调用：与 callZenAPI 相同的
+// 轮转/重试/冷却/统计语义，只差请求体形态与端点路径。
+//   - stream=true 时返回原生 SSE 流（调用方自行转换呈现）
+//   - stream=false 时在内部把 SSE 聚合成 chat completions 形态返回，
+//     响应体可直接按 chat 结构解码
+// 返回 (响应, 命中限流次数, 错误)。
+//
+// prompt_cache_key 绑定本次上游会话：官方 CLI 发 prompt_cache_key=<会话 ID>
+// 且与 x-opencode-session 同值。网关此前每 attempt 换新 sess_ 导致同一请求
+// 的 header 与 body 会话不一致；现 body 在请求体构造时绑定当次 sess_。
+func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool) (*http.Response, int, error) {
+	cfg := getZenConfig()
+	model, _ := params["model"].(string)
+	zm, ok := resolveZenModel(model)
+	if !ok {
+		return nil, 0, fmt.Errorf("model %q is not a known zen model", model)
+	}
+	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/responses"
+
+	zenStateMu.Lock()
+	sem := zenSem
+	zenStateMu.Unlock()
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, 0, fmt.Errorf("client aborted: %w", ctx.Err())
+	}
+	defer func() { <-sem }()
+
+	retries := cfg.Retries
+	if retries <= 0 {
+		retries = 3
+	}
+	delay := time.Second
+	rateLimited := 0
+	retryKey := "" // 非空时重试沿用该 key（保持 key sess_ 一致）
+
+	for attempt := 0; ; attempt++ {
+		proxyURL, pidx := pickUpstreamProxy()
+		viaProxy := "direct"
+		if proxyURL != "" {
+			viaProxy = maskProxyURL(proxyURL)
+		}
+		// 先选 key：attempt==0 或尚无粘性 key 时轮转；重试链内沿用
+		// retryKey（会话绑定要求 key 与 sess_ 一致；换 key 由下方
+		// 限流/403 分支显式改写 retryKey 后 continue 实现）。
+		// ZEN_PIN_KEY=n 时固定用第 n 个 key（排障直测），默认轮转。
+		var key string
+		if pk := pinnedZenKey(); pk != "" {
+			key = pk
+			retryKey = pk
+		} else if retryKey == "" {
+			retryKey = pickZenKey()
+		}
+		key = retryKey
+		sess, user, ua := "", "", ""
+		if key != "" {
+			// 会话粘性：同一 key 复用稳定的 sess_/UA（服务端会话绑定要求），
+			// msg_ 请求 ID 仍每次随机。
+			sess, user, ua = StickyZenIdentity(key)
+		} else {
+			sess, user, ua = kit.FreshZenIdentity()
+		}
+		body := buildZenResponsesBody(params, stream, zm.ID, sess)
+		bodyJSON, err := json.Marshal(body)
+		if err != nil {
+			return nil, rateLimited, fmt.Errorf("marshal zen responses body: %w", err)
+		}
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(bodyJSON))
+		if err != nil {
+			return nil, rateLimited, fmt.Errorf("create zen responses request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", ua)
+		req.Header.Set("x-opencode-session", sess)
+		req.Header.Set("x-opencode-request", user)
+		req.Header.Set("x-opencode-client", "cli")
+		req.Header.Set("x-opencode-project", "global")
+		log.Printf("  zen upstream: model=%s responses stream=%v via=%s key=#%d attempt=%d session=%s",
+			zm.ID, stream, viaProxy, keyIndex(key), attempt+1, kit.Truncate(sess, 24))
+
+		resp, err := proxyClientFor(proxyURL).Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, rateLimited, fmt.Errorf("client aborted: %w", err)
+			}
+			if pidx >= 0 {
+				cooldownUpstreamProxy(pidx, 2*time.Minute)
+				log.Printf("  zen proxy failed (%v), cooldown exit %s for 2m", err, viaProxy)
+			}
+			if attempt < retries {
+				log.Printf("  zen responses network error (%v), retry %d/%d after %v", err, attempt+1, retries, delay)
+				if !sleepCtx(ctx, kit.WithRetryJitter(delay)) {
+					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
+				}
+				delay *= 2
+				continue
+			}
+			return nil, rateLimited, fmt.Errorf("zen responses request: %w", err)
+		}
+		if resp.StatusCode == http.StatusOK {
+			markZenKeySuccess(key)
+			markZenSuccess()
+			if stream {
+				return resp, rateLimited, nil
+			}
+			// 非流式：内部聚合为 chat completions 形态后返回
+			chat, aerr := responsesSSEToChat(resp)
+			if aerr != nil {
+				return nil, rateLimited, aerr
+			}
+			chat["model"] = zm.ID
+			data, merr := json.Marshal(chat)
+			if merr != nil {
+				return nil, rateLimited, merr
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(bytes.NewReader(data)),
+			}, rateLimited, nil
+		}
+
+		bodyBytes := kit.ReadBody(resp)
+		resp.Body.Close()
+		reason := fmt.Sprintf("zen API %d: %s", resp.StatusCode, kit.Truncate(bodyBytes, 500))
+
+		if isRateLimited(resp.StatusCode, bodyBytes) {
+			rateLimited++
+			rl := parseRetryAfter(resp.Header.Get("Retry-After"))
+			cooldownZenKey(key, rl)
+			if next := pickZenKey(); next != "" && next != key && !zenKeyCooling(next) {
+				log.Printf("  zen responses rate limited (%d), switching to next zen key (%d configured)", resp.StatusCode, len(cfg.Keys))
+				continue
+			}
+			if attempt < retries {
+				wait := delay
+				if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > wait {
+					wait = retryAfter
+				}
+				if wait > 30*time.Second {
+					wait = 30 * time.Second
+				}
+				log.Printf("  zen responses rate limited (%d), retry %d/%d after %v", resp.StatusCode, attempt+1, retries, wait)
+				if !sleepCtx(ctx, kit.WithRetryJitter(wait)) {
+					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
+				}
+				delay *= 2
+				continue
+			}
+			markZenFail()
+			return nil, rateLimited, fmt.Errorf("%s", reason)
+		}
+
+		if resp.StatusCode >= 500 {
+			markZenFail()
+		}
+		// 会话失效（FreeTier 403 且非限流）：该 key 的 sess_ 已被服务端
+		// 遗忘，复用只会持续 403。换新会话后按轮转换 key（retryKey 语义：
+		// 同一 attempt 链内 pick 出来的就是下一个 key）继续重试。
+		if resp.StatusCode == http.StatusForbidden {
+			MarkZenSessionDead(key)
+			if attempt < retries {
+				if next := pickZenKey(); next != "" && !zenKeyCooling(next) {
+					key = next
+					retryKey = next
+					log.Printf("  zen responses session rejected (403), rotated session for old key, switching to key#%d", keyIndex(next))
+					continue
+				}
+			}
+		}
+		return nil, rateLimited, fmt.Errorf("%s", reason)
+	}
 }
 
 // callZenAPI 调用 zen 上游,带限流防御: 并发信号量 + 指数退避重试 + 代理冷却 + 故障计数
@@ -644,21 +1219,26 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 		if err != nil {
 			return nil, rateLimited, fmt.Errorf("create zen request: %w", err)
 		}
-		// 客户端身份轮换: 每次请求模拟全新 opencode 客户端,规避 session/UA 维度限流
-		sess, user, ua := kit.FreshZenIdentity()
-		// 多 key 轮转: round-robin 选取未冷却的 key（单 key 时行为不变）
+		// 客户端身份：会话粘性——同一 key 复用稳定的 sess_/UA（服务端
+		// 会话绑定要求，随机 sess_ 会 403），msg_ 请求 ID 每次随机。
+		// ZEN_PIN_KEY=n 时固定用第 n 个 key（单 key 直测/排障），默认轮转。
 		key := pickZenKey()
+		if pk := pinnedZenKey(); pk != "" {
+			key = pk
+		}
+		sess, user, ua := StickyZenIdentity(key)
 		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", ua)
 		req.Header.Set("x-opencode-session", sess)
 		req.Header.Set("x-opencode-request", user)
 		req.Header.Set("x-opencode-client", "cli")
+		req.Header.Set("x-opencode-project", "global")
 
 		model, _ := params["model"].(string)
-		if m, ok := resolveZenModel(model); ok {
-			req.Header.Set("x-opencode-model", m.ID)
-		}
+		// x-opencode-model 由官方 CLI 的实际请求头核对：原生客户端不发送
+		// 该头，模型只放在请求体 model 字段——网关与之保持一致
+		_ = model
 		log.Printf("  zen upstream: model=%s stream=%v msgs=%d via=%s key=#%d attempt=%d session=%s",
 			body["model"], stream, getMsgCount(params), viaProxy, keyIndex(key), attempt+1, kit.Truncate(sess, 24))
 

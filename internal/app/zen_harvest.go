@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cline-go-proxy/internal/kit"
@@ -24,23 +27,39 @@ import (
 // 唯一能 mint 新会话的是官方 opencode CLI（`opencode run` 会在服务端注册
 // 新 session，见其本地 sqlite/log）。
 //
-// 方案：镜像内嵌官方 CLI（二进制，见 Dockerfile）；网关按需调用它跑一条
-// 极小请求（transient run，不污染用户项目），从其日志/数据库里读出刚 mint
-// 的 sess_，存入 sticky 会话表。触发时机：
-//  1. 启动时：key 无 sticky 会话 → 收割一个（避免首请求必 403）；
+// 方案：镜像内嵌官方 CLI（二进制，见 Dockerfile）；网关调用它跑一条极小请求
+//（transient run，不污染用户项目），从其日志里读出刚 mint 的 sess_，存入
+// sticky 会话表。触发时机：
+//  1. 启动时：key 无 live 会话 → 收割一个（避免首请求必 403）；
 //  2. 运行时：某 key 连续 FreeTier 403 达阈值 → 后台收割新会话替换；
-//  3. 定时：每 HARVEST_INTERVAL 小时为最久未更新的 key 补一个（默认 6h）。
+//  3. 定时：每小时检查，最久未收割超过 HARVEST_INTERVAL 的 key 补一个（默认 6h）；
+//  4. 手动：管理面板「Force mint/refresh live session ids」→ 全池 mint，立即见效。
+//
+// 并行与隔离：**每个 key 一个独立 CLI HOME**（`ZEN_HARVEST_HOME/keys/<hash>`），
+// auth.json 与 CLI 日志天然隔离，因此多 key 可并行收割（上限
+// ZEN_HARVEST_CONCURRENCY，默认 3，见 harvestSem）；同一 key 仍串行（per-key 锁）。
+// 早期实现共用单一 HOME + 全局锁：11 个 key 首启要串行数分钟（每个失败点还要
+// 3 模型 × 3 次尝试），且每次收割都要覆盖再恢复管理员写在公共 HOME 里的
+// auth.json——恢复一旦失败即丢掉管理员的真实凭据。per-key HOME 两个问题
+// 一起消失：隔离天然并发，且公共 HOME 完全不被触碰。
 //
 // 开关：ZEN_HARVEST=0 关闭（默认开启，需 CLI 存在）；ZEN_HARVEST_BIN 指定
-// CLI 路径（默认 /app/bin/opencode）；ZEN_HARVEST_INTERVAL_HOURS 默认 6。
-// CLI 认证：容器内 HOME 的 .local/share/opencode/auth.json（首次部署时由
-// 管理员按文档写入，见 docs/zen-harvester.md）；每个 key 收割时临时覆盖该
-// 文件，收割完恢复（串行化 + 文件锁，保证并发安全）。
+// CLI 路径（默认 /app/bin/opencode）；ZEN_HARVEST_HOME 指定 CLI HOME 根
+//（默认 /app/.opencode-home）；ZEN_HARVEST_INTERVAL_HOURS 默认 6；
+// ZEN_HARVEST_CONCURRENCY 默认 3。CLI 认证由收割机自给自足：每次收割把当前
+// key 以单 key 形态写入该 key 专属 HOME 的 auth.json，跑完删除（不落盘留存）。
 
 var (
 	harvestMu      sync.Mutex
 	harvestFails   = map[string]int{} // key -> 连续收割失败次数
 	harvestLastTry = map[string]time.Time{}
+)
+
+// per-key 串行锁：同 key 的两次收割不能并发（会互相踩会话表与日志判读）。
+// 不同 key 之间无共享资源（各自 HOME），无需全局锁。
+var (
+	harvestKeyMu    sync.Mutex
+	harvestKeyLocks = map[string]*sync.Mutex{}
 )
 
 // 收割候选模型缓存：big-pickle 首选 + 至多 2 个动态免费兜底，缓存 1h。
@@ -69,7 +88,7 @@ func harvestBin() string {
 	return "/app/bin/opencode"
 }
 
-// harvestHome 容器内 CLI 的 HOME：auth.json 与 sqlite 都落在这里，
+// harvestHome 容器内 CLI 的 HOME 根：auth.json 与 sqlite 都落在这里，
 // 与 DATA_DIR 分开（DATA_DIR 是网关状态，HOME 是 CLI 身份）。
 func harvestHome() string {
 	if h := strings.TrimSpace(os.Getenv("ZEN_HARVEST_HOME")); h != "" {
@@ -78,8 +97,69 @@ func harvestHome() string {
 	return "/app/.opencode-home"
 }
 
-func harvestAuthPath() string {
-	return filepath.Join(harvestHome(), ".local", "share", "opencode", "auth.json")
+// harvestHomeForKey 单个 key 的 CLI HOME（并发隔离的关键）。
+//
+// 用 key 的 SHA-256 前缀命名，绝不把 key 本身写进路径——路径会出现在日志、
+// 进程列表与 `ls` 输出里。同一 key 恒得同一目录（收割是幂等的覆盖写）。
+func harvestHomeForKey(key string) string {
+	sum := sha256.Sum256([]byte(key))
+	return filepath.Join(harvestHome(), "keys", hex.EncodeToString(sum[:6]))
+}
+
+// harvestAuthPath 指定 HOME 的 auth.json 路径（CLI 按 XDG_DATA_HOME 查找）。
+func harvestAuthPath(home string) string {
+	return filepath.Join(home, ".local", "share", "opencode", "auth.json")
+}
+
+// harvestConcurrency 并行收割上限（默认 3）。CLI 是 Bun 运行时，单进程数十 MB；
+// 上限存在的意义是别把容器内存打满，而不是吞吐。范围 1..8。
+func harvestConcurrency() int {
+	var n int
+	if v := strings.TrimSpace(os.Getenv("ZEN_HARVEST_CONCURRENCY")); v != "" {
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+			n = 0
+		}
+	}
+	if n <= 0 {
+		n = 3
+	}
+	if n > 8 {
+		n = 8
+	}
+	return n
+}
+
+// harvestSem 全局并发额度（进程内惰性初始化，运行时改环境变量不生效）。
+var (
+	harvestSemOnce sync.Once
+	harvestSem     chan struct{}
+)
+
+func acquireHarvestSlot(ctx context.Context) error {
+	harvestSemOnce.Do(func() {
+		harvestSem = make(chan struct{}, harvestConcurrency())
+	})
+	select {
+	case harvestSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func releaseHarvestSlot() { <-harvestSem }
+
+// lockHarvestKey 取得某 key 的串行锁，返回释放函数。
+func lockHarvestKey(key string) func() {
+	harvestKeyMu.Lock()
+	mu, ok := harvestKeyLocks[key]
+	if !ok {
+		mu = &sync.Mutex{}
+		harvestKeyLocks[key] = mu
+	}
+	harvestKeyMu.Unlock()
+	mu.Lock()
+	return mu.Unlock
 }
 
 // harvestInterval 定时收割间隔（默认 6h，最小 1h）。
@@ -91,21 +171,78 @@ func harvestInterval() time.Duration {
 	return 6 * time.Hour
 }
 
+// harvestKeyBudget 单个 key 的收割总预算（默认 150s）。
+//
+// 必须封顶：一次收割要遍历至多 3 个候选模型 × 每个 3 次尝试 × 每次 60s 超时，
+// 失败路径理论最坏 9 分钟——并行收割时这会把一个 worker 长期占住，11 个失败
+// key 就把整个池子拖到半小时以上（面板按钮超时、首启窗口内请求持续 403）。
+// 成功路径只需 10-15s，150s 足够，且与 harvestOnForbidden 的既有超时一致。
+func harvestKeyBudget() time.Duration {
+	var secs int
+	if n, err := fmt.Sscanf(strings.TrimSpace(os.Getenv("ZEN_HARVEST_KEY_TIMEOUT_SECONDS")), "%d", &secs); err == nil && n == 1 && secs >= 30 {
+		return time.Duration(secs) * time.Second
+	}
+	return 150 * time.Second
+}
+
+// harvestRunFn 执行一次 CLI mint run（测试 seam：注入桩即可在无 CLI 的
+// 机器上验证收割逻辑，不必依赖 185MB 的 Bun 二进制）。
+var harvestRunFn = runHarvestCLI
+
+// runHarvestCLI 跑一条最小 run。只为在服务端 mint session，不关心回答内容
+// （回答可能因 key 配额 429，但 session 在 run 开始即已创建）。
+// 收割 run 不走任何代理：直连公网（容器须能直连 opencode.ai；代理池是给
+// 网关上游用的，收割是 CLI 自己的注册握手）。
+func runHarvestCLI(ctx context.Context, bin, home, model string) {
+	cmd := exec.CommandContext(ctx, bin, "run",
+		"--model", model,
+		"Reply with exactly: OK")
+	cmd.Dir = home
+	cmd.Env = append(os.Environ(),
+		"HOME="+home,
+		"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"HTTP_PROXY=",
+		"HTTPS_PROXY=",
+		"http_proxy=",
+		"https_proxy=",
+		"ALL_PROXY=",
+		"all_proxy=",
+		"NO_PROXY=*",
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+}
+
 // harvestSession 为指定 key 收割一个新 live 会话：
-// 用该 key 的 zen token 临时写入 CLI auth.json，跑一条最小 run，
+// 用该 key 的 zen token 写入**该 key 专属** HOME 的 auth.json，跑最小 run，
 // 从 CLI 日志中提取本次 mint 的 sess_，写入 sticky 表。
 // 返回新 session，失败返回错误（调用方保留旧会话继续）。
 func harvestSession(ctx context.Context, key string) (string, error) {
-	harvestMu.Lock()
-	defer harvestMu.Unlock()
+	if key == "" || key == "public" {
+		// "public" 是"无 key"哨兵，不是真凭据，无法 mint。
+		return "", fmt.Errorf("harvest: no usable key")
+	}
+	unlock := lockHarvestKey(key)
+	defer unlock()
+	if err := acquireHarvestSlot(ctx); err != nil {
+		return "", fmt.Errorf("harvest: %w", err)
+	}
+	defer releaseHarvestSlot()
+
+	// 单 key 总预算：失败路径（9 次 CLI 尝试 × 60s）绝不能占住 worker 9 分钟。
+	ctx, cancel := context.WithTimeout(ctx, harvestKeyBudget())
+	defer cancel()
 
 	bin := harvestBin()
-	home := harvestHome()
-	authPath := harvestAuthPath()
+	home := harvestHomeForKey(key)
+	authPath := harvestAuthPath(home)
 
-	// 1. 备份现有 auth.json（多 key 轮流覆盖，必须恢复）。defer 必须在
-	// 任何可能覆盖/截断原文件的写操作之前注册——否则 WriteFile 失败路径
-	//（已截断原文件）会跳过恢复，永久丢掉管理员 token。
+	// 1. 写认证。per-key HOME 由收割机独占，理论上没有"别人的" auth.json，
+	// 但同 key 重复收割会留下上一次的——仍然备份并在结束后恢复/删除，保证
+	// 凭据不长期落盘。失败路径也必须恢复：WriteFile 会先截断原文件。
 	var prevAuth []byte
 	if b, err := os.ReadFile(authPath); err == nil {
 		prevAuth = b
@@ -131,8 +268,6 @@ func harvestSession(ctx context.Context, key string) (string, error) {
 	// 2. 跑最小 run：transient 会话 + 免费模型。首选 opencode/big-pickle
 	//（zen 免费层默认模型别名），失败则依次尝试至多 2 个动态获取的价格 0
 	// 模型兜底（big-pickle 未来下架后收割不中断，见 harvestMintModels）。
-	// 只为在服务端 mint session，不关心回答内容（回答可能因 key 配额 429，
-	// 但 session 在 run 开始即已创建）。
 	before := latestHarvestSession(home)
 	sess := ""
 	for _, model := range harvestMintModels() {
@@ -141,28 +276,7 @@ func harvestSession(ctx context.Context, key string) (string, error) {
 		}
 		runCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		for i := 0; i < 3 && sess == ""; i++ {
-			cmd := exec.CommandContext(runCtx, bin, "run",
-				"--model", model,
-				"Reply with exactly: OK")
-			cmd.Dir = home
-			// 收割 run 不走任何代理：直连公网（容器须能直连 opencode.ai；
-			// 代理池是给网关上游用的，收割是 CLI 自己的注册握手）。
-			cmd.Env = append(os.Environ(),
-				"HOME="+home,
-				"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
-				"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
-				"HTTP_PROXY=",
-				"HTTPS_PROXY=",
-				"http_proxy=",
-				"https_proxy=",
-				"ALL_PROXY=",
-				"all_proxy=",
-				"NO_PROXY=*",
-			)
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stderr
-			_ = cmd.Run() // 回答内容不重要；session 在 run 开始即 mint
+			harvestRunFn(runCtx, bin, home, model)
 			if s := latestHarvestSession(home); s != "" && s != before {
 				sess = s
 			}
@@ -173,7 +287,7 @@ func harvestSession(ctx context.Context, key string) (string, error) {
 		return "", fmt.Errorf("harvest: no session minted (tried %s)", strings.Join(harvestMintModels(), ", "))
 	}
 
-	// 4. 写入 sticky 表（标记 CLI mint 与会话新鲜度：启动扫描不再跳过、
+	// 3. 写入 sticky 表（标记 CLI mint 与会话新鲜度：启动扫描不再跳过、
 	// 周期收割按 HarvestedAt 判断而非每次请求刷新的 Updated）
 	loadZenSessions()
 	zenSessMu.Lock()
@@ -232,15 +346,16 @@ func harvestMintModels() []string {
 }
 
 // cliModelIDs 通过 `opencode models`（无认证）取当前在线模型 ID 列表
-//（形如 opencode/xxx 一行一个）。
+// （形如 opencode/xxx 一行一个）。只读操作，用公共 HOME。
 func cliModelIDs() []string {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	home := harvestHome()
 	cmd := exec.CommandContext(ctx, harvestBin(), "models")
 	cmd.Env = append(os.Environ(),
-		"HOME="+harvestHome(),
-		"XDG_DATA_HOME="+filepath.Join(harvestHome(), ".local", "share"),
-		"XDG_CONFIG_HOME="+filepath.Join(harvestHome(), ".config"),
+		"HOME="+home,
+		"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -263,9 +378,10 @@ func registryFreeModelIDs() map[string]bool {
 	return free
 }
 
-// latestHarvestSession 从 CLI 日志读最新创建的 session ID。
+// latestHarvestSession 从指定 HOME 的 CLI 日志读最新创建的 session ID。
 // 路径：$HOME/.local/share/opencode/log/opencode.log，行含
 // `message=created id=ses_...`（实测 2026-09-17）。
+// per-key HOME 隔离后，这里读到的一定是本 key 自己那次 run 的会话。
 func latestHarvestSession(home string) string {
 	logPath := filepath.Join(home, ".local", "share", "opencode", "log", "opencode.log")
 	f, err := os.Open(logPath)
@@ -308,8 +424,219 @@ func saveZenSessions() {
 	saveZenSessionsLocked()
 }
 
-// startZenHarvester 启动定时收割循环：每小时检查一次，为"从未收割成功且
-// 无 live 会话"的 key 或"最久未更新超过间隔"的 key 收割。
+// ============ 批量 mint（启动 / 定时 / 面板手动共用一个实现） ============
+
+// zenMintOutcome 单个 key 的 mint 结果（管理面板展示用；Key 字段不外泄到 API）。
+type zenMintOutcome struct {
+	Index     int
+	Key       string
+	KeyMask   string
+	OK        bool
+	Skipped   bool
+	Done      bool // 该 key 已处理完（未完成的条目在面板显示 pending）
+	Session   string
+	Err       string
+	ElapsedMS int64
+}
+
+// mintZenSessions 并行 mint 一批 key（并发上限 harvestConcurrency）。
+// force=false 时跳过已有 live 会话的 key（快且不浪费配额）；force=true 一律重 mint
+// （面板「Force」按钮语义；mint 失败不会覆盖旧会话，见 harvestSession）。
+// 结果按传入顺序对齐，每个 key 恰好一个 outcome；progress 非空时每完成一个
+// key 回调一次（面板进度条）。
+func mintZenSessions(ctx context.Context, keys []string, force bool, progress func(idx int, o zenMintOutcome)) []zenMintOutcome {
+	out := make([]zenMintOutcome, len(keys))
+	todo := make([]int, 0, len(keys))
+	for i, k := range keys {
+		out[i] = zenMintOutcome{Index: i, Key: k, KeyMask: kit.Truncate(k, 8) + "…", Done: true}
+		if k == "" || k == "public" {
+			out[i].Skipped = true
+			out[i].Err = "no usable key"
+			continue
+		}
+		if !force && zenSessionLive(k) {
+			out[i].Skipped = true
+			continue
+		}
+		out[i].Done = false
+		todo = append(todo, i)
+	}
+	// 跳过项也报一次进度（含"全部跳过"的情形，所以放在提前返回之前）：
+	// 否则调用方（面板任务）永远等不到它们，那些 key 会一直显示 pending，
+	// done 计数也永远追不上 total。
+	reportSkipped := func() {
+		if progress == nil {
+			return
+		}
+		for i := range out {
+			if out[i].Done {
+				progress(i, out[i])
+			}
+		}
+	}
+	if len(todo) == 0 {
+		reportSkipped()
+		return out
+	}
+	reportSkipped()
+
+	workers := harvestConcurrency()
+	if workers > len(todo) {
+		workers = len(todo)
+	}
+	var next int32
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				i := int(atomic.AddInt32(&next, 1)) - 1
+				if i >= len(todo) {
+					return
+				}
+				idx := todo[i]
+				start := time.Now()
+				if ctx.Err() != nil {
+					out[idx].Err = "canceled"
+				} else {
+					sess, err := harvestSession(ctx, out[idx].Key)
+					out[idx].ElapsedMS = time.Since(start).Milliseconds()
+					if err != nil {
+						out[idx].Err = err.Error()
+					} else {
+						out[idx].OK = true
+						out[idx].Session = kit.Truncate(sess, 24)
+					}
+				}
+				out[idx].Done = true
+				if progress != nil {
+					progress(idx, out[idx])
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return out
+}
+
+// ============ 后台 mint 任务（面板按钮：立即返回 + 轮询进度） ============
+
+// zenMintJob 一次手动 mint 的进度快照。任务在后台跑，HTTP 立即返回——
+// 11 个 key 全量重 mint 要几十秒，同步响应会撞上反向代理的超时。
+type zenMintJob struct {
+	Force     bool
+	StartedAt time.Time
+	Total     int
+	outcomes  []zenMintOutcome
+	done      int32
+	finished  bool
+}
+
+var (
+	zenMintJobMu  sync.Mutex
+	zenMintJobCur *zenMintJob
+)
+
+// startZenMintJob 启动一次全池 mint。已有任务在跑时返回 false（单飞），
+// 不排新任务——重复点击只会干扰进度显示。
+func startZenMintJob(keys []string, force bool) (started bool, state map[string]any) {
+	zenMintJobMu.Lock()
+	if zenMintJobCur != nil && !zenMintJobCur.finished {
+		snap := zenMintJobSnapshotLocked(zenMintJobCur)
+		zenMintJobMu.Unlock()
+		return false, snap
+	}
+	// 预填占位条目：任务刚开始时面板要能显示"哪些 key 还在排队"，
+	// 否则未完成的槽位是零值（index 0、无 keyMask），表格里会全渲染成 #1。
+	outcomes := make([]zenMintOutcome, len(keys))
+	for i, k := range keys {
+		outcomes[i] = zenMintOutcome{Index: i, Key: k, KeyMask: kit.Truncate(k, 8) + "…"}
+	}
+	job := &zenMintJob{
+		Force:     force,
+		StartedAt: time.Now(),
+		Total:     len(keys),
+		outcomes:  outcomes,
+	}
+	zenMintJobCur = job
+	zenMintJobMu.Unlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("zen mint job panicked: %v", r)
+			}
+			zenMintJobMu.Lock()
+			job.finished = true
+			zenMintJobMu.Unlock()
+		}()
+		// 整体上限：11 key / 3 worker，成功路径每 key 约 10-15s（约 1 分钟完成）；
+		// 失败路径受每 key 150s 预算约束，最坏 4 波 ≈ 10 分钟，留 15 分钟余量。
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		res := mintZenSessions(ctx, keys, force, func(idx int, o zenMintOutcome) {
+			zenMintJobMu.Lock()
+			job.outcomes[idx] = o
+			zenMintJobMu.Unlock()
+			atomic.AddInt32(&job.done, 1)
+		})
+		ok, fail, skip := 0, 0, 0
+		for _, o := range res {
+			switch {
+			case o.OK:
+				ok++
+			case o.Skipped:
+				skip++
+			default:
+				fail++
+			}
+		}
+		log.Printf("zen mint job: %d ok, %d failed, %d skipped (force=%v)", ok, fail, skip, force)
+	}()
+	return true, zenMintJobSnapshotLocked(job)
+}
+
+// zenMintJobSnapshotLocked 组装进度快照（调用方持 zenMintJobMu）。
+func zenMintJobSnapshotLocked(job *zenMintJob) map[string]any {
+	results := make([]map[string]any, 0, len(job.outcomes))
+	for _, o := range job.outcomes {
+		results = append(results, map[string]any{
+			"index":     o.Index,
+			"keyMask":   o.KeyMask,
+			"ok":        o.OK,
+			"skipped":   o.Skipped,
+			"done":      o.Done,
+			"session":   o.Session,
+			"error":     o.Err,
+			"elapsedMs": o.ElapsedMS,
+		})
+	}
+	return map[string]any{
+		"running":   !job.finished,
+		"force":     job.Force,
+		"startedAt": job.StartedAt.Format(time.RFC3339),
+		"total":     job.Total,
+		"done":      int(atomic.LoadInt32(&job.done)),
+		"results":   results,
+		"finished":  job.finished,
+	}
+}
+
+// zenMintJobStatus 当前（或最后一次）mint 任务进度；从未跑过返回 nil。
+func zenMintJobStatus() map[string]any {
+	zenMintJobMu.Lock()
+	defer zenMintJobMu.Unlock()
+	if zenMintJobCur == nil {
+		return nil
+	}
+	return zenMintJobSnapshotLocked(zenMintJobCur)
+}
+
+// ============ 触发路径 ============
+
+// startZenHarvester 启动定时收割循环：每小时检查一次，为"从未收割成功"的 key
+// 或"最久未收割超过间隔"的 key 补收（并行，受 harvestConcurrency 约束）。
 func startZenHarvester() {
 	go func() {
 		// 启动时先给无会话的 key 收割（错开 10s，避免与 model sync 抢资源）
@@ -329,6 +656,7 @@ func startZenHarvester() {
 			if interval < time.Hour {
 				interval = time.Hour
 			}
+			var stale []string
 			for _, k := range cfg.Keys {
 				if k == "" || k == "public" {
 					continue
@@ -351,16 +679,20 @@ func startZenHarvester() {
 				if fresh > 0 && time.Since(time.Unix(fresh, 0)) < interval {
 					continue
 				}
-				ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
-				_, _ = harvestSession(ctx, k)
-				cancel()
-				time.Sleep(5 * time.Second) // 多 key 错峰
+				stale = append(stale, k)
 			}
+			if len(stale) == 0 {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+			// force=true：这些 key 是"按新鲜度挑出来的"，正是要重 mint。
+			mintZenSessions(ctx, stale, true, nil)
+			cancel()
 		}
 	}()
 }
 
-// harvestMissingSessions 启动时为无 sticky 会话的 key 各收割一个。
+// harvestMissingSessions 启动时为无 live 会话的 key 收割（并行）。
 func harvestMissingSessions() {
 	if !harvestEnabled() {
 		return
@@ -369,26 +701,28 @@ func harvestMissingSessions() {
 	if !cfg.Enabled {
 		return
 	}
+	var missing []string
 	for _, k := range cfg.Keys {
 		if k == "" || k == "public" {
 			continue
 		}
-		loadZenSessions()
-		zenSessMu.Lock()
-		e := zenSessions[k]
 		// 只跳过 CLI mint 过的会话；本地随机占位（启动竞态窗口内
 		// StickyZenIdentity 创建）必须收割，否则该 key 永久 403。
-		skip := e != nil && e.Minted
-		zenSessMu.Unlock()
-		if skip {
+		if zenSessionLive(k) {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
-		if _, err := harvestSession(ctx, k); err != nil {
-			log.Printf("zen harvest: key#%d startup harvest failed (%v), will retry on 403/later", keyIndex(k), err)
+		missing = append(missing, k)
+	}
+	if len(missing) == 0 {
+		return
+	}
+	log.Printf("zen harvest: minting %d key(s) at startup (concurrency %d)", len(missing), harvestConcurrency())
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	for _, o := range mintZenSessions(ctx, missing, false, nil) {
+		if !o.OK && !o.Skipped {
+			log.Printf("zen harvest: key#%d startup harvest failed (%s), will retry on 403/later", o.Index+1, o.Err)
 		}
-		cancel()
-		time.Sleep(5 * time.Second)
 	}
 }
 
@@ -401,17 +735,13 @@ func harvestOnForbidden(key string) {
 	if !harvestEnabled() {
 		return
 	}
-	// "public" 是"无 key"哨兵，不是真凭据：收割会往 auth.json 写入
-	// {"opencode":{"type":"api","key":"public"}} 覆盖管理员的真实凭据，并起一个
-	// 注定失败的 CLI 子进程。同族函数 harvestMissingSessions / 周期收割都已跳过它。
 	if key == "" || key == "public" {
 		return
 	}
 
 	// 计数、阈值、冷却判定与时间戳必须在一个临界区内完成。拆成两段会让同一
 	// 会话失效引发的 N 个并发 403 全部读到"还没收割过"，于是 N 个 goroutine
-	// 各起一次 CLI 收割（每次最多 3 模型 × 3 次尝试、150s 超时），把子进程
-	// 排成一条长队。
+	// 各起一次 CLI 收割，把额度位排成一条长队。
 	harvestMu.Lock()
 	harvestFails[key]++
 	n := harvestFails[key]
@@ -455,6 +785,14 @@ func pruneZenKeyState(valid map[string]bool) {
 		}
 	}
 	harvestMu.Unlock()
+
+	harvestKeyMu.Lock()
+	for k := range harvestKeyLocks {
+		if !valid[k] {
+			delete(harvestKeyLocks, k)
+		}
+	}
+	harvestKeyMu.Unlock()
 
 	zenSessMu.Lock()
 	removed := 0

@@ -99,6 +99,62 @@ func saveZenSessionsLocked() {
 	}
 }
 
+// zenSessionLive 该 key 是否已有服务端认得的 live 会话（CLI mint 过）。
+// false = 会话是本地随机占位，任何上游请求都必 403——请求路径据此跳过它，
+// 收割机据此决定要不要补收。
+func zenSessionLive(key string) bool {
+	if key == "" || key == "public" {
+		return false
+	}
+	loadZenSessions()
+	zenSessMu.Lock()
+	defer zenSessMu.Unlock()
+	e := zenSessions[key]
+	return e != nil && e.Minted && e.Session != ""
+}
+
+// zenLiveKeys 批量查询（一次加锁），供 pickZenKey 在轮转时优先挑 live key。
+func zenLiveKeys(keys []string) map[string]bool {
+	if len(keys) == 0 {
+		return nil
+	}
+	loadZenSessions()
+	zenSessMu.Lock()
+	defer zenSessMu.Unlock()
+	live := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		if e := zenSessions[k]; e != nil && e.Minted && e.Session != "" {
+			live[k] = true
+		}
+	}
+	return live
+}
+
+// zenSessionSnapshot 每个 key 的会话状态（管理面板展示；session 截断显示）。
+type zenSessionSnapshot struct {
+	Minted      bool
+	Live        bool
+	Session     string
+	HarvestedAt int64
+}
+
+func zenSessionSnapshotOf(key string) zenSessionSnapshot {
+	loadZenSessions()
+	zenSessMu.Lock()
+	defer zenSessMu.Unlock()
+	e := zenSessions[key]
+	if e == nil {
+		return zenSessionSnapshot{}
+	}
+	live := e.Minted && e.Session != ""
+	return zenSessionSnapshot{
+		Minted:      e.Minted,
+		Live:        live,
+		Session:     kit.Truncate(e.Session, 12),
+		HarvestedAt: e.HarvestedAt,
+	}
+}
+
 // StickyZenIdentity 取 key 绑定的稳定身份：会话 ID 与 UA 跨请求复用，
 // 请求 ID 每次全新（与官方 CLI 语义一致：同会话内多 msg_）。
 // 返回 (session, request, user-agent)。

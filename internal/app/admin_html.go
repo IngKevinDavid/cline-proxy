@@ -615,6 +615,27 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 </div>
 
 <div class="section">
+  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span> Live session IDs (zen FreeTier gate)
+    <span id="ocSessSummary" class="probe-pill" style="font-weight:normal;margin-left:auto"></span>
+  </div>
+  <div class="section-body">
+    <p class="hint" style="margin-top:0">The free tier only accepts session IDs the upstream has actually seen, minted by the opencode CLI. A key without a live session <b>always</b> fails with 403 — normally the harvester mints one on startup, on repeated 403s, and every few hours; use the buttons below to mint immediately (e.g. right after a fresh deploy with many keys).</p>
+    <div class="flex" style="gap:10px;margin-bottom:10px;flex-wrap:wrap">
+      <button class="btn btn-primary" onclick="mintZenSessions(false)">Mint missing sessions</button>
+      <button class="btn" onclick="mintZenSessions(true)">Force mint / refresh all</button>
+      <span class="hint" style="margin:0" id="ocSessTimer"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th style="width:70px">Key</th><th style="width:130px">Session</th><th style="width:150px">State</th><th>Last minted</th></tr></thead>
+        <tbody id="ocSessBody"><tr><td colspan="4" class="empty">Loading...</td></tr></tbody>
+      </table>
+    </div>
+    <div id="ocSessResult" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<div class="section">
   <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg></span> opencode model list
     <button class="btn btn-sm" onclick="refreshOcModels()" style="margin-left:auto">Sync now</button>
   </div>
@@ -709,7 +730,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.tab === 'settings') { loadKeys(); loadModels(); loadConfig(); }
     if (el.dataset.tab === 'logs') loadLogs();
     if (el.dataset.tab === 'proxypool') loadProxyPool();
-    if (el.dataset.tab === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); }
+    if (el.dataset.tab === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); loadOcSessions(); }
     if (el.dataset.tab === 'combos') { loadCombos(); fillComboModels(); }
   });
 });
@@ -725,7 +746,7 @@ function switchTab(name) {
   if (name === 'settings') { loadKeys(); loadModels(); }
   if (name === 'logs') loadLogs();
   if (name === 'proxypool') loadProxyPool();
-  if (name === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); }
+  if (name === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); loadOcSessions(); }
   if (name === 'combos') { loadCombos(); fillComboModels(); }
 }
 
@@ -1273,7 +1294,7 @@ async function loadOcConfig() {
     _('ocKeys').value = (c.keys && c.keys.length ? c.keys : [c.key || 'public']).join('\n');
     const ks = c.keyStates || [];
     _('ocKeyStates').textContent = ks.length
-      ? ks.map(k => '#' + (k.index + 1) + ' ' + k.keyMask + ' · ' + (k.usage || 0) + ' calls' + (k.cooling ? ' · cooling' : '') + (k.current ? ' · next' : '')).join('  |  ')
+      ? ks.map(k => '#' + (k.index + 1) + ' ' + k.keyMask + ' · ' + (k.usage || 0) + ' calls' + (k.sessionLive ? '' : ' · NO SESSION') + (k.cooling ? ' · cooling' : '') + (k.current ? ' · next' : '')).join('  |  ')
       : '';
     _('ocBaseURL').value = c.baseURL || '';
     _('ocProxyState').textContent = (c.proxies && c.proxies.length)
@@ -1378,6 +1399,85 @@ async function loadOcModels() {
   } catch (e) { _('ocModelsList').textContent = 'Failed to load'; }
 }
 
+// ========== Live session IDs (zen FreeTier gate) ==========
+// 未 mint 的 key 必 403；表格让"哪些 key 还是空会话"一眼可见，按钮给手动补收口。
+let ocSessPoll = null;
+
+async function loadOcSessions() {
+  try {
+    const d = await api('GET', '/opencode/sessions');
+    renderOcSessions(d.data);
+    return d.data;
+  } catch (e) { return null; }
+}
+
+function renderOcSessions(s) {
+  const rows = s.sessions || [];
+  _('ocSessSummary').innerHTML = rows.length
+    ? '<span style="color:' + (s.liveCount === s.total ? 'var(--accent2)' : 'var(--danger)') + '">' +
+      s.liveCount + '/' + s.total + ' live</span>'
+    : '';
+  _('ocSessBody').innerHTML = rows.length
+    ? rows.map(k => {
+        const state = k.noKey
+          ? '<span style="color:var(--text2)">no key</span>'
+          : (k.live
+              ? '<span style="color:var(--accent2)">live</span>'
+              : (k.minted ? '<span style="color:var(--danger)">stale</span>' : '<span style="color:var(--danger)">not minted</span>'));
+        return '<tr><td>#' + (k.index + 1) + '</td>' +
+          '<td style="font-family:monospace;font-size:11px">' + (k.session ? esc(k.session) + '…' : '-') + '</td>' +
+          '<td>' + state + '</td>' +
+          '<td style="font-size:12px">' + (k.harvested ? esc(fmtWhen(k.harvested)) : '-') + '</td></tr>';
+      }).join('')
+    : '<tr><td colspan="4" class="empty">No zen keys configured</td></tr>';
+
+  const j = s.job;
+  if (!j) { _('ocSessTimer').textContent = ''; return; }
+  if (j.running) {
+    _('ocSessTimer').innerHTML = '<span style="color:var(--accent)">minting ' + (j.done || 0) + '/' + (j.total || 0) + '…</span>';
+    renderOcMintResults(j.results || [], true);
+  } else {
+    _('ocSessTimer').textContent = 'last mint ' + fmtWhen(j.startedAt) + (j.force ? ' (force)' : '');
+    renderOcMintResults(j.results || [], false);
+  }
+}
+
+function renderOcMintResults(results, running) {
+  if (!results.length) { _('ocSessResult').innerHTML = ''; return; }
+  const ok = results.filter(r => r.ok).length;
+  const skipped = results.filter(r => r.skipped).length;
+  const fail = results.filter(r => r.done && !r.ok && !r.skipped).length;
+  const pending = results.filter(r => !r.done).length;
+  const head = running
+    ? '<span style="color:var(--accent)">Running — ' + ok + ' minted, ' + fail + ' failed, ' + pending + ' pending</span>'
+    : (fail
+        ? '<span style="color:var(--danger)">Done — ' + ok + ' minted, ' + fail + ' failed' + (skipped ? ', ' + skipped + ' skipped (already live)' : '') + '</span>'
+        : '<span style="color:var(--accent2)">Done — ' + ok + ' minted' + (skipped ? ', ' + skipped + ' already live' : '') + '</span>');
+  const details = results.filter(r => r.done && !r.ok && !r.skipped)
+    .map(r => '#' + (r.index + 1) + ': ' + esc(r.error || 'failed')).join(' | ');
+  _('ocSessResult').innerHTML = '<div style="font-size:12px">' + head + '</div>' +
+    (details ? '<div class="hint" style="margin-top:4px">' + details + '</div>' : '');
+}
+
+async function mintZenSessions(force) {
+  try {
+    await api('POST', '/opencode/sessions/mint', { force: force });
+    toast(force ? 'Force minting all sessions…' : 'Minting missing sessions…', 'success');
+    // 任务在后端跑（全量重 mint 要几十秒），按 2s 轮询进度；上限 450 次
+    // （15 分钟）与后端任务超时对齐，避免任务异常时轮询永不停。
+    if (ocSessPoll) clearInterval(ocSessPoll);
+    let ticks = 0;
+    const s0 = await loadOcSessions();
+    if (!s0 || !s0.job || !s0.job.running) return;
+    ocSessPoll = setInterval(async () => {
+      const s = await loadOcSessions();
+      if (!s || !s.job || !s.job.running || ++ticks >= 450) {
+        clearInterval(ocSessPoll); ocSessPoll = null; loadOcConfig();
+      }
+    }, 2000);
+  } catch (e) { toast('Mint failed: ' + e.message, 'error'); }
+}
+
 // ========== Combos (alias models) ==========
 const comboModels = { cline: [], zen: [] };
 
@@ -1477,6 +1577,11 @@ loadModels();
 loadConfig();
 setInterval(() => { loadStats(); }, 10000);
 setInterval(() => { loadOcStats(); }, 15000);
+// live 会话状态：只在 opencode 页可见时轮询（与日志页同样的省流约定）。
+// mint 任务进行中由 mintZenSessions 自己的 2s 轮询接管。
+setInterval(() => {
+  if (_('tab-opencode').style.display !== 'none' && !ocSessPoll) loadOcSessions();
+}, 20000);
 setInterval(() => { if (logsAuto && _('tab-logs').style.display !== 'none') loadLogs(); }, 8000);
 </script>
 </body>

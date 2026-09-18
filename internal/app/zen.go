@@ -484,6 +484,9 @@ func pickZenKey() string {
 	if len(keys) == 0 {
 		return ""
 	}
+	// 先取 live 会话集合（zenSessMu）再进 zenKeyMu：两把锁不嵌套，避免与
+	// 收割路径（持 zenSessMu 时不取 zenKeyMu，反之亦然）形成锁序反转。
+	live := zenLiveKeys(keys)
 	zenKeyMu.Lock()
 	defer zenKeyMu.Unlock()
 	now := time.Now()
@@ -493,6 +496,19 @@ func pickZenKey() string {
 			delete(zenKeyCool, k)
 		}
 	}
+	// 第一轮：非冷却 + 有 live 会话。未 mint 的 key 必 403（本地随机 sess_
+	// 服务端不认，见 zen_session.go 顶部注释），首启时逐个试过去就是"每个
+	// key 白等一次上游往返"，11 个 key 能把首个请求拖到分钟级。
+	for i := 0; i < len(keys); i++ {
+		idx := (zenKeyIdx + i) % len(keys)
+		k := keys[idx]
+		if _, cooling := zenKeyCool[k]; !cooling && live[k] {
+			zenKeyIdx = (idx + 1) % len(keys)
+			return k
+		}
+	}
+	// 第二轮：非冷却（池内全是未 mint 的 key 时仍须发请求，否则首启窗口内
+	// 请求根本发不出去——那时收割机正在 mint，上游 403 是唯一可用信号）
 	for i := 0; i < len(keys); i++ {
 		idx := (zenKeyIdx + i) % len(keys)
 		k := keys[idx]
@@ -557,6 +573,11 @@ func zenKeyCooling(key string) bool {
 // zenKeyStatus 每个 key 的运行时状态（管理面板展示用，key 值打码）。
 func zenKeyStatus() []map[string]any {
 	keys := getZenConfig().Keys
+	// 会话状态先快照（zenSessMu），再进 zenKeyMu：两把锁不嵌套。
+	sess := make([]zenSessionSnapshot, len(keys))
+	for i, k := range keys {
+		sess[i] = zenSessionSnapshotOf(k)
+	}
 	zenKeyMu.Lock()
 	defer zenKeyMu.Unlock()
 	now := time.Now()
@@ -567,6 +588,14 @@ func zenKeyStatus() []map[string]any {
 			"keyMask": kit.Truncate(k, 8) + "…",
 			"usage":   zenKeyUsage[k],
 			"current": i == zenKeyIdx%maxInt(len(keys), 1),
+			// live 会话状态：未 mint 的 key 必 403，面板必须能看出来，
+			// 否则"首启为什么这么慢"只能靠翻容器日志猜。
+			"sessionLive":   sess[i].Live,
+			"sessionMinted": sess[i].Minted,
+			"session":       sess[i].Session,
+		}
+		if sess[i].HarvestedAt > 0 {
+			st["harvestedAt"] = time.Unix(sess[i].HarvestedAt, 0).Format(time.RFC3339)
 		}
 		if until, cooling := zenKeyCool[k]; cooling && now.Before(until) {
 			st["cooling"] = true

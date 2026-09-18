@@ -456,3 +456,68 @@ each fix below was then re-verified in a container against the real upstreams
   aggregation, a false negative is what the learning path exists to repair.
 - **`zenSessions` / harvest counters are pruned on key removal**; the learn
   cooldown map is not (bounded by the model count, which the catalog sync owns).
+
+## Zen first-boot session minting: parallel + per-key HOME (2026-09-18)
+
+Reported from the live instance: with 11 zen keys, the first calls after a
+fresh deploy were extremely slow, and the logs showed a chain of
+`session rejected (403)` across keys #5..#11 with harvests interleaved.
+Root cause was two-independent things:
+
+- **The request path had no notion of session liveness.** `pickZenKey` only
+  skipped rate-limit cooldowns, so it happily handed out keys whose session
+  was a locally random `sess_` placeholder — which is a *guaranteed* 403
+  (verified 2026-09-17: the server only accepts sessions it has seen). One
+  client request therefore walked key after key, each costing a full upstream
+  round trip (~15-20s in the reported logs), before failing.
+- **Minting was strictly serial.** One global mutex for the whole harvest,
+  a shared CLI `HOME` (so parallelism was impossible: every key rewrote the
+  same `auth.json`), a 5s stagger between keys, and a failure path that could
+  burn 3 models × 3 attempts × 60s = 9 minutes *per key*.
+
+### Changes
+- **Per-key CLI HOME** (`ZEN_HARVEST_HOME/keys/<sha256(key)[:6]>`): auth.json
+  and CLI logs are isolated, so keys mint in parallel and the shared HOME is
+  never touched. The directory name is a hash — the key itself must not end
+  up in a path (logs, `ps`, `ls`).
+- **Bounded parallel minting** (`mintZenSessions`, `ZEN_HARVEST_CONCURRENCY`,
+  default 3) used by all three triggers: startup, the hourly stale-key pass,
+  and the new manual button.
+- **Per-key budget** (`ZEN_HARVEST_KEY_TIMEOUT_SECONDS`, default 150s) so the
+  9-minute failure path can't hold a worker.
+- **`pickZenKey` prefers keys with a live session** (two passes: not-cooling +
+  live, then not-cooling) instead of handing out certain-403 keys.
+- **Panel**: new "Live session IDs" section on the opencode tab — `N/M live`
+  summary, a per-key table (live / stale / not minted + last mint time), and
+  two buttons: *Mint missing sessions* and *Force mint / refresh all*.
+  `POST /admin/api/{opencode,zen}/sessions/mint` runs in the background and
+  returns immediately; `GET .../sessions` reports per-key state plus
+  per-key progress of the running job (the panel polls it every 2s).
+- A key is only marked live by an actual CLI mint, and a **failed mint never
+  overwrites** an existing live session, so a mis-clicked force refresh can't
+  cost a working session.
+
+### Measured (container, real upstream, 4 real zen keys, fresh volume)
+- Startup mint: all 4 keys live **~65-78s** after boot (3 in parallel within
+  ~35s; the slow key needs the 60s run timeout once). Previously serial.
+- `Force mint / refresh all`: 4/4 OK, per-key 7-13s except one 60s.
+- Warm restart with an existing session file: no mint work at all, first
+  request served immediately (no 403 chain).
+- 20/21 IDE regression probe; the single failure is the known-flaky
+  `parallel_calls_no_jam` on muse-spark (200 with 0 tool calls), which passes
+  on re-run with both tools called — upstream model variance, not the gateway.
+
+### Settled trade-offs (do not re-propose)
+- **`ZEN_HARVEST_CONCURRENCY` defaults to 3, not "as many as keys".** The CLI
+  is a Bun runtime; the limit exists to protect container memory, not to cap
+  throughput. Raise it via env when the box has headroom.
+- **Background job + polling, not a synchronous endpoint.** A force refresh of
+  11 keys is ~1 minute when healthy and up to ~10 in a pathological case;
+  holding an admin HTTP request open that long invites reverse-proxy timeouts.
+- **Live-session preference is a two-pass rotation, not a filter.** When no key
+  has a live session (the first seconds of a fresh boot) requests must still
+  go out — the 403 is then the only signal available, and the harvester is
+  already minting.
+- **Skip-if-live is the default; force is explicit.** Re-minting a working
+  session wastes upstream quota for no benefit, so the non-force button is the
+  normal action and only the force path re-mints live keys.

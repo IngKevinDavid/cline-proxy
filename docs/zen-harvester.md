@@ -13,11 +13,21 @@ FreeTier 检查。本地随机生成的 `sess_` 必 403。网关自身无法凭�
 
 ## 触发时机
 
-1. **启动时**：key 无 sticky 会话 → 收割一个（避免首请求必 403）；
+1. **启动时**：key 无 live 会话 → 收割一个（避免首请求必 403）。多 key **并行**
+   收割（`ZEN_HARVEST_CONCURRENCY`，默认 3），4 个 key 约 1 分钟、11 个 key 约
+   2-4 分钟完成；启动日志会打印 `minting N key(s) at startup (concurrency N)`。
 2. **运行时**：某 key 连续 FreeTier 403 ≥ 2 次 → 后台收割新会话替换
    （同 key 10 分钟内最多一次）；
-3. **定时**：每小时检查，最久未更新超过 `ZEN_HARVEST_INTERVAL_HOURS`
-   （默认 6h）的 key 补一个。
+3. **定时**：每小时检查，最久未收割超过 `ZEN_HARVEST_INTERVAL_HOURS`
+   （默认 6h）的 key 补一个；
+4. **手动**：管理面板「opencode free models → Live session IDs」→
+   **Mint missing sessions**（只补未 mint 的）/ **Force mint / refresh all**
+   （全部重 mint），后台执行并显示每个 key 的进度与耗时。
+
+**首启为什么慢**：未 mint 的 key 用本地随机 `sess_`，上游必 403，因此请求路径
+会优先挑有 live 会话的 key（`pickZenKey` 两轮：先"非冷却 + live"，再"非冷却"）。
+首启窗口内一个 live key 都没有时，请求仍会发出并按 403 语义返回——那是收割机
+还没 mint 完，不是故障。
 
 ## 部署：CLI 认证
 
@@ -27,10 +37,16 @@ FreeTier 检查。本地随机生成的 `sess_` 必 403。网关自身无法凭�
 $ZEN_HARVEST_HOME/.local/share/opencode/auth.json   （默认 HOME=/app/.opencode-home）
 ```
 
-**认证由收割机自给自足**：`harvestSession` 每次收割前把当前 key 以单 key
-形态 `{"opencode":{"type":"api","key":"sk-..."}}` 临时写入该文件，跑完
-`opencode run` 后恢复原值（串行化 + defer 保证并发安全与失败恢复）。因此
-多 key 部署无需手动准备认证——ZEN_KEYS 里配好的 zen key 即可直接收割。
+**认证由收割机自给自足，且每个 key 用独立 HOME**：收割时把当前 key 以单 key
+形态 `{"opencode":{"type":"api","key":"sk-..."}}` 写进
+`$ZEN_HARVEST_HOME/keys/<key 哈希前 12 位>/.local/share/opencode/auth.json`，
+跑完 `opencode run` 后删除（同 key 重复收割会恢复上一次内容）。因此多 key
+部署无需手动准备认证——ZEN_KEYS 里配好的 zen key 即可直接收割。
+
+per-key HOME 有两个作用：**(a) 可并行**（不同 key 无共享 auth.json/日志，
+并发上限见 `ZEN_HARVEST_CONCURRENCY`）；**(b) 绝不触碰公共 HOME**——管理员
+手工 `opencode auth login` 写进 `$ZEN_HARVEST_HOME` 的真实凭据不会被收割
+覆盖（早期实现共用一个 HOME，每次收割覆盖再恢复，恢复失败就永久丢失）。
 
 仅当**还需要 CLI 的其他功能**（人工 `opencode` 登录、非 zen 用法）时才需
 手动写入初始认证，二选一：
@@ -62,6 +78,8 @@ $ZEN_HARVEST_HOME/.local/share/opencode/auth.json   （默认 HOME=/app/.opencod
 | `ZEN_HARVEST_BIN` | `/app/bin/opencode` | CLI 二进制路径 |
 | `ZEN_HARVEST_HOME` | `/app/.opencode-home` | 容器内 CLI 的 HOME |
 | `ZEN_HARVEST_INTERVAL_HOURS` | `6` | 定时补收割间隔（最小 1h） |
+| `ZEN_HARVEST_CONCURRENCY` | `3` | 并行收割上限（1..8）。CLI 是 Bun 进程，调高会吃内存 |
+| `ZEN_HARVEST_KEY_TIMEOUT_SECONDS` | `150` | 单个 key 的收割总预算（最小 30s）。失败路径最多 3 模型 × 3 次尝试，不封顶会占住 worker 9 分钟 |
 
 ## 降级语义
 
@@ -69,7 +87,9 @@ $ZEN_HARVEST_HOME/.local/share/opencode/auth.json   （默认 HOME=/app/.opencod
   模式（sticky 会话 + 403 收割路径不可用，请求按原有 403/轮换语义返回），
   静默降级，不影响正常代理。
 - 收割失败 → 保留旧会话，请求按原有 403/轮换语义返回，不阻塞。
-- `ZEN_HARVEST=0` → 行为与收割机不存在完全一致。
+- `ZEN_HARVEST=0` → 行为与收割机不存在完全一致（面板按钮会提示
+  harvester unavailable，不会静默失败）。
+- mint 失败**不会覆盖**该 key 既有的 live 会话（旧会话继续可用）。
 
 ## 架构说明
 
@@ -80,3 +100,12 @@ $ZEN_HARVEST_HOME/.local/share/opencode/auth.json   （默认 HOME=/app/.opencod
   解包，用 ELF 头校验架构、不执行二进制。两种产物相同，真机运行时均原生执行。
 - CLI 二进制约 +185MB（node:22-alpine 构建阶段，不进最终层；
   最终镜像只多一个静态二进制 + libstdc++）。
+
+## 运维
+
+- 面板「opencode free models」页顶部显示 `N/M live`，表格列出每个 key 的
+  会话状态（live / stale / not minted）与最近收割时间。
+- 排障只看一处：`/admin/api/opencode/sessions`（`harvestEnabled`、`liveCount`、
+  每个 key 的 `live/minted/harvested`、最近一次 mint 任务的逐 key 结果）。
+- 大量 key 时把 `ZEN_HARVEST_CONCURRENCY` 调到 5-8 可显著缩短首启；只受
+  容器内存限制。

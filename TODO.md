@@ -220,3 +220,12 @@ Known deferred (low risk, revisit if needed):
   LoadCredentials) — delete or mutex-guard before ever reusing.
 - main.go "already running" detection is Windows-only; releases auto-tag
   every push to main.
+
+## Settled trade-offs (do not re-propose)
+- /v1/responses with a native-responses zen model (muse-spark) goes through
+  the chat-completions upstream and 500s — by design. The Upstream-aware
+  path for spark is /v1/chat/completions (routes to native /v1/responses
+  upstream automatically). README's "spark via /v1/responses" claim refers
+  to that routing. Fixing /v1/responses client-dialect for spark would
+  require a responses-dialect emitter for the native upstream; deferred.
+- ZEN_DEBUG_BODY was a temporary probe hook, removed before commit.

@@ -92,6 +92,7 @@ func StartProxy(host string, port int) error {
 	startZenModelsRefresher()
 	startPoolFlusher()
 	loadZenEndpoints()
+	loadClineStreamLearned()
 	startZenHarvester()
 	initStats()
 	LoadRequestLogsFromFile()
@@ -308,7 +309,7 @@ func StartProxy(host string, port int) error {
 			return
 		}
 
-		resp, acc, err := callClineAPI(r.Context(), params, upstreamStream, useProxies)
+		resp, acc, streamed, err := callClineAutoStream(r.Context(), params, upstreamStream, useProxies)
 		if err != nil {
 			log.Printf("  api error: %v", err)
 			writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -317,6 +318,9 @@ func StartProxy(host string, port int) error {
 			return
 		}
 		defer resp.Body.Close()
+
+		// 自学习重试过：上游那份是 SSE，即便客户端要的是非流式也要走聚合
+		upstreamStream = upstreamStream || streamed
 
 		usageFn := accountUsageFn(acc, params)
 
@@ -1557,11 +1561,16 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 func modelNeedsStream(modelID string) bool {
 	initModelsCache()
 	modelsMu.Lock()
-	defer modelsMu.Unlock()
+	needs := false
 	if m, ok := modelsCache[modelID]; ok && m.RequiresStream {
+		needs = true
+	}
+	modelsMu.Unlock()
+	if needs {
 		return true
 	}
-	return false
+	// 命名约定漏判的模型由上游错误自学习得到（见 cline_stream.go）
+	return clineStreamRequired(modelID)
 }
 
 // finishZenChatNonStream 非流式 zen 应答收尾（chat 形态）：上游已被强制
@@ -2232,7 +2241,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		log.Printf("  anthropic model %s requires stream: forcing upstream stream, will aggregate", req.Model)
 	}
 
-	resp, acc, err := callClineAPI(r.Context(), openAIReq, upstreamStream, useProxies)
+	resp, acc, streamed, err := callClineAutoStream(r.Context(), openAIReq, upstreamStream, useProxies)
 	if err != nil {
 		log.Printf("  anthropic api error: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
@@ -2241,6 +2250,9 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	// 自学习重试过：上游那份是 SSE，即便客户端要的是非流式也要走聚合
+	upstreamStream = upstreamStream || streamed
 
 	usageFn := accountUsageFn(acc, openAIReq)
 

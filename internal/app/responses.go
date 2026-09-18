@@ -670,7 +670,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 	if !isStream && modelNeedsStream(normalizeRequestModel(chatModel)) {
 		stream = true
 	}
-	up, acc, err := callClineAPI(r.Context(), chat, stream, useProxies)
+	up, acc, streamed, err := callClineAutoStream(r.Context(), chat, stream, useProxies)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
 			"error": map[string]string{"message": err.Error(), "type": "api_error"},
@@ -678,6 +678,9 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer up.Body.Close()
+
+	// 自学习重试过：上游那份是 SSE，即便客户端要的是非流式也要走聚合
+	stream = stream || streamed
 
 	usageFn := accountUsageFn(acc, chat)
 	if isStream {

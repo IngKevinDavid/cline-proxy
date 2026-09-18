@@ -1,0 +1,211 @@
+package app
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"os"
+	"strings"
+	"testing"
+
+	"cline-go-proxy/internal/kit"
+)
+
+func fakeUpstream(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     http.Header{},
+	}
+}
+
+// 非流式请求撞上"500 empty response content"时：学习该模型 + 立刻改用流式重试，
+// 并把 streamed=true 交回调用方（调用方据此走聚合路径）。这正是命名约定漏判时
+// 用户唯一会碰到的失败形态，必须自动愈合。
+func TestCallClineAutoStreamLearnsAndRetries(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	clineStreamMu.Lock()
+	clineStreamLearned = nil
+	clineStreamMu.Unlock()
+
+	orig := clineCallFn
+	defer func() { clineCallFn = orig }()
+
+	var seenStream []bool
+	clineCallFn = func(ctx context.Context, params map[string]any, stream, useProxies bool) (*http.Response, *Account, error) {
+		seenStream = append(seenStream, stream)
+		if !stream {
+			return fakeUpstream(500, `{"error":"empty response content","success":false}`), &Account{Email: "first@x"}, nil
+		}
+		return fakeUpstream(200, "data: {\"choices\":[]}\n\n"), &Account{Email: "second@x"}, nil
+	}
+
+	// 种子表里的模型：normalizeRequestModel 会保留这个 id（不在表里会被换默认模型）
+	params := map[string]any{"model": "z-ai/glm-5.3-flash"}
+	resp, acc, streamed, err := callClineAutoStream(context.Background(), params, false, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(seenStream) != 2 || seenStream[0] != false || seenStream[1] != true {
+		t.Fatalf("upstream attempts = %v, want [false true]", seenStream)
+	}
+	if !streamed {
+		t.Fatal("streamed must be true so the caller aggregates the SSE body")
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("retry response status = %d, want 200", resp.StatusCode)
+	}
+	if acc == nil || acc.Email != "second@x" {
+		t.Fatalf("account of the retry must be returned, got %+v", acc)
+	}
+	if !clineStreamRequired("z-ai/glm-5.3-flash") {
+		t.Fatal("model must be learned as stream-required")
+	}
+	if !modelNeedsStream("z-ai/glm-5.3-flash") {
+		t.Fatal("learned model must be force-streamed on later requests")
+	}
+}
+
+// 重试也失败时：交回原始 500（调用方照旧报上游错误），且不谎报 streamed。
+func TestCallClineAutoStreamRetryFailureKeepsOriginalError(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	clineStreamMu.Lock()
+	clineStreamLearned = nil
+	clineStreamMu.Unlock()
+
+	orig := clineCallFn
+	defer func() { clineCallFn = orig }()
+	clineCallFn = func(ctx context.Context, params map[string]any, stream, useProxies bool) (*http.Response, *Account, error) {
+		if !stream {
+			return fakeUpstream(500, `{"error":"empty response content"}`), &Account{Email: "a@x"}, nil
+		}
+		return nil, nil, context.DeadlineExceeded
+	}
+
+	params := map[string]any{"model": "z-ai/glm-5.3-flash"}
+	resp, _, streamed, err := callClineAutoStream(context.Background(), params, false, false)
+	if err != nil {
+		t.Fatalf("original response should be handed back, got err=%v", err)
+	}
+	if streamed {
+		t.Fatal("streamed must be false when the retry never produced a stream")
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 500 || !strings.Contains(string(body), "empty response content") {
+		t.Fatalf("original 500 body must survive: status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
+// 普通 500（过载/瞬时故障）不得被当作模型属性学习，也不得触发重试。
+func TestCallClineAutoStreamIgnoresPlain500(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	clineStreamMu.Lock()
+	clineStreamLearned = nil
+	clineStreamMu.Unlock()
+
+	orig := clineCallFn
+	defer func() { clineCallFn = orig }()
+	calls := 0
+	clineCallFn = func(ctx context.Context, params map[string]any, stream, useProxies bool) (*http.Response, *Account, error) {
+		calls++
+		return fakeUpstream(500, `{"error":"Internal server error"}`), &Account{Email: "a@x"}, nil
+	}
+
+	params := map[string]any{"model": "z-ai/glm-5.3-flash"}
+	_, _, streamed, err := callClineAutoStream(context.Background(), params, false, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if streamed || calls != 1 {
+		t.Fatalf("plain 500 must pass through untouched: streamed=%v calls=%d", streamed, calls)
+	}
+	if clineStreamRequired("z-ai/glm-5.3-flash") {
+		t.Fatal("transient 500 must not be learned as a model property")
+	}
+}
+
+// clineEmptyStreamErr 只认"500 + empty response content"这一条指纹：这是 cline
+// 对非流式调用"必须流式"模型的固定答复。其他 5xx（过载、瞬时故障）绝不能触发
+// 学习，否则会把普通故障误记成模型属性并持久化。
+func TestClineEmptyStreamErrDetection(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"exact fingerprint", 500, `{"error":"empty response content","success":false}`, true},
+		{"fingerprint upper case", 500, `{"error":"Empty Response Content"}`, true},
+		{"500 other message", 500, `{"error":"Internal server error"}`, false},
+		{"200 with that text", 200, `{"error":"empty response content"}`, false},
+		{"502 transient", 502, `{"error":"empty response content"}`, false},
+		{"503 overload", 503, `{"error":"empty response content"}`, false},
+		{"empty body", 500, ``, false},
+	}
+	for _, c := range cases {
+		if got := clineEmptyStreamErr(c.status, []byte(c.body)); got != c.want {
+			t.Errorf("%s: clineEmptyStreamErr(%d, %q) = %v, want %v", c.name, c.status, c.body, got, c.want)
+		}
+	}
+}
+
+// 学习结果是持久化 + 幂等的：重复学习不覆盖首次时间戳，modelNeedsStream 命中
+// 学习集合后无需同步层标记（即命名约定漏判的模型也能被强制流式）。
+func TestClineStreamLearnRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DATA_DIR", dir)
+
+	loadClineStreamLearned() // 空文件：不 panic、不写入
+	if clineStreamRequired("poolside/laguna-s-2.1:free") {
+		t.Fatal("clean state should not require stream")
+	}
+
+	learnClineStreamRequired("poolside/laguna-s-2.1:free")
+	if !clineStreamRequired("poolside/laguna-s-2.1:free") {
+		t.Fatal("learned model should require stream in-process")
+	}
+	if !modelNeedsStream("poolside/laguna-s-2.1:free") {
+		t.Fatal("modelNeedsStream should consult the learned set")
+	}
+	// 命名约定已判定的模型不受影响，未学习的模型仍为 false
+	if modelNeedsStream("line-free/solar-pro4") {
+		t.Fatal("unrelated model must not be affected")
+	}
+	if _, err := os.Stat(kit.ResolveDataPath(".cline-stream-required.json")); err != nil {
+		t.Fatalf("learned set not persisted: %v", err)
+	}
+
+	// 重复学习幂等
+	clineStreamMu.RLock()
+	first := clineStreamLearned["poolside/laguna-s-2.1:free"]
+	clineStreamMu.RUnlock()
+	learnClineStreamRequired("poolside/laguna-s-2.1:free")
+	clineStreamMu.RLock()
+	second := clineStreamLearned["poolside/laguna-s-2.1:free"]
+	clineStreamMu.RUnlock()
+	if first != second {
+		t.Fatalf("re-learning overwrote timestamp: %q -> %q", first, second)
+	}
+
+	// 重启：从磁盘恢复
+	clineStreamMu.Lock()
+	clineStreamLearned = nil
+	clineStreamMu.Unlock()
+	loadClineStreamLearned()
+	if !clineStreamRequired("poolside/laguna-s-2.1:free") {
+		t.Fatal("learned model lost after reload")
+	}
+}
+
+// 空 model id 不写盘（调用方在拿不到 model 字段时不应污染学习结果）。
+func TestClineStreamLearnEmptyIDIgnored(t *testing.T) {
+	t.Setenv("DATA_DIR", t.TempDir())
+	loadClineStreamLearned()
+	learnClineStreamRequired("")
+	if _, err := os.Stat(kit.ResolveDataPath(".cline-stream-required.json")); err == nil {
+		t.Fatal("empty id must not create a learn file")
+	}
+	if clineStreamRequired("") {
+		t.Fatal("empty id must not be learned")
+	}
+}

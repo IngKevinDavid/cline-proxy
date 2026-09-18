@@ -163,7 +163,7 @@ go build ./... && go vet ./...
 docker compose up -d --build                # build from source (PROXY_PORT to change the port)
 ```
 
-CI: every push to `main` runs `go build` + `go vet`, then publishes the multi-arch image to GHCR via Buildx (amd64 compiled natively, arm64 cross-compiled via `TARGETARCH`). Tag a release with `v*` to publish `:vX.Y.Z` alongside `:latest`.
+CI: every push to `main` runs `go build` + `go vet`, then publishes the multi-arch image to GHCR via Buildx (amd64 compiled natively, arm64 cross-compiled via `TARGETARCH`; only the embedded opencode CLI stage runs under QEMU for arm64, at build time — the images themselves are native on both arches). Tag a release with `v*` to publish `:vX.Y.Z` alongside `:latest`.
 
 Project layout:
 

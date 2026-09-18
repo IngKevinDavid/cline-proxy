@@ -65,7 +65,7 @@ $ZEN_HARVEST_HOME/.local/share/opencode/auth.json   （默认 HOME=/app/.opencod
 
 ## 降级语义
 
-- CLI 二进制不存在（arm64 等 postinstall 不支持的架构）→ 自动降级为纯网关
+- CLI 二进制不存在（未 pin 平台包的架构，如 arm/v7）→ 自动降级为纯网关
   模式（sticky 会话 + 403 收割路径不可用，请求按原有 403/轮换语义返回），
   静默降级，不影响正常代理。
 - 收割失败 → 保留旧会话，请求按原有 403/轮换语义返回，不阻塞。
@@ -73,7 +73,10 @@ $ZEN_HARVEST_HOME/.local/share/opencode/auth.json   （默认 HOME=/app/.opencod
 
 ## 架构说明
 
-- 仅 amd64 在 CI 中验证（`npm i -g opencode-ai` 官方安装方式）；
-  arm64 由官方 postinstall 自行处理，失败即降级。
-- CLI 二进制约 +30MB 镜像体积（node:22-alpine 构建阶段，不进最终层；
+- amd64 与 arm64 都带 CLI，但安装路径不同（见 Dockerfile 注释）：
+  amd64 在 amd64 runner 上走官方 `npm i -g opencode-ai`（同架构，postinstall
+  的 `opencode --version` 验证可执行）；arm64 是跨架构构建，postinstall 那段
+  验证会在 QEMU 下 SIGILL 并让整条构建失败，因此改为取同一个官方 npm tarball
+  解包，用 ELF 头校验架构、不执行二进制。两种产物相同，真机运行时均原生执行。
+- CLI 二进制约 +185MB（node:22-alpine 构建阶段，不进最终层；
   最终镜像只多一个静态二进制 + libstdc++）。

@@ -25,10 +25,10 @@ type ZenModel struct {
 	Aliases   []string `json:"aliases,omitempty"`
 	Context   int      `json:"context"`
 	Output    int      `json:"output"`
-	Source    string   `json:"source"` // seed=内置 / registry=公共目录同步 / synced=zen 上游同步
-	Upstream  string   `json:"upstream,omitempty"` // 强制原生上游端点: "responses"；空=默认 chat/completions
-	ToolCall  bool     `json:"toolCall,omitempty"` // 目录声明的 tool_call 能力
-	Reasoning bool     `json:"reasoning,omitempty"` // 目录声明的 reasoning 能力
+	Source    string   `json:"source"`               // seed=内置 / registry=公共目录同步 / synced=zen 上游同步
+	Upstream  string   `json:"upstream,omitempty"`   // 强制原生上游端点: "responses"；空=默认 chat/completions
+	ToolCall  bool     `json:"toolCall,omitempty"`   // 目录声明的 tool_call 能力
+	Reasoning bool     `json:"reasoning,omitempty"`  // 目录声明的 reasoning 能力
 	Attach    bool     `json:"attachment,omitempty"` // 目录声明的图片/附件输入能力
 }
 
@@ -685,13 +685,52 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 	delete(body, "reasoningEffort")
 	// FreeTier gate（2026-09-18 实测解码）：zen 免费层 chat 端点校验请求体
 	// 是否携带 opencode 工具集，缺失则 403（"can only be used from within
-	// OpenCode"）。恒注入全部 11 个规范工具名 + tool_choice=none——
-	// none 保证模型不会发起工具调用，回复保持纯文本。注意该注入会覆盖
-	// 客户端自带的工具与 tool_choice：zen 免费模型按文本问答网关使用，
-	// 工具调用语义不适用（网关无法执行 CLI 工具）。
-	body["tools"] = zenGateTools()
-	body["tool_choice"] = "none"
+	// OpenCode"）。恒注入 11 个规范工具名保证过闸。tool_choice 按客户端
+	// 是否带工具分流（实测对比）：
+	//  - 客户端无工具（纯文本问答）：tool_choice=none。auto 会让部分模型
+	//    （ling 多轮实测）在有工具但无需调用时返回空文本；none 保证回复。
+	//  - 客户端带工具（IDE agent 模式，Cursor 等）：透传客户端工具 +
+	//    tool_choice=auto，模型可发起调用、IDE 执行后回传结果（实测
+	//    ling 调用客户端自定义 get_weather 成功）。覆盖客户端 tool_choice
+	//    为 auto：none 会同时压制客户端工具。
+	var clientTools []any
+	if ct, ok := params["tools"].([]any); ok && len(ct) > 0 {
+		clientTools = ct
+	}
+	if len(clientTools) > 0 {
+		merged := zenGateTools()
+		for _, t := range clientTools {
+			tm, ok := t.(map[string]any)
+			if !ok {
+				continue
+			}
+			fn, ok := tm["function"].(map[string]any)
+			if !ok {
+				continue
+			}
+			n, _ := fn["name"].(string)
+			if n != "" && !containsGateTool(n) {
+				merged = append(merged, tm)
+			}
+		}
+		body["tools"] = merged
+		body["tool_choice"] = "auto"
+	} else {
+		body["tools"] = zenGateTools()
+		body["tool_choice"] = "none"
+	}
 	return body
+}
+
+// containsGateTool 判断工具名是否为 FreeTier gate 的 11 个规范工具之一。
+// 客户端与 gate 重名的工具不加第二份（如 Cursor 也发 bash/edit/read）。
+func containsGateTool(name string) bool {
+	for _, s := range zenGateToolSpecs {
+		if s.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // ============ zen 上游调用：原生 /v1/responses 端点 ============
@@ -825,11 +864,35 @@ func buildZenResponsesBody(params map[string]any, stream bool, modelID string, p
 	// FreeTier gate（2026-09-18 实测解码）：/v1/responses 端点同样校验请求体
 	// 是否携带 opencode 工具集，缺失则 403；且必须 flat 形态 + tool_choice=auto
 	//（chat 嵌套形态 400 missing name、tool_choice=none 400 only auto allowed）。
-	// 恒注入全部 11 个规范工具名 + auto——auto 是 responses 端点唯一接受的值，
-	// 模型偶发发起工具调用时网关不执行、按文本语义继续（与 chat 路径
-	// tool_choice=none 的差异仅由端点硬性要求决定，语义同为文本问答网关）。
-	// 与 chat 路径一致：覆盖客户端自带的工具与 tool_choice。
-	body["tools"] = zenResponsesGateTools()
+	// 恒注入全部 11 个规范工具名 + auto——auto 是 responses 端点唯一接受的值。
+	// 与 chat 路径一致：透传客户端自定义工具（嵌套 chat 形态转 flat），
+	// 让 IDE agent 模式的工具调用在 spark 上可用。
+	merged := zenResponsesGateTools()
+	if ct, ok := params["tools"].([]any); ok && len(ct) > 0 {
+		for _, t := range ct {
+			tm, ok := t.(map[string]any)
+			if !ok {
+				continue
+			}
+			fn, ok := tm["function"].(map[string]any)
+			if !ok {
+				continue
+			}
+			n, _ := fn["name"].(string)
+			if n == "" || containsGateTool(n) {
+				continue
+			}
+			desc, _ := fn["description"].(string)
+			merged = append(merged, map[string]any{
+				"type":        "function",
+				"name":        n,
+				"description": desc,
+				"parameters":  fn["parameters"],
+				"strict":      false,
+			})
+		}
+	}
+	body["tools"] = merged
 	body["tool_choice"] = "auto"
 	return body
 }
@@ -884,13 +947,22 @@ func responsesContentToInput(content any) any {
 //     文本（muse-spark 对纯文本问答只发该事件，无 delta 流）
 // usage 从 response.completed 或 response.incomplete 提取；
 // incomplete_details.reason 映射为 finish 原因（length→length）。
+// zenSSECall 单个 function_call 输出项的流式累积器。上游可能并行/连续输出
+// 多个工具调用，必须按 item 分开累积参数，否则两个调用的 arguments delta
+// 会串成一段坏 JSON（上游实测：webfetch 双调用 jam 成 {"query":...}{"url":...}）。
+type zenSSECall struct {
+	id, name, callID string
+	args             strings.Builder
+	final            string // output_item.done 一次性给全参（无 delta 事件时）
+}
+
 func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 	defer resp.Body.Close()
-	var text, args, reasoning strings.Builder
+	var text, reasoning strings.Builder
 	var usage map[string]any
 	var incompleteReason string
 	failed := false
-	toolName, toolCallID, itemID := "", "", ""
+	calls := []*zenSSECall{}
 	reader := bufio.NewReader(resp.Body)
 	for {
 		line, err := reader.ReadString('\n')
@@ -913,20 +985,40 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 							}
 						case "response.function_call_arguments.delta":
 							if d, _ := ev["delta"].(string); d != "" {
-								args.WriteString(d)
+								// 按 item_id 找累积器；找不到（顺序异常）时追加到最后
+								// 一个或新建。正常流：added 先于 delta。
+								var target *zenSSECall
+								if iid, _ := ev["item_id"].(string); iid != "" {
+									for _, c := range calls {
+										if c.id == iid || (c.callID != "" && c.callID == iid) {
+											target = c
+											break
+										}
+									}
+								}
+								if target == nil && len(calls) > 0 {
+									target = calls[len(calls)-1]
+								}
+								if target == nil {
+									target = &zenSSECall{}
+									calls = append(calls, target)
+								}
+								target.args.WriteString(d)
 							}
 						case "response.output_item.added":
 							if item, ok := ev["item"].(map[string]any); ok {
 								if it, _ := item["type"].(string); it == "function_call" {
+									call := &zenSSECall{}
 									if id, _ := item["id"].(string); id != "" {
-										itemID = id
+										call.id = id
 									}
 									if cid, _ := item["call_id"].(string); cid != "" {
-										toolCallID = cid
+										call.callID = cid
 									}
 									if n, _ := item["name"].(string); n != "" {
-										toolName = n
+										call.name = n
 									}
+									calls = append(calls, call)
 								}
 							}
 						case "response.output_item.done":
@@ -951,17 +1043,41 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 										}
 									}
 								case "function_call":
-									if n, _ := item["name"].(string); n != "" {
-										toolName = n
+									// 全量 arguments（无 delta 事件的模型一次给全）。
+									// 只在 args 尚未累积时采纳，避免与 delta 重复。
+									var a string
+									if av, ok := item["arguments"].(string); ok {
+										a = av
 									}
-									if id, _ := item["id"].(string); id != "" {
-										itemID = id
-									}
-									if cid, _ := item["call_id"].(string); cid != "" {
-										toolCallID = cid
-									}
-									if a, _ := item["arguments"].(string); a != "" && args.Len() == 0 {
-										args.WriteString(a)
+									if a != "" {
+										var target *zenSSECall
+										if id, _ := item["id"].(string); id != "" {
+											for _, c := range calls {
+												if c.id == id {
+													target = c
+													break
+												}
+											}
+										}
+										if target == nil && len(calls) > 0 {
+											target = calls[len(calls)-1]
+										}
+										if target == nil {
+											target = &zenSSECall{}
+											calls = append(calls, target)
+										}
+										if n, _ := item["name"].(string); n != "" {
+											target.name = n
+										}
+										if id, _ := item["id"].(string); id != "" {
+											target.id = id
+										}
+										if cid, _ := item["call_id"].(string); cid != "" {
+											target.callID = cid
+										}
+										if target.args.Len() == 0 {
+											target.final = a
+										}
 									}
 								}
 							}
@@ -1000,24 +1116,37 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 	if incompleteReason == "max_output_tokens" || incompleteReason == "length" {
 		finish = "length"
 	}
-	if args.Len() > 0 || toolName != "" {
-		fixed := repairToolArguments(args.String())
-		id := toolCallID
-		if id == "" {
-			id = itemID
+	if len(calls) > 0 {
+		outCalls := make([]any, 0, len(calls))
+		for _, call := range calls {
+			if call.name == "" && call.args.Len() == 0 && call.final == "" {
+				continue // 空壳（added 但无任何内容）
+			}
+			raw := call.final
+			if call.args.Len() > 0 {
+				raw = call.args.String()
+			}
+			fixed := repairToolArguments(raw)
+			id := call.callID
+			if id == "" {
+				id = call.id
+			}
+			if id == "" {
+				id = fmt.Sprintf("call_%x", time.Now().UnixNano())
+			}
+			outCalls = append(outCalls, map[string]any{
+				"id":   id,
+				"type": "function",
+				"function": map[string]any{
+					"name":      call.name,
+					"arguments": fixed,
+				},
+			})
 		}
-		if id == "" {
-			id = fmt.Sprintf("call_%x", time.Now().UnixNano())
+		if len(outCalls) > 0 {
+			msg["tool_calls"] = outCalls
+			finish = "tool_calls"
 		}
-		msg["tool_calls"] = []any{map[string]any{
-			"id":   id,
-			"type": "function",
-			"function": map[string]any{
-				"name":      toolName,
-				"arguments": fixed,
-			},
-		}}
-		finish = "tool_calls"
 	}
 	if reasoning.Len() > 0 {
 		msg["reasoning_content"] = reasoning.String()
@@ -1445,9 +1574,9 @@ const opencodeModelsRegistry = "https://models.opencode.ai/api.json"
 
 // zenModelOverlay 公共目录里比 zen 真源多的限额/旗标字段。
 type zenModelOverlay struct {
-	Context, Output       int
-	ToolCall, Reasoning   bool
-	Attachment            bool
+	Context, Output     int
+	ToolCall, Reasoning bool
+	Attachment          bool
 }
 
 // fetchZenRegistry 拉取公共目录 api.json，返回（限额 overlay、价格门集合、

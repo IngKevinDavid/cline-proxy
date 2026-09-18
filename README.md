@@ -117,7 +117,7 @@ Fail-closed startup: binding a non-loopback address without `API_KEY` and `ADMIN
 ```
 Base URL:  http://<host>:3457/v1
 API Key:   <API_KEY>
-Model:     deepseek/deepseek-v4-flash        (cline pool)
+Model:     cline-free/deepseek-v4.1-flash   (cline pool)
            mimo-v2.5-free                    (opencode zen)
 ```
 
@@ -125,7 +125,7 @@ Model:     deepseek/deepseek-v4-flash        (cline pool)
 
 **OpenAI Responses dialect** — `POST /v1/responses` (tool calls, streaming events, and usage are fully translated).
 
-`GET /v1/models` lists every model the gateway can serve, including your Combos. Free-model feeds sync automatically (cline official feed every 60s, zen feed every 10min).
+`GET /v1/models` lists every model the gateway can serve, including your Combos. Free-model feeds sync automatically (cline official feed every 60s, zen catalog every 10min): the live list is authoritative and the built-in seeds only cover a cold start / offline boot, so delisted or newly-freed models appear or disappear on their own.
 
 ### Seeding accounts
 
@@ -142,7 +142,7 @@ Mount the file anywhere in the container and point `CLINE_ACCOUNTS_SEED_FILE` at
 
 ### Combos (alias models)
 
-Create user-defined alias IDs in the panel (e.g. `my-cline-flash` → `deepseek/deepseek-v4-flash` on the cline platform, or any zen free model). Strictly same-platform targets; aliases show up in `/v1/models` so IDEs can pick them directly.
+Create user-defined alias IDs in the panel (e.g. `my-cline-flash` → `cline-free/deepseek-v4.1-flash` on the cline platform, or any zen free model). Strictly same-platform targets; aliases show up in `/v1/models` so IDEs can pick them directly.
 
 ## Battle-tested
 

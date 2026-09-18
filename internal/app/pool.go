@@ -385,6 +385,30 @@ func pickAccount() *Account {
 	return acc
 }
 
+// pickAccountAny 取任意一个仍持有凭证的账号（含冷却中的），供与推理配额
+// 无关的只读调用使用（如 /ai/cline/recommended-models 免费模型列表）。
+// 推理额度耗尽（429→cooldown）不影响这类接口：实测 4 个账号全部 429 时
+// 模型列表接口仍 200；只走 pickAccount() 会因 "no active accounts" 整轮
+// 不同步，模型列表于是只剩种子兜底，已下线的模型会一直挂着。
+func pickAccountAny() *Account {
+	p := loadPool()
+	poolMu.Lock()
+	defer poolMu.Unlock()
+	var fallback *Account
+	for _, a := range p.Accounts {
+		if a.APIToken == "" && a.RefreshToken == "" {
+			continue
+		}
+		if a.Status == "active" {
+			return a
+		}
+		if fallback == nil {
+			fallback = a
+		}
+	}
+	return fallback
+}
+
 func ensureAccountToken(acc *Account) (string, error) {
 	// 静态 API key 账号：token 即凭证，永不过期、永不刷新
 	if acc.APIToken != "" {

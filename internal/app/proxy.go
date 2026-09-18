@@ -21,7 +21,10 @@ import (
 	"time"
 )
 
-var defaultModel = "deepseek/deepseek-v4-flash"
+// defaultModel 默认模型偏好：空 = 未设置，由 getDefaultModel 从 live 免费列表
+// 里取排序最小的可用项（不再硬编码某个可能下线的模型 id）。面板设置的
+// DefaultModel 会覆盖它。
+var defaultModel = ""
 
 var proxyListenAddress = "0.0.0.0:3457"
 

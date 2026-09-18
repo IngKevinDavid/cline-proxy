@@ -32,15 +32,15 @@ type ZenModel struct {
 	Attach    bool     `json:"attachment,omitempty"` // 目录声明的图片/附件输入能力
 }
 
-// zenSeedModels 内置免费模型种子：与官方 CLI `opencode models`
-//（无认证也可用，见空 HOME 实测）列出的免费条目一致。
-// 免费资格 = 公共目录 cost.input==0 && cost.output==0（big-pickle 这类
-// 无 "free" 后缀的免费模型也因此入选；deepseek-v4-flash 这类
-// status=deprecated 的条目即使 cost 为 0 也不入选）。
-// union-alpha 是临时免费活动（下周才开放），不进种子——开放后同步层会
-// 经价格门自动纳入，无需手动维护。
-// 同步层（syncZenModels）以 zen 真源 membership + 目录价格/状态交叉校验为准，
-// 种子只作为首次启动/同步失败的兜底。
+// zenSeedModels 冷启动兜底列表：仅在"首次成功同步之前 + 目录/CLI 都不可达"
+// 时作为可服务的模型集（离线也能用）。它不再是 ID 的来源——运行时模型表由
+// syncZenModels 从 live 目录（官方 CLI `opencode models` 读的同一份
+// models.opencode.ai 数据）按价格门推导，种子条目若通不过价格门会被移除。
+// 种子里保留的别名（mimo/ling/nemotron/pickle…）与 muse-spark 的
+// Upstream=responses 提示会随同名 live 条目沿用。
+// 免费资格 = 公共目录 cost.input==0 && cost.output==0（big-pickle 这类无
+// "free" 后缀的免费模型也因此入选；deepseek-v4-flash 这类 status=deprecated
+// 的条目即使 cost 为 0 也不入选）。
 var zenSeedModels = []ZenModel{
 	{ID: "mimo-v2.5-free", Aliases: []string{"mimo-v2.5", "mimo"}, Context: 200000, Output: 32000, Source: "seed"},
 	{ID: "nemotron-3-ultra-free", Aliases: []string{"nemotron-3-ultra", "nemotron"}, Context: 1000000, Output: 128000, Source: "seed"},
@@ -1885,83 +1885,86 @@ func fetchZenRegistry() (map[string]zenModelOverlay, map[string]bool, bool) {
 	return overlay, freeGate, true
 }
 
-// syncZenModels 同步免费模型，三层来源：
-//  1. 真源（membership）：GET zen /v1/models（Bearer "public" 即可，无需认证），
-//     当前在线的模型 ID 集合（2026-09-18 实测 71 个，含 big-pickle/union-alpha
-//     等无 free 后缀条目；官方 CLI `opencode models` 无认证列出的是同一集合的子集）。
-//     只有该层能增删模型。
-//  2. 免费资格（pricing gate）：公共目录 models.opencode.ai 的 opencode 条目
-//     cost.input==0 && cost.output==0 且 status 无 deprecated 字样。
-//     无 free 后缀但价格为 0 的模型（big-pickle/union-alpha）因此入选；
-//     价格非 0 的付费模型即使在线也被排除；status=deprecated 的
-//     deepseek-v4-flash-free 即使价格为 0 也被排除（上游已报 Model unavailable）。
-//     目录不可达时沿用"ID 含 free 即免费"的旧规则（fail-open，保证离线可用）。
-//  3. 限额覆盖（overlay）：公共目录的 limit.context/output + tool_call /
-//     reasoning / attachment 旗标（zen 真源条目只有 id，无限额字段）。
-// 返回新增模型数。真源不可达时返回错误并保留旧表（种子兜底）。
-func syncZenModels() (int, error) {
-	initZenModels()
-	cfg := getZenConfig()
-	client := &http.Client{Timeout: 25 * time.Second}
-
-	// --- 层 1：zen 真源 membership ---
-	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/models"
-	req, err := http.NewRequest("GET", endpoint, nil)
-	if err != nil {
-		return 0, err
+// zenDesiredFromLive 推导可服务的免费模型集（纯函数，便于测试）：
+// 目录可达时以价格门为唯一权威（= 官方 CLI `opencode models` 读的同一份
+// 数据的 cost 0/0 子集）；目录不可达时退回 CLI 成员表 + "-free" 启发式
+// （fail-open，离线也能列出免费模型）。两者都拿不到时返回错误，调用方保留旧表。
+func zenDesiredFromLive(registryOK bool, freeGate map[string]bool, cliIDs []string) (map[string]bool, error) {
+	desired := map[string]bool{}
+	if registryOK && len(freeGate) > 0 {
+		for id := range freeGate {
+			desired[id] = true
+		}
+		return desired, nil
 	}
-	req.Header.Set("Authorization", "Bearer "+cfg.Key)
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return 0, fmt.Errorf("zen models HTTP %d", resp.StatusCode)
-	}
-	var live struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&live); err != nil {
-		return 0, err
-	}
-	liveFree := map[string]bool{}
-	for _, item := range live.Data {
-		if item.ID == "" {
+	for _, id := range cliIDs {
+		id = strings.TrimPrefix(strings.TrimSpace(id), "opencode/")
+		if id == "" {
 			continue
 		}
-		liveFree[item.ID] = true
-	}
-	if len(liveFree) == 0 {
-		return 0, fmt.Errorf("zen models: empty model list (feed anomaly, keeping old table)")
-	}
-
-	// --- 层 2+3：公共目录价格门 + 限额 overlay（失败不致命：价格门沿用
-	// "ID 含 free 即免费"旧规则，限额保留种子估算） ---
-	overlay, freeGate, registryOK := fetchZenRegistry()
-	// isFreeModel 免费判定：目录可达时以价格门为准；目录不可达时回退到
-	// 旧规则（ID 含 free），保证离线/抖动时免费模型仍可用。
-	isFreeModel := func(id string) bool {
-		if registryOK {
-			return freeGate[id]
+		if strings.HasSuffix(strings.ToLower(id), "-free") || id == "big-pickle" {
+			desired[id] = true
 		}
-		return strings.Contains(strings.ToLower(id), "free")
 	}
+	if len(desired) == 0 {
+		return nil, fmt.Errorf("model catalog unavailable: registry unreachable and `opencode models` gave no free-looking ids")
+	}
+	return desired, nil
+}
 
+// syncZenModels 同步免费模型（live 为准，种子只做冷启动兜底）。判定链：
+//  1. 免费资格（唯一权威）：公共目录 models.opencode.ai 的 opencode 条目
+//     cost.input==0 && cost.output==0 且 status 无 deprecated 字样。无 free
+//     后缀但价格为 0 的模型（big-pickle）因此入选；status=deprecated 的
+//     *-free 条目即使价格为 0 也排除（上游已报 Model unavailable）。
+//     官方 CLI `opencode models` 读的是同一份目录（实测 2026-09-18：CLI 7 个
+//     = 目录中 opencode 提供方 cost 0/0 非 deprecated 的 7 个），所以价格门
+//     就是"真实模型列表"本身，无需再与种子交叉核对。
+//  2. 目录不可达时：用 `opencode models`（CLI，无认证）当成员表，配
+//     "-free" 后缀启发式（fail-open，保证离线/抖动时免费模型仍可用）。
+//     这是 CLI 列表唯一的用武之地——目录可用时它不给任何额外信息，而每次
+//     同步 spawn 一次 CLI 进程并不便宜。
+//  3. 限额 overlay：目录 limit.context/output + tool_call / reasoning /
+//     attachment 旗标（live 条目只有 id，无限额字段）。
+// 增删一律以本次 live 结果为准：表中的种子条目若不再通过价格门会被移除
+//（种子只在首次成功同步之前的冷启动/离线状态提供兜底，不参与日常增删）。
+// 返回新增模型数。无任何 live 来源可达时返回错误并保留旧表。
+func syncZenModels() (int, error) {
+	initZenModels()
+	overlay, freeGate, registryOK := fetchZenRegistry()
+
+	// 目录可达时它就是真实列表（CLI 读的是同一份数据），不 spawn CLI；
+	// 只有目录不可达才启用 CLI 兜底（见 zenDesiredFromLive）。
+	var cliIDs []string
+	if !(registryOK && len(freeGate) > 0) {
+		cliIDs = cliModelIDs()
+	}
+	desired, derr := zenDesiredFromLive(registryOK, freeGate, cliIDs)
+	if derr != nil {
+		return 0, derr
+	}
+	added := applyZenCatalog(desired, overlay)
+	pruned := pruneZenModelsTo(desired)
+	if added > 0 {
+		log.Printf("zen model sync: %d new free model(s) from live catalog", added)
+	}
+	if pruned > 0 {
+		log.Printf("zen model sync: pruned %d model(s) no longer free/online", pruned)
+	}
+	return added, nil
+}
+
+// applyZenCatalog 把 live 结果写进模型表：存量条目就地更新（保留别名与
+// Upstream 提示），新条目按 overlay 限额建立。返回新增数量。
+func applyZenCatalog(desired map[string]bool, overlay map[string]zenModelOverlay) int {
 	zenModelsMu.Lock()
 	defer zenModelsMu.Unlock()
 	added := 0
-	for id := range liveFree {
-		// 价格门：在线但非免费（付费模型）不同步进免费表
-		if !isFreeModel(id) {
-			continue
-		}
+	for id := range desired {
 		ov := overlay[id]
 		if cur, ok := zenModels[id]; ok {
-			// 存量模型：overlay 限额覆盖种子估算（种子只保 ID/别名/Upstream），
-			// Source 升级为 live（修剪只动 live/registry/synced，不动 seed）。
+			// 存量条目：overlay 限额覆盖种子/上次估算；别名与 Upstream 提示
+			// （如 muse-spark 的原生 responses）沿用，Source 升级为 live
 			if ov.Context > 0 {
 				cur.Context = ov.Context
 			}
@@ -1971,33 +1974,28 @@ func syncZenModels() (int, error) {
 			if ov != (zenModelOverlay{}) {
 				cur.ToolCall, cur.Reasoning, cur.Attach = ov.ToolCall, ov.Reasoning, ov.Attachment
 			}
-			if cur.Source == "seed" {
-				cur.Source = "live"
-			}
+			cur.Source = "live"
 			continue
 		}
-		// 跳过与免费模型别名冲突的 ID(如付费的 deepseek-v4-flash),保证别名解析不被覆盖
+		// 跳过与免费别名冲突的 ID（如付费 id 撞别名），保证别名解析不被覆盖
 		if _, conflict := zenAliases[id]; conflict {
 			continue
 		}
-		// 新模型：overlay 限额为准（缺失才回退 200K/32K）；Upstream 按家族规则：
-		// muse-spark 走原生 responses（实测 chat/completions 500），其余默认
-		// （端点自适应会在走错时自动学习，无需手动维护）。
-		ctx, out := ov.Context, ov.Output
-		if ctx <= 0 {
-			ctx = 200000
+		ctxN, outN := ov.Context, ov.Output
+		if ctxN <= 0 {
+			ctxN = 200000
 		}
-		if out <= 0 {
-			out = 32768
+		if outN <= 0 {
+			outN = 32768
 		}
 		upstream := ""
 		if strings.Contains(strings.ToLower(id), "muse-spark") {
-			upstream = "responses"
+			upstream = "responses" // 实测 chat/completions 500，走原生 responses
 		}
 		zenModels[id] = &ZenModel{
 			ID:        id,
-			Context:   ctx,
-			Output:    out,
+			Context:   ctxN,
+			Output:    outN,
 			Source:    "live",
 			Upstream:  upstream,
 			ToolCall:  ov.ToolCall,
@@ -2006,61 +2004,42 @@ func syncZenModels() (int, error) {
 		}
 		added++
 	}
-	// 修剪已下线/转付费/已废弃的 live/registry/synced 模型，避免 /v1/models
-	// 展示死模型。seed 模型是手工维护的兜底，只升级 Source 不删除——但种子中
-	// 已被价格门判为非免费的条目（如 deepseek-v4-flash-free 已 deprecated）
-	// 会在下方的种子对账中一并移除，见 seedReconcile。
-	// 防御: 真源短暂返回空表/残表(网关抖动、接口变更)时不得清空本地列表 ——
-	// liveFree 为空已在上游提前返回错误；此处再要求 liveFree 数量不低于
-	// 现有 managed 一半才修剪。
-	managedCount := 0
-	for _, m := range zenModels {
-		// 只统计 managed 来源（live）；seed 由下方种子对账单独处理。
-		// 早期版本还写过 registry/synced，现统一只写 live。
-		if m.Source == "live" {
-			managedCount++
+	return added
+}
+
+// pruneZenModelsTo 修剪掉不在 live 结果中的条目（含种子）：种子只是首次成功
+// 同步前的冷启动兜底，同步成功后以 live 为准，避免已下线/已转付费的模型继续
+// 挂出（别名一并移除）。防御：live 残表（接口抖动/改版）不清空本地列表 ——
+// 要求 live 结果不少于现有条数的一半。返回移除数量。
+func pruneZenModelsTo(desired map[string]bool) int {
+	zenModelsMu.Lock()
+	defer zenModelsMu.Unlock()
+	current := len(zenModels)
+	if len(desired) == 0 || len(desired)*2 < current {
+		if current > 0 {
+			log.Printf("zen model sync: live list too small (%d live vs %d known), skipping prune", len(desired), current)
 		}
+		return 0
 	}
 	pruned := 0
-	if len(liveFree) > 0 && len(liveFree)*2 >= managedCount {
-		for id, m := range zenModels {
-			if m.Source == "live" && (!liveFree[id] || !isFreeModel(id)) {
-				delete(zenModels, id)
-				pruned++
-			}
+	for id, m := range zenModels {
+		if desired[id] {
+			continue
 		}
-	} else if managedCount > 0 {
-		log.Printf("zen model sync: live feed too small (%d live vs %d managed), skipping prune", len(liveFree), managedCount)
-	}
-	// 种子对账：种子是兜底而非圣旨——种子条目若本次同步中既不在真源、
-	// 也不再通过价格门（如已 deprecated），说明已实质下线，从表中移除，
-	// 避免种子长期展示死模型（deepseek-v4-flash-free 即此情形）。
-	// 种子文件本身保留原文（git 可见变更），运行时表以同步结果为准。
-	for _, s := range zenSeedModels {
-		if m, ok := zenModels[s.ID]; ok && m.Source == "seed" {
-			if !liveFree[s.ID] || !isFreeModel(s.ID) {
-				delete(zenModels, s.ID)
-				for _, a := range s.Aliases {
-					delete(zenAliases, a)
-				}
-				pruned++
-			}
+		delete(zenModels, id)
+		for _, a := range m.Aliases {
+			delete(zenAliases, a)
 		}
+		pruned++
 	}
-	if pruned > 0 {
-		log.Printf("zen model sync: pruned %d model(s) no longer on upstream feed", pruned)
-	}
-	if added > 0 {
-		log.Printf("zen model sync: %d new free model(s) from zen feed", added)
-	}
-	return added, nil
+	return pruned
 }
 
 // startZenModelsRefresher 定时同步 zen 模型列表(默认 10 分钟)
 func startZenModelsRefresher() {
 	go func() {
 		if _, err := syncZenModels(); err != nil {
-			log.Printf("zen model sync: failed (%v), using seed list", err)
+			log.Printf("zen model sync: failed (%v), keeping the current list", err)
 		}
 		ticker := time.NewTicker(10 * time.Minute)
 		for range ticker.C {

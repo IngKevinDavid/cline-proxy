@@ -44,11 +44,19 @@ const (
 
 const recommendedModelsURL = cline.ClineAPIBase + "/ai/cline/recommended-models"
 
+// seedModelCandidates 冷启动兜底：仅在首次成功同步之前（或官方 feed 不可达）
+// 作为可服务的免费集。live 列表可用后以 live 为准，这些条目同样会被修剪，
+// 因此这里是"当前已知免费模型"的快照，不是永久清单。
+// Status=active：兜底条目本来就是可用模型，getDefaultModel 才能在没有 live
+// 结果时选出一个真正可用的默认模型（否则回退值是空字符串）。
+// 2026-09-18 快照（= 官方 recommended-models 的 free 列表，容器内实测 5 个）。
 func seedModelCandidates() []*ModelInfo {
 	return []*ModelInfo{
-		{ID: "deepseek/deepseek-v4-flash", Source: "free", Provider: "deepseek", Cost: "free", RequiresStream: true},
-		{ID: "poolside/laguna-s-2.1:free", Source: "free", Provider: "poolside", Cost: "free"},
-		{ID: "stepfun/step-3.7-flash", Source: "free", Provider: "stepfun", Cost: "free", RequiresStream: true},
+		{ID: "cline-free/deepseek-v4.1-flash", Source: "free", Provider: "cline-free", Cost: "free", Status: ModelActive, RequiresStream: true},
+		{ID: "cline-free/muse-spark-1.3-contributor", Source: "free", Provider: "cline-free", Cost: "free", Status: ModelActive, RequiresStream: true},
+		{ID: "cline-free/solar-pro4", Source: "free", Provider: "cline-free", Cost: "free", Status: ModelActive, RequiresStream: true},
+		{ID: "z-ai/glm-5.3-flash", Source: "free", Provider: "z-ai", Cost: "free", Status: ModelActive, RequiresStream: true},
+		{ID: "poolside/laguna-s-2.1:free", Source: "free", Provider: "poolside", Cost: "free", Status: ModelActive},
 	}
 }
 
@@ -96,9 +104,14 @@ type recommendedPayload struct {
 func syncRecommendedModels() (int, error) {
 	initModelsCache()
 
+	// 优先活跃账号；全部冷却时退回任意持凭证账号——模型列表与推理配额无关
+	// （实测 429 期间该接口仍 200），否则模型列表会长期停留在种子兜底状态
 	acc := pickAccount()
 	if acc == nil {
-		return 0, fmt.Errorf("no active accounts")
+		acc = pickAccountAny()
+	}
+	if acc == nil {
+		return 0, fmt.Errorf("no accounts")
 	}
 	token, err := ensureAccountToken(acc)
 	if err != nil {
@@ -165,19 +178,16 @@ func syncRecommendedModels() (int, error) {
 	}
 
 	// 修剪已从官方 feed 下线的模型，避免 /v1/models 长期展示死模型。
-	// 种子模型是手工维护的启动兜底，不在修剪范围内（与 zen 修剪语义一致）。
-	// 防御: feed 短暂为空/残缺时不清空本地列表 —— live 数量不足现有可修剪
-	// 模型一半时跳过本轮修剪。
-	pruneEligible := 0
-	for id := range modelsCache {
-		if !isClineSeedModel(id) {
-			pruneEligible++
-		}
-	}
+	// 种子同样在修剪范围内：它只是"首次成功同步之前"的冷启动兜底，live 列表
+	// 可用后以 live 为准（否则 stepfun/step-3.7-flash 这类早已不在免费 feed
+	// 里的种子会永久挂着）。
+	// 防御: feed 短暂为空/残缺时不清空本地列表 —— live 数量不足现有模型
+	// 一半时跳过本轮修剪。
+	pruneEligible := len(modelsCache)
 	pruned := 0
 	if len(live) > 0 && len(live)*2 >= pruneEligible {
 		for id := range modelsCache {
-			if !live[id] && !isClineSeedModel(id) {
+			if !live[id] {
 				delete(modelsCache, id)
 				pruned++
 			}
@@ -191,17 +201,6 @@ func syncRecommendedModels() (int, error) {
 
 	modelsLastSync = time.Now()
 	return added, nil
-}
-
-// isClineSeedModel 判断模型是否为内置种子候选（seedModelCandidates 的 ID）。
-// 种子条目 Source 与同步条目同为 "free"，只能按 ID 集合识别。
-func isClineSeedModel(id string) bool {
-	for _, m := range seedModelCandidates() {
-		if m.ID == id {
-			return true
-		}
-	}
-	return false
 }
 
 func indexByte(s string, b byte) int {
@@ -240,6 +239,9 @@ func syncModelsOnce() {
 	}
 }
 
+// getDefaultModel 默认模型：面板里设置的偏好（pool.DefaultModel）优先，
+// 其次取 live 列表里排序最小的可用模型（确定性 —— 之前是 map 随机序，
+// 修剪掉偏好模型后会随机漂移到别的模型，客户端看到的行为不可预期）。
 func getDefaultModel() string {
 	initModelsCache()
 	modelsMu.Lock()
@@ -248,10 +250,17 @@ func getDefaultModel() string {
 	if m, ok := modelsCache[defaultModel]; ok && m.Status == ModelActive {
 		return defaultModel
 	}
-	for _, m := range modelsCache {
-		if m.Status == ModelActive {
-			return m.ID
+	best := ""
+	for id, m := range modelsCache {
+		if m.Status != ModelActive {
+			continue
 		}
+		if best == "" || id < best {
+			best = id
+		}
+	}
+	if best != "" {
+		return best
 	}
 	return defaultModel
 }

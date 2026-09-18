@@ -335,3 +335,29 @@ nothing needs to change.
   happens, gate the CLI install on $TARGETARCH and copy from a directory so
   an empty dir still satisfies COPY - the gateway itself is arch-independent
   and harvestEnabled() already degrades gracefully when the binary is absent.
+
+### Correction (same day, after the real push): the local arm64 build was misleading
+The paragraph above said "no CI change needed" on the strength of a local
+`buildx --platform linux/arm64` build that passed. The actual CI run failed
+on the arm64 leg with exit code 132 — QEMU: uncaught target signal 4
+(Illegal instruction) inside `[linux/arm64 opencode-cli 2/2]`. Root cause
+is in opencode-ai's own postinstall: it ends with `verifyBinary()`, which
+spawns `opencode --version` and treats any non-zero exit as "the package
+manager installed the wrong binary", then exits 1 — so `npm i` fails, not
+just the check. Docker Desktop's QEMU runs that Bun binary; GitHub's does
+not. **Lesson: a foreign-arch build that passes locally under Docker
+Desktop's QEMU proves nothing about GitHub's QEMU — for arm64 the only
+trustworthy local check is the artifact (ELF arch + native-arch run), and
+the real gate is CI.**
+Fix (commit `b95e749`, CI green, GHCR verified): the CLI stage branches on
+TARGETARCH. Same arch keeps the official `npm i -g opencode-ai` (its
+verification works there). Cross arch fetches the same published npm
+tarball (opencode-linux-arm64-musl) with busybox wget, extracts the binary,
+and validates the architecture from the ELF header (e_machine 0xB7) instead
+of executing it — nothing foreign runs at build time, and a wrong-arch
+artifact fails the build. Version is pinned once via `OPENCODE_VERSION`
+ARG for both branches. Unpinned arches (arm/v7) build without a CLI and
+degrade to gateway-only, as harvestEnabled() already documented.
+Verified end to end: both CI jobs green, manifest publishes amd64 + arm64,
+and the pulled `ghcr.io/foxy1402/cline-proxy:latest` arm64 image boots with
+/health ok and its embedded CLI printing 1.18.31.

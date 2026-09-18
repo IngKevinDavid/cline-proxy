@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,12 +20,14 @@ func fakeHarvestCLI(t *testing.T, failFor map[string]bool) (calls *int32) {
 	var n int32
 	calls = &n
 	prev := harvestRunFn
-	harvestRunFn = func(ctx context.Context, bin, home, model string) {
+	harvestRunFn = func(ctx context.Context, bin, home, model string) harvestRunResult {
 		atomic.AddInt32(&n, 1)
 		if failFor[home] {
-			return // 不写日志行 = mint 失败
+			// 不写日志行 = mint 失败；带上 CLI 输出，验证错误信息会转述它
+			return harvestRunResult{ExitCode: 1, Output: "stub: no session minted", Elapsed: time.Millisecond}
 		}
 		writeFakeSessionLog(t, home, fmt.Sprintf("ses_fake%d%010d", atomic.LoadInt32(&n), time.Now().UnixNano()%1e10))
+		return harvestRunResult{ExitCode: 0, Elapsed: time.Millisecond}
 	}
 	t.Cleanup(func() { harvestRunFn = prev })
 	return calls
@@ -56,7 +59,6 @@ func setupHarvestTest(t *testing.T) string {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	t.Setenv("ZEN_HARVEST_HOME", filepath.Join(dir, "home"))
 	t.Setenv("ZEN_HARVEST_BIN", "/bin/true")
-	t.Setenv("ZEN_HARVEST_CONCURRENCY", "3")
 	t.Setenv("DATA_DIR", dir)
 
 	zenSessMu.Lock()
@@ -280,7 +282,7 @@ func TestMintRespectsConcurrencyLimit(t *testing.T) {
 
 	var inFlight, peak int32
 	prev := harvestRunFn
-	harvestRunFn = func(ctx context.Context, bin, home, model string) {
+	harvestRunFn = func(ctx context.Context, bin, home, model string) harvestRunResult {
 		cur := atomic.AddInt32(&inFlight, 1)
 		for {
 			old := atomic.LoadInt32(&peak)
@@ -291,6 +293,7 @@ func TestMintRespectsConcurrencyLimit(t *testing.T) {
 		time.Sleep(30 * time.Millisecond)
 		atomic.AddInt32(&inFlight, -1)
 		writeFakeSessionLog(t, home, "ses_peak"+filepath.Base(home))
+		return harvestRunResult{ExitCode: 0, Elapsed: 30 * time.Millisecond}
 	}
 	t.Cleanup(func() { harvestRunFn = prev })
 
@@ -691,5 +694,92 @@ func TestMintJobStatusHasNoSnapshotRace(t *testing.T) {
 	zenMintJobMu.Unlock()
 	if !finished {
 		t.Fatal("mint job did not finish")
+	}
+}
+
+// 默认并发必须是 1：Bun CLI 每次启动 burst 一大块 CPU/内存，1-2 核实例上并发
+// 会把单次 mint 拖到慢于每 key 预算，表现为"全池 mint 失败"（2026-09-18 线上
+// 事故：小实例 4 key 并发 5，全部 150s 超时无会话；同机并发 1 全部成功）。
+func TestHarvestConcurrencyDefaultsToSerial(t *testing.T) {
+	t.Setenv("ZEN_HARVEST_CONCURRENCY", "")
+	if got := harvestConcurrency(); got != 1 {
+		t.Fatalf("default harvest concurrency = %d, want 1 (serial)", got)
+	}
+	t.Setenv("ZEN_HARVEST_CONCURRENCY", "4")
+	if got := harvestConcurrency(); got != 4 {
+		t.Fatalf("explicit concurrency ignored: got %d", got)
+	}
+	t.Setenv("ZEN_HARVEST_CONCURRENCY", "99")
+	if got := harvestConcurrency(); got != 8 {
+		t.Fatalf("concurrency clamp broken: got %d", got)
+	}
+}
+
+// 批次上限必须随 key 数放大：并发 1 时一批的耗时是 key 数 × 每 key 预算，
+// 固定 15 分钟会把 11 个 key 的批次从中间砍断（后面的 key 连试都没试）。
+func TestHarvestBatchTimeoutScalesWithKeyCount(t *testing.T) {
+	setupHarvestTest(t)
+	t.Setenv("ZEN_HARVEST_CONCURRENCY", "1")
+	t.Setenv("ZEN_HARVEST_KEY_TIMEOUT_SECONDS", "150")
+	perKey := harvestKeyBudget()
+
+	if d := harvestBatchTimeout(11); d < 11*perKey {
+		t.Fatalf("11-key serial batch timeout %v < 11 × %v — batch would be cut off mid-way", d, perKey)
+	}
+	if d := harvestBatchTimeout(1); d != 15*time.Minute {
+		t.Fatalf("single-key batch timeout = %v, want the 15m floor", d)
+	}
+	if d := harvestBatchTimeout(500); d != 45*time.Minute {
+		t.Fatalf("huge batch timeout = %v, want the 45m ceiling", d)
+	}
+	// 并发越高，批次数越少（同样的 key 数用更短的批次上限）
+	t.Setenv("ZEN_HARVEST_CONCURRENCY", "4")
+	if d4, d1 := harvestBatchTimeout(8), func() time.Duration {
+		t.Setenv("ZEN_HARVEST_CONCURRENCY", "1")
+		return harvestBatchTimeout(8)
+	}(); d4 >= d1 {
+		t.Fatalf("parallel batch timeout %v should be below serial %v", d4, d1)
+	}
+}
+
+// CLI 输出会被写进日志与面板错误里，其中不得出现 key（CLI 报错时可能把
+// auth 内容带出来）。
+func TestHarvestOutputTailRedactsKeys(t *testing.T) {
+	raw := "\x1b[91mError:\x1b[0m auth failed for sk-abcdefghijklmnopqrstuvwxyz012345\n  retry\n\n done"
+	got := harvestOutputTail(raw)
+	if contains(got, "sk-abcdefghijklmnopqrstuvwxyz012345") {
+		t.Fatalf("key leaked into CLI output tail: %q", got)
+	}
+	if !contains(got, "sk-***") {
+		t.Fatalf("key not redacted: %q", got)
+	}
+	if contains(got, "\x1b[") || contains(got, "\n") {
+		t.Fatalf("control chars not stripped: %q", got)
+	}
+	if !contains(got, "auth failed") || !contains(got, "done") {
+		t.Fatalf("diagnostic content lost: %q", got)
+	}
+	if long := harvestOutputTail(strings.Repeat("x", 5000)); len(long) > 420 {
+		t.Fatalf("output tail not truncated: %d bytes", len(long))
+	}
+}
+
+// mint 失败的错误信息必须转述 CLI 自己的话，否则线上只能看到
+// "no session minted"——无法区分 CLI 起不来 / 被拖慢超时 / 上游拒绝。
+func TestMintFailureSurfacesCLIOutput(t *testing.T) {
+	setupHarvestTest(t)
+	prev := harvestRunFn
+	harvestRunFn = func(ctx context.Context, bin, home, model string) harvestRunResult {
+		return harvestRunResult{ExitCode: 7, Output: "boom: cannot start cli", Err: fmt.Errorf("exit status 7")}
+	}
+	t.Cleanup(func() { harvestRunFn = prev })
+
+	_, err := harvestSession(context.Background(), "sk-diag")
+	if err == nil {
+		t.Fatal("expected mint failure")
+	}
+	msg := err.Error()
+	if !contains(msg, "boom: cannot start cli") || !contains(msg, "exit=7") {
+		t.Fatalf("error does not carry the CLI's own output: %q", msg)
 	}
 }

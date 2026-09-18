@@ -13,9 +13,10 @@ FreeTier 检查。本地随机生成的 `sess_` 必 403。网关自身无法凭�
 
 ## 触发时机
 
-1. **启动时**：key 无 live 会话 → 收割一个（避免首请求必 403）。多 key **并行**
-   收割（`ZEN_HARVEST_CONCURRENCY`，默认 3），4 个 key 约 1 分钟、11 个 key 约
-   2-4 分钟完成；启动日志会打印 `minting N key(s) at startup (concurrency N)`。
+1. **启动时**：key 无 live 会话 → 收割一个（避免首请求必 403）。默认**逐个**
+   收割（`ZEN_HARVEST_CONCURRENCY=1`，见下方"为什么默认串行"），单个 key 约
+   15-20s，4 个 key 约 1 分钟；启动日志会打印
+   `minting N key(s) at startup (concurrency N)`。
 2. **运行时**：某 key 连续 FreeTier 403 ≥ 2 次 → 后台收割新会话替换
    （同 key 10 分钟内最多一次）；
 3. **定时**：每 10 分钟检查，最久未 mint 超过 `ZEN_HARVEST_INTERVAL_HOURS`
@@ -82,7 +83,7 @@ per-key HOME 有两个作用：**(a) 可并行**（不同 key 无共享 auth.jso
 | `ZEN_HARVEST_BIN` | `/app/bin/opencode` | CLI 二进制路径 |
 | `ZEN_HARVEST_HOME` | `/app/.opencode-home` | 容器内 CLI 的 HOME |
 | `ZEN_HARVEST_INTERVAL_HOURS` | `4` | 定时补收割间隔（最小 1h）。**必须小于 zen 的 5h 额度窗口**，否则每轮都有一段时间全池会话已过期 |
-| `ZEN_HARVEST_CONCURRENCY` | `3` | 并行收割上限（1..8）。CLI 是 Bun 进程，调高会吃内存 |
+| `ZEN_HARVEST_CONCURRENCY` | `1` | 同时收割的 key 数（1..8）。**默认串行**：CLI 每次启动会 burst 一大块 CPU/内存，小实例上并发会把单次 mint 拖到慢于每 key 预算，表现为"全池 no session minted"。只在实例确有富余（4 核以上、内存充足）时才调高 |
 | `ZEN_HARVEST_KEY_TIMEOUT_SECONDS` | `150` | 单个 key 的收割总预算（最小 30s）。失败路径最多 3 模型 × 3 次尝试，不封顶会占住 worker 9 分钟 |
 
 ## 降级语义
@@ -104,6 +105,28 @@ per-key HOME 有两个作用：**(a) 可并行**（不同 key 无共享 auth.jso
   解包，用 ELF 头校验架构、不执行二进制。两种产物相同，真机运行时均原生执行。
 - CLI 二进制约 +185MB（node:22-alpine 构建阶段，不进最终层；
   最终镜像只多一个静态二进制 + libstdc++）。
+
+## 为什么默认串行收割（ZEN_HARVEST_CONCURRENCY=1）
+
+opencode CLI 是 Bun 单文件二进制，**每次启动会 burst 一大块 CPU 与内存**（实测
+0.5 核容器里并发 4-5 个时，单次 mint 从 ~15s 涨到 70-130s，逼近 150s 的每 key
+预算）。在 1-2 核的云实例上，并发的直接后果是每个 key 都跑到预算耗尽仍拿不到
+会话，日志表现是"**所有 key 全部 `no session minted`**"——看起来像收割机整体
+坏掉，实际只是实例被自己的并发拖垮了。
+
+同机 A/B（0.5 核 / 600MB 容器，4 个真实 key）：
+
+| 并发 | 结果 |
+|---|---|
+| 5 | 4 个 key 断断续续，最后一个 ~131s 才拿到，紧贴 150s 预算；再弱一点的实例就会全灭 |
+| 1（默认） | 4 个 key 依次 ~17-20s 完成，共约 54s，稳定可预期 |
+
+串行总耗时只比并行多几十秒（key 数 × 单 key 时间），换来的是"任何实例都能跑
+通"。首启想要更快、且实例确实富余时，再把 `ZEN_HARVEST_CONCURRENCY` 调到 2-3。
+
+配套：批次整体上限按 `key 数 × 每 key 预算 ÷ 并发` 推算（`harvestBatchTimeout`），
+所以串行也不会被固定超时从中间砍断；单次尝试各自计时（60s），第一次卡住不会
+吃掉重试的时间。
 
 ## 额度窗口与会话寿命（为什么是 4h）
 
@@ -138,8 +161,12 @@ zen 免费层按**出口 IP** 记账（实测约 200 请求 / 5 小时 / IP）�
   会话状态（live / stale / not minted）与最近收割时间。
 - 排障只看一处：`/admin/api/opencode/sessions`（`harvestEnabled`、`liveCount`、
   每个 key 的 `live/minted/harvested`、最近一次 mint 任务的逐 key 结果）。
-- 大量 key 时把 `ZEN_HARVEST_CONCURRENCY` 调到 5-8 可显著缩短首启；只受
-  容器内存限制。
+- key 多时首启耗时 ≈ key 数 × 单 key 时间（默认串行）。只有实例确有富余
+  CPU/内存时才把 `ZEN_HARVEST_CONCURRENCY` 调到 2-3；调高后若出现"全部 key
+  no session minted"，说明实例被拖垮了——调回 1。
+- mint 失败的日志会带上 CLI 自己的输出（`attempt N (...) minted nothing — exit=…
+  elapsed=…: <CLI 原文>`，其中的 key 形态串已抹除），据此区分"CLI 起不来""被
+  并发拖慢超时""上游拒绝"，不必再靠猜。
 
 ## 会话文件（`DATA_DIR/.zen-sessions.json`）
 

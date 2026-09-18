@@ -508,9 +508,11 @@ Root cause was two-independent things:
   on re-run with both tools called — upstream model variance, not the gateway.
 
 ### Settled trade-offs (do not re-propose)
-- **`ZEN_HARVEST_CONCURRENCY` defaults to 3, not "as many as keys".** The CLI
-  is a Bun runtime; the limit exists to protect container memory, not to cap
-  throughput. Raise it via env when the box has headroom.
+- ~~**`ZEN_HARVEST_CONCURRENCY` defaults to 3, not "as many as keys".**~~ The CLI
+  is a Bun runtime; the limit exists to protect container CPU/memory, not to cap
+  throughput. **Superseded 2026-09-18: the default is now 1 (serial).** Three
+  still-starved a 1-2 core cloud instance — see "Zen harvest must be serial by
+  default" below.
 - **Background job + polling, not a synchronous endpoint.** A force refresh of
   11 keys is ~1 minute when healthy and up to ~10 in a pathological case;
   holding an admin HTTP request open that long invites reverse-proxy timeouts.
@@ -635,3 +637,66 @@ in the tree after those 3 commits.
 - Session-ID length differs between logs (24) and panel (12) — cosmetic.
 - gofmt has pre-existing comment-format drift in untouched lines (CI only runs
   `go vet`); not reformatted to keep the audit diff reviewable.
+
+## Zen harvest must be serial by default (2026-09-18, field failure)
+
+Reported from the cloud instance (1-2 cores): after deleting the volume and
+seeding 4 zen keys, the first boot minted **nothing** — every key logged
+`harvest: no session minted (tried opencode/big-pickle, …-free)` after burning
+the full 150s per-key budget. The same 4 keys minted fine locally in ~64s, and
+the published GHCR image was verified to be identical, so the artifact was not
+the problem.
+
+Root cause (measured in a 0.5-core / 600MB container on the same keys):
+
+| concurrency | observed (0.5 core / 600MB, 4 real keys, fresh volume) |
+|---|---|
+| 5 | first attempt of 3 of the 4 keys **killed at the 60s per-attempt timeout** (`exit=-1 err=signal: killed elapsed=60.5s`); an earlier run on the same shape had per-key mints at 70-131s, the last key landing on the 150s budget edge |
+| 1 (new default) | 4 keys serial, one at a time: key#1 72s (that run also pays the CLI model-list fetch), keys #2-#4 at 19/17/17s, ~125s total, no kills |
+
+The concurrency-5 run above still finished (all 4 live, ~132s) because the retry
+had a fresh 60s; the field box was weaker and had *all* keys fail. Either way the
+signal is the same: at concurrency >1 the CLI gets starved, at 1 it never does.
+
+Each `opencode run` is a Bun process that bursts a large block of CPU and
+memory on startup. On a small instance the runs starve each other, every mint
+slides past the per-key budget, and the pool reports "no session minted" — which
+reads as "the harvester is broken" rather than "the box is oversubscribed".
+Minting is early and network-independent (the CLI writes `message=created
+id=ses_` ~4s in even with a blackholed network), so a missing session means the
+CLI never got that far, not that the upstream refused it.
+
+### Changes
+- `harvestConcurrency()` default 3 → **1**; range still 1..8, so an instance
+  with real headroom can still opt in.
+- `harvestBatchTimeout(nKeys)` replaces the fixed 15-minute batch cap at all
+  three trigger sites. Serial worst case is `keys × 150s` (11 keys ≈ 27 min),
+  which the old cap would have truncated mid-batch, leaving the tail keys with
+  no attempt at all. Formula: `ceil(keys/concurrency) × budget + 2min`, clamped
+  to 15..45 min.
+- **Per-attempt timeout restored real retries.** Each CLI run now gets its own
+  60s context; before, the per-key budget spanned all attempts, so attempt 1
+  hanging consumed the budget and attempts 2-3 never ran (which is why the
+  fallback models were never actually tried).
+- **Failures now carry the CLI's own output.** `harvestRunResult` captures
+  exit code, elapsed and the tail of stdout+stderr (ANSI/control stripped,
+  any `sk-…` redacted, 400 bytes); the per-attempt log line and the aggregate
+  error include it, so "CLI wouldn't start" / "starved past timeout" /
+  "upstream refused" are distinguishable without guessing.
+- Startup logs an explicit hint when **all** keys fail on a multi-key pool,
+  pointing at the concurrency knob.
+- Admin API exposes `keyTimeoutSeconds` and the panel derives its poll cap from
+  `keys ÷ concurrency × keyTimeout` instead of a hardcoded 450 ticks, so a
+  serial batch of many keys is polled to completion.
+
+### Settled trade-offs (do not re-propose)
+- **Serial (`1`) is the default, not 2-3.** The extra wall-clock is
+  `keys × ~18s` (4 keys ≈ 1 min); the failure mode it avoids is a pool that
+  cannot mint at all on a small instance. Do not raise the default.
+- **Do not "fix" this by raising the per-key budget instead of serialising.**
+  A starved run does not converge — it just occupies the worker longer, and the
+  budget is what bounds the *failure* path. Serialising removes the starvation.
+- **Docs' old advice "raise `ZEN_HARVEST_CONCURRENCY` to 5-8 for many keys" was
+  wrong for small instances** and has been removed; the guidance is now "2-3,
+  and only if the box has headroom — if all keys fail while parallel, go back
+  to 1."

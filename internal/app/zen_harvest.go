@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -112,8 +113,12 @@ func harvestAuthPath(home string) string {
 	return filepath.Join(home, ".local", "share", "opencode", "auth.json")
 }
 
-// harvestConcurrency 并行收割上限（默认 3）。CLI 是 Bun 运行时，单进程数十 MB；
-// 上限存在的意义是别把容器内存打满，而不是吞吐。范围 1..8。
+// harvestConcurrency 并行收割上限（默认 1，串行）。CLI 是 Bun 运行时，每个
+// 进程启动时会 burst 一大块 CPU 与内存；1-2 核的小实例上同时跑几个，单个
+// mint 就会被拖到慢于每 key 预算（实测 0.5 核容器里 4 个并发让单次 mint 从
+// ~15s 涨到 70-130s），表现为"全部 key 都 no session minted"，看起来像
+// 收割完全坏掉。串行慢一点但每个 key 都能在预算内跑完。范围 1..8，只有在
+// 实例确有富余 CPU/内存时才调高（ZEN_HARVEST_CONCURRENCY）。
 func harvestConcurrency() int {
 	var n int
 	if v := strings.TrimSpace(os.Getenv("ZEN_HARVEST_CONCURRENCY")); v != "" {
@@ -122,12 +127,32 @@ func harvestConcurrency() int {
 		}
 	}
 	if n <= 0 {
-		n = 3
+		n = 1
 	}
 	if n > 8 {
 		n = 8
 	}
 	return n
+}
+
+// harvestBatchTimeout 一批 mint 的整体上限。并发降到 1 之后，一批的耗时是
+// "每 key 预算 × key 数"（11 个 key 的失败路径最长 11×150s）——固定 15 分钟
+// 会把批次从中间砍断，排在后面的 key 连尝试机会都没有。按实际工作量推算，
+// 再给 2 分钟余量，上下夹在 15 分钟与 45 分钟之间。
+func harvestBatchTimeout(nKeys int) time.Duration {
+	workers := harvestConcurrency()
+	if workers < 1 {
+		workers = 1
+	}
+	rounds := (nKeys + workers - 1) / workers
+	d := time.Duration(rounds)*harvestKeyBudget() + 2*time.Minute
+	if d < 15*time.Minute {
+		d = 15 * time.Minute
+	}
+	if d > 45*time.Minute {
+		d = 45 * time.Minute
+	}
+	return d
 }
 
 // harvestSem 全局并发额度（进程内惰性初始化，运行时改环境变量不生效）。
@@ -200,13 +225,25 @@ func harvestKeyBudget() time.Duration {
 
 // harvestRunFn 执行一次 CLI mint run（测试 seam：注入桩即可在无 CLI 的
 // 机器上验证收割逻辑，不必依赖 185MB 的 Bun 二进制）。
+// harvestRunResult 一次 CLI mint run 的结果。必须留下 CLI 自己的输出：只有
+// "no session minted" 这一句话时，无法区分"CLI 根本没起来""被并发拖慢到超时
+// 被杀""上游拒绝"——线上排查只能靠猜（2026-09-18 小实例全池 mint 失败就是
+// 这样被误判成"收割机坏了"）。
+type harvestRunResult struct {
+	ExitCode int
+	Err      error
+	Elapsed  time.Duration
+	Output   string // stdout+stderr 末尾若干字节（已去控制字符、截断）
+}
+
 var harvestRunFn = runHarvestCLI
 
 // runHarvestCLI 跑一条最小 run。只为在服务端 mint session，不关心回答内容
 // （回答可能因 key 配额 429，但 session 在 run 开始即已创建）。
 // 收割 run 不走任何代理：直连公网（容器须能直连 opencode.ai；代理池是给
 // 网关上游用的，收割是 CLI 自己的注册握手）。
-func runHarvestCLI(ctx context.Context, bin, home, model string) {
+func runHarvestCLI(ctx context.Context, bin, home, model string) harvestRunResult {
+	start := time.Now()
 	cmd := exec.CommandContext(ctx, bin, "run",
 		"--model", model,
 		"Reply with exactly: OK")
@@ -226,7 +263,60 @@ func runHarvestCLI(ctx context.Context, bin, home, model string) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	_ = cmd.Run()
+	// CLI 的子孙进程会继承 stdout/stderr：ctx 到期只 kill 直接子进程，若孙进程
+	// 还活着，cmd.Run 会一直等管道关闭（实测 `timeout 90` 之后 CLI 仍存活十几
+	// 分钟）。WaitDelay 让 Go 在 kill 后最多再等这么久就关掉管道返回，保证单次
+	// run 不会拖过预算。
+	cmd.WaitDelay = 10 * time.Second
+	err := cmd.Run()
+	res := harvestRunResult{Err: err, Elapsed: time.Since(start), ExitCode: -1}
+	if cmd.ProcessState != nil {
+		res.ExitCode = cmd.ProcessState.ExitCode()
+	}
+	res.Output = harvestOutputTail(stdout.String() + stderr.String())
+	return res
+}
+
+// harvestOutputTail 把 CLI 输出压成适合进日志/面板的一行：去 ANSI 控制字符、
+// 折叠空白、截到 400 字节（够看出错误信息，不会把日志刷爆）。
+// 同时redact 掉形如 key 的串：CLI 报错时可能把 auth 内容带出来。
+func harvestOutputTail(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == 0x1b:
+			continue // ANSI 转义引导符
+		case r == '\n' || r == '\r' || r == '\t':
+			b.WriteByte(' ')
+		case r < 0x20:
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := strings.Join(strings.Fields(b.String()), " ")
+	out = harvestKeyPattern.ReplaceAllString(out, "sk-***")
+	if len(out) > 400 {
+		out = out[:400] + "…"
+	}
+	return out
+}
+
+// harvestKeyPattern 匹配 zen key 形态的串（sk- 后跟足够长的字符），
+// 用于把 CLI 输出里可能夹带的凭据抹掉——日志/面板/错误信息都不该出现 key。
+var harvestKeyPattern = regexp.MustCompile(`sk-[A-Za-z0-9_-]{8,}`)
+
+// harvestRunTimeout 单次 CLI 尝试的上限。每次尝试各自计时：早期实现三次尝试
+// 共用一个 60s ctx，第一次卡住就把后两次的时间吃光，"重试"名存实亡。
+func harvestRunTimeout() time.Duration { return 60 * time.Second }
+
+// harvestAttemptNote 把一次尝试的结果整理成日志/错误里的一段（CLI 输出附在冒号后）。
+func harvestAttemptNote(res harvestRunResult) string {
+	note := fmt.Sprintf("exit=%d err=%v elapsed=%.1fs", res.ExitCode, res.Err, res.Elapsed.Seconds())
+	if res.Output != "" {
+		note += ": " + res.Output
+	}
+	return note
 }
 
 // harvestSession 为指定 key 收割一个新 live 会话：
@@ -283,21 +373,31 @@ func harvestSession(ctx context.Context, key string) (string, error) {
 	// 模型兜底（big-pickle 未来下架后收割不中断，见 harvestMintModels）。
 	before := latestHarvestSession(home)
 	sess := ""
-	for _, model := range harvestMintModels() {
+	var last harvestRunResult
+	models := harvestMintModels()
+	for _, model := range models {
 		if sess != "" {
 			break
 		}
-		runCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		for i := 0; i < 3 && sess == ""; i++ {
-			harvestRunFn(runCtx, bin, home, model)
+			if ctx.Err() != nil {
+				break // 每 key 预算耗尽，再试也是立刻失败
+			}
+			runCtx, cancel := context.WithTimeout(ctx, harvestRunTimeout())
+			res := harvestRunFn(runCtx, bin, home, model)
+			cancel()
+			last = res
 			if s := latestHarvestSession(home); s != "" && s != before {
 				sess = s
+				break
 			}
+			log.Printf("zen harvest: key#%d attempt %d (%s) minted nothing — %s",
+				keyIndex(key), i+1, model, harvestAttemptNote(res))
 		}
-		cancel()
 	}
 	if sess == "" {
-		return "", fmt.Errorf("harvest: no session minted (tried %s)", strings.Join(harvestMintModels(), ", "))
+		return "", fmt.Errorf("harvest: no session minted (tried %s; last CLI %s)",
+			strings.Join(models, ", "), harvestAttemptNote(last))
 	}
 
 	// 3. 写入 sticky 表（标记 CLI mint 与会话新鲜度：启动扫描不再跳过、
@@ -587,9 +687,8 @@ func startZenMintJob(keys []string, force bool) (started bool, state map[string]
 			job.finished = true
 			zenMintJobMu.Unlock()
 		}()
-		// 整体上限：11 key / 3 worker，成功路径每 key 约 10-15s（约 1 分钟完成）；
-		// 失败路径受每 key 150s 预算约束，最坏 4 波 ≈ 10 分钟，留 15 分钟余量。
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		// 整体上限按实际工作量推算（并发 1 时就是 key 数 × 每 key 预算）。
+		ctx, cancel := context.WithTimeout(context.Background(), harvestBatchTimeout(len(keys)))
 		defer cancel()
 		res := mintZenSessions(ctx, keys, force, func(idx int, o zenMintOutcome) {
 			zenMintJobMu.Lock()
@@ -693,7 +792,7 @@ func startZenHarvester() {
 			// 盖章必须在拿到批次之后：TryLock 失败时这些 key 根本没被试过，
 			// 提前盖上会让它们平白推迟一个 interval 才再入选。
 			markSweepTried(stale)
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), harvestBatchTimeout(len(stale)))
 			// force=true：这些 key 是"按新鲜度挑出来的"，正是要重 mint。
 			mintZenSessions(ctx, stale, true, nil)
 			cancel()
@@ -760,12 +859,19 @@ func harvestMissingSessions() {
 		return
 	}
 	log.Printf("zen harvest: minting %d key(s) at startup (concurrency %d)", len(missing), harvestConcurrency())
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), harvestBatchTimeout(len(missing)))
 	defer cancel()
+	failed := 0
 	for _, o := range mintZenSessions(ctx, missing, false, nil) {
 		if !o.OK && !o.Skipped {
+			failed++
 			log.Printf("zen harvest: key#%d startup harvest failed (%s), will retry on 403/later", o.Index+1, o.Err)
 		}
+	}
+	// 整批全灭几乎总是环境问题（小实例上并发太快把 CLI 饿死、CLI 起不来），
+	// 而不是 key 或上游的问题——把最可能的那条排查线索直接写进日志。
+	if failed == len(missing) && len(missing) > 1 {
+		log.Printf("zen harvest: all %d key(s) failed to mint — if this instance has few cores/RAM, keep ZEN_HARVEST_CONCURRENCY=1 (default); the CLI bursts CPU+memory per run", len(missing))
 	}
 }
 

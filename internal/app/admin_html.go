@@ -1423,7 +1423,9 @@ function renderOcSessions(s) {
   if (h) {
     const base = 'The free tier only accepts session IDs the upstream has actually seen, minted by the opencode CLI. A key without a live session <b>always</b> fails with 403.';
     h.innerHTML = base + (s.harvestEnabled
-      ? ' Auto-refresh every <b>' + (s.intervalHours || 4) + 'h</b> (kept below the 5h quota window), concurrency <b>' + (s.concurrency || 3) + '</b>.'
+      ? ' Auto-refresh every <b>' + (s.intervalHours || 4) + 'h</b> (kept below the 5h quota window), minting <b>' +
+        (s.concurrency || 1) + '</b> key(s) at a time' +
+        ((s.concurrency || 1) === 1 ? ' (one after another — safest on small instances, the CLI is CPU/RAM hungry)' : '') + '.'
       : ' <b>Harvester unavailable</b> — no opencode CLI in this container (ZEN_HARVEST_BIN).');
   }
   // CLI 不在时后端会以 400 拒绝 mint，按钮先禁用，避免点了才发现。
@@ -1478,17 +1480,23 @@ async function mintZenSessions(force) {
   try {
     await api('POST', '/opencode/sessions/mint', { force: force });
     toast(force ? 'Force minting all sessions…' : 'Minting missing sessions…', 'success');
-    // 任务在后端跑（全量重 mint 要几十秒），按 2s 轮询进度；上限 450 次
-    // （15 分钟）与后端任务超时对齐，避免任务异常时轮询永不停。
+    // 任务在后端跑（串行 mint 时一批是 key 数 × 每 key 预算），按 2s 轮询进度。
+    // 上限按后端批次预算推算：并发默认为 1 后 11 个 key 的批次上限可达几十分钟，
+    // 写死 450 次（15 分钟）会让轮询提前停掉、进度条卡住不再更新。
     if (ocSessPoll) { clearInterval(ocSessPoll); ocSessPoll = null; }
     let ticks = 0;
     const s0 = await loadOcSessions();
     // 提前返回前必须把 ocSessPoll 置空：可见标签页的 20s 轮询用 !ocSessPoll
     // 判断"是否已有轮询在跑"，留一个已 clear 的非空句柄会让它永久停摆。
     if (!s0 || !s0.job || !s0.job.running) { ocSessPoll = null; return; }
+    const j0 = s0.job;
+    const workers = Math.max(1, s0.concurrency || 1);
+    const perKey = s0.keyTimeoutSeconds || 150;
+    const batchSeconds = Math.ceil((j0.total || 1) / workers) * perKey + 120;
+    const maxTicks = Math.min(1800, Math.ceil(batchSeconds / 2) + 30);
     ocSessPoll = setInterval(async () => {
       const s = await loadOcSessions();
-      if (!s || !s.job || !s.job.running || ++ticks >= 450) {
+      if (!s || !s.job || !s.job.running || ++ticks >= maxTicks) {
         clearInterval(ocSessPoll); ocSessPoll = null; loadOcConfig();
       }
     }, 2000);

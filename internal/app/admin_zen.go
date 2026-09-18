@@ -242,13 +242,14 @@ func handleZenSessions(w http.ResponseWriter, r *http.Request) {
 		sessions = append(sessions, entry)
 	}
 	data := map[string]any{
-		"harvestEnabled": harvestEnabled(),
-		"concurrency":    harvestConcurrency(),
-		"intervalHours":  int(harvestInterval() / time.Hour),
-		"liveCount":      live,
-		"total":          len(keys),
-		"sessions":       sessions,
-		"job":            zenMintJobStatus(),
+		"harvestEnabled":    harvestEnabled(),
+		"concurrency":       harvestConcurrency(),
+		"intervalHours":     int(harvestInterval() / time.Hour),
+		"keyTimeoutSeconds": int(harvestKeyBudget() / time.Second),
+		"liveCount":         live,
+		"total":             len(keys),
+		"sessions":          sessions,
+		"job":               zenMintJobStatus(),
 	}
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: data})
 }

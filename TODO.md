@@ -229,3 +229,10 @@ Known deferred (low risk, revisit if needed):
   to that routing. Fixing /v1/responses client-dialect for spark would
   require a responses-dialect emitter for the native upstream; deferred.
 - ZEN_DEBUG_BODY was a temporary probe hook, removed before commit.
+- zen chat tool_choice policy (2026-09-18, supersedes the "text-QA gateway"
+  note in zen.go history): split by client intent, verified by direct
+  upstream A/B on ling — tool_choice=none (no client tools) returns text;
+  tool_choice=auto (client tools present) lets models call the client's
+  own tools. Keep the split: making auto unconditional regressed ling
+  multi-turn to empty text. Responses path (spark) must always send auto
+  (gate rejects none) and passes client tools through as flat items.

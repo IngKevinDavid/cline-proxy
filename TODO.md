@@ -262,3 +262,28 @@ remembering, either as behaviour or as "don't re-propose":
   max_tokens≈400 the reasoning consumes the budget and the client gets empty
   content with finish_reason=length. That is upstream model behaviour, not a
   gateway bug — probes should use ≥1500-2000 tokens for tool turns.
+
+## Live catalog as the source of truth (2026-09-18, 9499f99)
+The model tables used to be a hybrid: seed ids cross-checked against live
+sources. Settled the other way — live is authoritative, seeds are bootstrap.
+- zen: the pricing gate (models.opencode.ai `opencode` provider, cost 0/0,
+  status != deprecated) *is* the real list. `opencode models` reads the same
+  data (probed: CLI 7 = registry free 7), so spawning the CLI per sync adds
+  nothing — it is now only the registry-down fallback, paired with the
+  `-free` suffix heuristic. Do not reintroduce a seed cross-check: a seed id
+  that no longer passes the gate only kept dead models listed.
+- cline: /ai/cline/recommended-models is quota-independent — probed 200 on
+  three accounts while every pool account was 429'd for inference. Hence
+  pickAccountAny() for the sync; with only pickAccount() the whole sync
+  skipped during a quota outage and the list froze on the seed snapshot.
+- Seeds (both platforms) are pruned like everything else once a live list
+  arrives; the existing guard stays (skip the prune when live < half of the
+  known table) so a truncated feed cannot wipe the list.
+- `defaultModel` is now empty = no preference, and getDefaultModel() picks
+  the lexicographically smallest active id. The old random map pick made a
+  pruned preference drift to a different model per request. The panel's
+  DefaultModel still overrides.
+- Consequence to expect: ids that only existed as seeds are gone
+  (deepseek/deepseek-v4-flash, stepfun/step-3.7-flash). Requests for them
+  return 400 "not available on this gateway (see /v1/models)" unless
+  STRICT_MODEL_MATCH=false. A combo pinned to a stale id needs re-pointing.

@@ -287,3 +287,51 @@ sources. Settled the other way — live is authoritative, seeds are bootstrap.
   (deepseek/deepseek-v4-flash, stepfun/step-3.7-flash). Requests for them
   return 400 "not available on this gateway (see /v1/models)" unless
   STRICT_MODEL_MATCH=false. A combo pinned to a stale id needs re-pointing.
+
+## cline "requires stream" self-learning (2026-09-18, a4de61a)
+The free-model feed publishes only id/name/description/tags, so "does this
+model have to be called with stream=true" is inferred from the id shape
+(models.go: no ":" in the id -> force upstream streaming). That inference
+can only be wrong one way, and the upstream says so explicitly: 500
+{"error":"empty response content"}.
+- callClineAutoStream (cline_stream.go) wraps callClineAPI on the three
+  non-stream ingresses. On exactly that fingerprint it learns the id into
+  DATA_DIR/.cline-stream-required.json and retries with stream=true,
+  returning streamed=true so the caller aggregates the SSE - the client
+  still gets plain JSON with status 200.
+- Only the exact fingerprint is learned. Other 5xx pass through untouched:
+  a transient overload must never be persisted as a model property (unit
+  test guards this). One-way learning is deliberate - over-forcing is
+  transparent, under-forcing is the only visible failure.
+- To un-learn a model, delete it from that JSON file (or the file) and
+  restart; there is no reverse learning and none is planned.
+- do not replace the colon heuristic with this: learning costs one failed
+  non-stream request per model, the heuristic costs nothing when right.
+  They are complementary - heuristic first, learning as the safety net.
+- clineCallFn is a package-level seam so the retry path is testable against
+  a fake upstream; production value is always callClineAPI.
+
+## arm64 image: QEMU at build time only, no native runner needed (2026-09-18, verified)
+Question was whether supporting arm64 means wrapping the Dockerfile in QEMU
+instead of a native arm64 build. Measured answer: both are true already and
+nothing needs to change.
+- opencode-ai@1.18.31 (still npm `latest`) DOES publish arm64 binaries,
+  including opencode-linux-arm64-musl (os linux / cpu arm64 / libc musl) -
+  so the "CLI is amd64-only" premise is wrong for the pinned version.
+- Verified locally with `docker buildx build --platform linux/arm64`: the
+  whole build succeeds (exit 0), including the emulated `npm i -g
+  opencode-ai` + `opencode --version` (262s under QEMU). The resulting image
+  boots, /health returns ok, the banner auto-detects the default model, and
+  /app/bin/opencode inside it is a native aarch64 ELF that prints 1.18.31.
+- Cost model: QEMU is used ONLY at build time on GitHub's amd64 runners, and
+  only for the npm stage (the Go binary is cross-compiled natively via
+  GOOS/GOARCH from BuildKit args). At runtime on an arm64 host everything is
+  native - no emulation, no performance penalty.
+- No CI change needed: the existing setup-qemu + platforms
+  linux/amd64,linux/arm64 already produces a working arm64 image. Image size
+  is ~540MB on both arches (dominated by the ~185MB opencode binary).
+- Caveat if a future opencode-ai release drops arm64: the npm stage would
+  fail the arm64 leg and CI would go red (not silently degrade). If that
+  happens, gate the CLI install on $TARGETARCH and copy from a directory so
+  an empty dir still satisfies COPY - the gateway itself is arch-independent
+  and harvestEnabled() already degrades gracefully when the binary is absent.

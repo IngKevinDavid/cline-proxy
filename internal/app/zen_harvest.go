@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -41,6 +42,13 @@ var (
 	harvestMu      sync.Mutex
 	harvestFails   = map[string]int{} // key -> 连续收割失败次数
 	harvestLastTry = map[string]time.Time{}
+)
+
+// 收割候选模型缓存：big-pickle 首选 + 至多 2 个动态免费兜底，缓存 1h。
+var (
+	mintModelsMu    sync.Mutex
+	mintModelsCache []string
+	mintModelsAt    time.Time
 )
 
 // harvestEnabled 是否启用收割机：显式 ZEN_HARVEST=0 关闭；
@@ -119,46 +127,49 @@ func harvestSession(ctx context.Context, key string) (string, error) {
 		}
 	}()
 
-	// 2. 跑最小 run：transient 会话 + 最便宜模型（title-gen 用的 nano 级），
+	// 2. 跑最小 run：transient 会话 + 免费模型。首选 opencode/big-pickle
+	//（zen 免费层默认模型别名），失败则依次尝试至多 2 个动态获取的价格 0
+	// 模型兜底（big-pickle 未来下架后收割不中断，见 harvestMintModels）。
 	// 只为在服务端 mint session，不关心回答内容（回答可能因 key 配额 429，
-	// 但 session 在 run 开始即已创建）。超时 120s。
-	runCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(runCtx, bin, "run",
-		"--model", "opencode/gpt-5.4-nano",
-		"Reply with exactly: OK")
-	cmd.Dir = home
-	// 收割 run 不走任何代理：直连公网（容器须能直连 opencode.ai；
-	// 代理池是给网关上游用的，收割是 CLI 自己的注册握手）。
-	cmd.Env = append(os.Environ(),
-		"HOME="+home,
-		"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
-		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
-		"HTTP_PROXY=",
-		"HTTPS_PROXY=",
-		"http_proxy=",
-		"https_proxy=",
-		"ALL_PROXY=",
-		"all_proxy=",
-		"NO_PROXY=*",
-	)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	// 3. 从 CLI 日志提取本次 mint 的 sess_（取最新创建的一条）。
-	// 注意：回答 429 不影响——session 在 run 开始即创建，日志照写。
+	// 但 session 在 run 开始即已创建）。
 	before := latestHarvestSession(home)
 	sess := ""
-	for i := 0; i < 3 && sess == ""; i++ {
-		_ = cmd.Run() // 回答内容不重要；session 在 run 开始即 mint
-		if s := latestHarvestSession(home); s != "" && s != before {
-			sess = s
+	for _, model := range harvestMintModels() {
+		if sess != "" {
+			break
 		}
+		runCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		for i := 0; i < 3 && sess == ""; i++ {
+			cmd := exec.CommandContext(runCtx, bin, "run",
+				"--model", model,
+				"Reply with exactly: OK")
+			cmd.Dir = home
+			// 收割 run 不走任何代理：直连公网（容器须能直连 opencode.ai；
+			// 代理池是给网关上游用的，收割是 CLI 自己的注册握手）。
+			cmd.Env = append(os.Environ(),
+				"HOME="+home,
+				"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
+				"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+				"HTTP_PROXY=",
+				"HTTPS_PROXY=",
+				"http_proxy=",
+				"https_proxy=",
+				"ALL_PROXY=",
+				"all_proxy=",
+				"NO_PROXY=*",
+			)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			_ = cmd.Run() // 回答内容不重要；session 在 run 开始即 mint
+			if s := latestHarvestSession(home); s != "" && s != before {
+				sess = s
+			}
+		}
+		cancel()
 	}
 	if sess == "" {
-		tail := kit.Truncate(stderr.String()+stdout.String(), 300)
-		return "", fmt.Errorf("harvest: no session minted (cli output: %s)", tail)
+		return "", fmt.Errorf("harvest: no session minted (tried %s)", strings.Join(harvestMintModels(), ", "))
 	}
 
 	// 4. 写入 sticky 表
@@ -174,6 +185,118 @@ func harvestSession(ctx context.Context, key string) (string, error) {
 	saveZenSessions()
 	log.Printf("zen harvest: key#%d minted live session %s", keyIndex(key), kit.Truncate(sess, 24))
 	return sess, nil
+}
+
+// harvestMintModels 收割候选模型（按尝试顺序）：
+//  1. opencode/big-pickle —— zen 免费层默认模型别名，硬编码首选；
+//  2. 至多 2 个动态获取的价格 0 模型 —— `opencode models`（无认证）在线
+//     列表 ∩ 公共目录 api.json 价格门（cost.input==0 && cost.output==0 且
+//     status 非 deprecated），与 syncZenModels 的价格门同规则。big-pickle
+//     未来下架后自动落到其余免费模型，收割不中断。
+//
+// 列表缓存 1h（收割低频，模型目录变化以天计）；CLI/目录不可达时回退到
+// 当前已知免费模型的静态表（big-pickle 之外挑两个稳定的）。
+func harvestMintModels() []string {
+	mintModelsMu.Lock()
+	defer mintModelsMu.Unlock()
+	if len(mintModelsCache) > 0 && time.Since(mintModelsAt) < time.Hour {
+		return mintModelsCache
+	}
+	live := cliModelIDs()
+	free := registryFreeModelIDs()
+	var fallback []string
+	for _, id := range live {
+		if id == "opencode/big-pickle" {
+			continue // 首选已在前列，不必重复尝试
+		}
+		bare := strings.TrimPrefix(id, "opencode/")
+		if free[id] || free[bare] {
+			fallback = append(fallback, id)
+			if len(fallback) == 2 {
+				break
+			}
+		}
+	}
+	if len(fallback) == 0 {
+		// 动态获取失败或免费模型全下架：静态兜底当前已知免费模型
+		fallback = []string{"opencode/ling-3.0-flash-fin-free", "opencode/mimo-v2.5-free"}
+	}
+	mintModelsCache = append([]string{"opencode/big-pickle"}, fallback...)
+	mintModelsAt = time.Now()
+	log.Printf("zen harvest: mint models -> %s", strings.Join(mintModelsCache, ", "))
+	return mintModelsCache
+}
+
+// cliModelIDs 通过 `opencode models`（无认证）取当前在线模型 ID 列表
+//（形如 opencode/xxx 一行一个）。
+func cliModelIDs() []string {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, harvestBin(), "models")
+	cmd.Env = append(os.Environ(),
+		"HOME="+harvestHome(),
+		"XDG_DATA_HOME="+filepath.Join(harvestHome(), ".local", "share"),
+		"XDG_CONFIG_HOME="+filepath.Join(harvestHome(), ".config"),
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			ids = append(ids, line)
+		}
+	}
+	return ids
+}
+
+// registryFreeModelIDs 公共目录 api.json 的价格门：cost 0/0 且非 deprecated
+// 的模型 ID 集合（与 syncZenModels 同规则；目录不可达返回空集）。
+func registryFreeModelIDs() map[string]bool {
+	free := map[string]bool{}
+	req, err := http.NewRequest("GET", opencodeModelsRegistry, nil)
+	if err != nil {
+		return free
+	}
+	req.Header.Set("User-Agent", "opencode/latest/cli")
+	client := &http.Client{Timeout: 25 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return free
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return free
+	}
+	var payload map[string]struct {
+		Models map[string]struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+			Cost   struct {
+				Input  float64 `json:"input"`
+				Output float64 `json:"output"`
+			} `json:"cost"`
+		} `json:"models"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&payload) != nil {
+		return free
+	}
+	prov, ok := payload["opencode"]
+	if !ok {
+		return free
+	}
+	for mid, m := range prov.Models {
+		id := mid
+		if m.ID != "" {
+			id = m.ID
+		}
+		if m.Cost.Input == 0 && m.Cost.Output == 0 &&
+			!strings.Contains(strings.ToLower(m.Status), "deprecat") {
+			free[id] = true
+		}
+	}
+	return free
 }
 
 // latestHarvestSession 从 CLI 日志读最新创建的 session ID。

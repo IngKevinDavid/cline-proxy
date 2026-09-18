@@ -88,6 +88,9 @@ func zenProxyAvailable(idx int) bool {
 	return false
 }
 
+// zenProxyCooldownStatus 返回仍处于冷却的出口及其解除时刻。
+// 时刻用 RFC3339（带时区）而不是服务器格式化的 "15:04:05"：面板按浏览器本地
+// 时区渲染，服务器格式化只会给出容器时区（UTC）的读数，用户看到的是错的钟点。
 func zenProxyCooldownStatus() map[string]string {
 	cfg := getZenConfig()
 	zenProxyCooldownsMu.Lock()
@@ -96,7 +99,7 @@ func zenProxyCooldownStatus() map[string]string {
 	for idx, until := range zenProxyCooldowns {
 		if idx >= 0 && idx < len(cfg.Proxies) {
 			if time.Now().Before(until) {
-				out[cfg.Proxies[idx]] = until.Format("15:04:05")
+				out[cfg.Proxies[idx]] = until.UTC().Format(time.RFC3339)
 			}
 		}
 	}

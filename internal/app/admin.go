@@ -672,12 +672,9 @@ func handleAdminAccountReset(w http.ResponseWriter, r *http.Request) {
 	} else if status == "error" {
 		msg = "Probe error; try again later"
 	}
-	if until, ok := result["cooldownUntil"].(string); ok && until != "" {
-		msg += " (estimated recovery " + until + ")"
-	}
-	if remaining, ok := result["remaining"].(string); ok && remaining != "" {
-		msg += " (remaining " + remaining + ")"
-	}
+	// 恢复时刻与剩余时长都不在此处拼接：面板按浏览器本地时区渲染
+	// data.cooldownUntil（RFC3339；服务器格式化只会给出容器时区=UTC 的读数，
+	// 同一时刻在面板里会显示成两个不同的钟点），remaining 由面板统一附加一次。
 	writeAPI(w, http.StatusOK, apiResponse{
 		Success: false,
 		Message: msg,
@@ -796,7 +793,9 @@ func testAccount(acc *Account) (map[string]any, string) {
 			"email":         acc.Email,
 			"status":        "cooldown",
 			"reason":        reason,
-			"cooldownUntil": until.Format("2006-01-02 15:04:05"),
+			// RFC3339（带时区）：面板用 new Date(...).toLocaleString() 渲染成浏览器本地时间；
+			// 服务器格式化只能给出容器时区读数，同一时刻会显示成两个钟点
+			"cooldownUntil": until.UTC().Format(time.RFC3339),
 			"remaining":     formatDuration(time.Until(until)),
 		}, "cooldown"
 	}
@@ -818,7 +817,9 @@ func testAccount(acc *Account) (map[string]any, string) {
 			"email":         acc.Email,
 			"status":        "cooldown",
 			"reason":        reason,
-			"cooldownUntil": until.Format("2006-01-02 15:04:05"),
+			// RFC3339（带时区）：面板用 new Date(...).toLocaleString() 渲染成浏览器本地时间；
+			// 服务器格式化只能给出容器时区读数，同一时刻会显示成两个钟点
+			"cooldownUntil": until.UTC().Format(time.RFC3339),
 			"remaining":     formatDuration(time.Until(until)),
 			"httpStatus":    resp.StatusCode,
 		}, "cooldown"

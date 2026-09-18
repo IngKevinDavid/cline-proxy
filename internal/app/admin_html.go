@@ -666,6 +666,20 @@ applyTheme(getTheme());
 const _ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmtNum = n => (n || 0).toLocaleString('en-US');
+// fmtWhen 把服务器发来的 RFC3339 时刻渲染成浏览器的本地时间（同一时刻在不同
+// 时区看到各自的钟点）。容器时区是 UTC，直接显示服务器格式化的读数会和本地
+// 时间差一个时差；解析失败则原样返回，至少不丢信息。
+const fmtWhen = s => {
+  if (!s) return '';
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? s : d.toLocaleString('en-US');
+};
+// fmtClock 同上，只显示钟点（用于几分钟级的短冷却）
+const fmtClock = s => {
+  if (!s) return '';
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? s : d.toLocaleTimeString('en-US');
+};
 const fmtTokens = n => {
   n = n || 0;
   if (n >= 1000000) return (n / 1000000).toFixed(2).replace(/\.?0+$/, '') + 'M';
@@ -813,7 +827,7 @@ async function testAccount(id, btn) {
     const prevMap = { active: 'Active', cooldown: 'Cooldown', expired: 'Expired', '': '' };
     let msg = 'Account ' + esc(r.email || '') + ' — ' + label;
     if (r.prevStatus && r.prevStatus !== r.status) msg += ' (was: ' + (prevMap[r.prevStatus] || r.prevStatus) + ')';
-    if (r.cooldownUntil) msg += '\nEstimated recovery: ' + esc(r.cooldownUntil);
+    if (r.cooldownUntil) msg += '\nEstimated recovery: ' + esc(fmtWhen(r.cooldownUntil));
     if (r.remaining) msg += ' (remaining ' + esc(r.remaining) + ')';
     if (r.reason) msg += '\nReason: ' + esc(r.reason);
     if (r.httpStatus) msg += '\nHTTP: ' + r.httpStatus;
@@ -844,6 +858,9 @@ async function resetAccount(id, btn) {
     const r = d.data || {};
     const type = d.success ? 'success' : (r.status === 'cooldown' ? 'warning' : 'error');
     let msg = d.message || 'Check complete';
+    // 恢复时刻与剩余时长都由面板渲染：服务器发的是 RFC3339 时刻（浏览器本地
+    // 时区显示），remaining 只在这里加一次，避免与服务器消息重复
+    if (r.cooldownUntil && r.status === 'cooldown') msg += ' (estimated recovery ' + esc(fmtWhen(r.cooldownUntil)) + ')';
     if (r.remaining && r.status !== 'active') msg += ' (remaining ' + esc(r.remaining) + ')';
     toast(msg, type, 6000);
     loadAccounts(); loadStats();
@@ -1325,7 +1342,7 @@ async function loadProxyPool() {
     const cd = (c.runtime || {}).proxyCooldowns || {};
     const keys = Object.keys(cd);
     _('ppCooldownInfo').textContent = keys.length
-      ? keys.map(k => k + ' cooldown until ' + cd[k]).join('; ')
+      ? keys.map(k => k + ' cooldown until ' + fmtClock(cd[k])).join('; ')
       : 'No proxies cooling down';
   } catch (e) { /* ignore */ }
 }

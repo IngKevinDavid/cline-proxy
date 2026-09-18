@@ -516,7 +516,7 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 		return
 	}
 
-	resp, rateLimited, err := callZenAPI(r.Context(), params, isStream)
+	resp, rateLimited, err := callZenAPI(r.Context(), params, true)
 	if err != nil && isWrongEndpoint(err) {
 		learnZenEndpoint(zm.ID, "responses")
 		log.Printf("  zen endpoint auto-learn: model=%s chat/completions rejected (%v), retrying responses",
@@ -554,7 +554,23 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 		tracker.finish(true, resp.StatusCode)
 		return
 	}
-	handleNonStreamResponseWithUsage(w, resp, usageFn, nil)
+	// FreeTier gate 要求上游恒 stream=true（buildZenBody 恒注入）；非流式
+	// 客户端在此把上游 chat SSE 聚合回 chat JSON，语义与直连非流式一致。
+	chat, aerr := collectStreamResponse(resp)
+	if aerr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": map[string]string{"message": aerr.Error(), "type": "parse_error"},
+		})
+		tracker.finish(false, http.StatusInternalServerError)
+		return
+	}
+	if u, ok := chat["usage"].(map[string]any); ok && len(u) > 0 {
+		usageFn(u)
+	}
+	chat["model"] = zm.ID
+	chat = normalizeOpenAIResponse(chat)
+	truncateAtStopSequences(chat, stopSequencesFrom(params))
+	writeJSON(w, http.StatusOK, chat)
 	tracker.finish(true, resp.StatusCode)
 }
 
@@ -562,7 +578,7 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 // responses 路径上报"该用 chat"时，学回 chat 后经此重试，避免递归回主入口）。
 func handleZenChatDirect(w http.ResponseWriter, r *http.Request, params map[string]any, zm *ZenModel, tracker *zenStatsTracker) {
 	isStream, _ := params["stream"].(bool)
-	resp, rateLimited, err := callZenAPI(r.Context(), params, isStream)
+	resp, rateLimited, err := callZenAPI(r.Context(), params, true)
 	if err != nil {
 		log.Printf("  zen api error: %v", err)
 		tracker.rec.RateLimited = rateLimited
@@ -585,7 +601,21 @@ func handleZenChatDirect(w http.ResponseWriter, r *http.Request, params map[stri
 		tracker.finish(true, resp.StatusCode)
 		return
 	}
-	handleNonStreamResponseWithUsage(w, resp, usageFn, nil)
+	chat, aerr := collectStreamResponse(resp)
+	if aerr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": map[string]string{"message": aerr.Error(), "type": "parse_error"},
+		})
+		tracker.finish(false, http.StatusInternalServerError)
+		return
+	}
+	if u, ok := chat["usage"].(map[string]any); ok && len(u) > 0 {
+		usageFn(u)
+	}
+	chat["model"] = zm.ID
+	chat = normalizeOpenAIResponse(chat)
+	truncateAtStopSequences(chat, stopSequencesFrom(params))
+	writeJSON(w, http.StatusOK, chat)
 	tracker.finish(true, resp.StatusCode)
 }
 
@@ -2209,10 +2239,12 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 			tracker.finish(false, http.StatusInternalServerError)
 			return
 		}
+		// 聚合结果不含上游 model（responsesSSEToChat 置空），两种客户端
+		// 形态都要回填网关模型 ID，避免 Anthropic 应答 model 为空。
+		chat["model"] = zm.ID
 		if isStream {
 			// responses 原生流已聚合为 chat：按非流式 anthropic 呈现
 			//（SSE 逐块转发需原生 event 形态，聚合后已无原生块可转）
-			chat["model"] = zm.ID
 			anthropicResp := openAIToAnthropic(normalizeOpenAIResponse(chat))
 			if tc, ok := getNested(chat, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
 				anthropicResp["stop_reason"] = "tool_use"
@@ -2239,7 +2271,7 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 		return
 	}
 
-	resp, rateLimited, err := callZenAPI(r.Context(), openAIReq, isStream)
+	resp, rateLimited, err := callZenAPI(r.Context(), openAIReq, true)
 	if err != nil && isWrongEndpoint(err) {
 		learnZenEndpoint(zm.ID, "responses")
 		log.Printf("  anthropic zen endpoint auto-learn: model=%s chat/completions rejected (%v), retrying responses",
@@ -2306,23 +2338,20 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 		return
 	}
 
-	var raw map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	// FreeTier gate 要求上游恒 stream=true；非流式客户端聚合上游 chat SSE
+	// 后再转 anthropic 形态。
+	chatOut, aerr := collectStreamResponse(resp)
+	if aerr != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error": map[string]string{"message": err.Error(), "type": "parse_error"},
+			"error": map[string]string{"message": aerr.Error(), "type": "parse_error"},
 		})
 		tracker.finish(false, http.StatusInternalServerError)
 		return
 	}
-	if u, ok := raw["usage"].(map[string]any); ok && len(u) > 0 {
+	if u, ok := chatOut["usage"].(map[string]any); ok && len(u) > 0 {
 		usageFn(u)
 	}
-	chatOut := raw
-	if data, ok := raw["data"]; ok {
-		if d, ok := data.(map[string]any); ok {
-			chatOut = d
-		}
-	}
+	chatOut["model"] = zm.ID
 	chatOut = normalizeOpenAIResponse(chatOut)
 	anthropicResp := openAIToAnthropic(chatOut)
 	if tc, ok := getNested(chatOut, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -189,6 +190,10 @@ func buildTransport(dial func(ctx context.Context, network, addr string) (net.Co
 		uconn := utls.UClient(raw, &utls.Config{
 			ServerName: host,
 			NextProtos: []string{"http/1.1"},
+			// ZEN_TLS_INSECURE=1 仅供本地 mitm 抓包排障（跳过服务端证书校验，
+			// 明文仍经代理可见）。生产/容器默认关闭；该 env 在 Docker/文档中
+			// 从不设置。
+			InsecureSkipVerify: os.Getenv("ZEN_TLS_INSECURE") == "1",
 		}, utls.HelloCustom)
 		if err := uconn.ApplyPreset(bunSpecForConn()); err != nil {
 			raw.Close()

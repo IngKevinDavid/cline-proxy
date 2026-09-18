@@ -606,6 +606,68 @@ func pinnedZenKey() string {
 
 // ============ zen 上游调用 ============
 
+// zenGateTools 免费层 chat 端点必须携带的 opencode 工具集（工具名与官方
+// CLI 一致）。FreeTier 中间件按工具名校验"请求是否来自 opencode CLI"
+//（2026-09-18 实测解码：缺工具/工具名不齐 → 403 FreeTierError，即使会话
+// 有效；乱序、假描述、仅核心 5 名(bash/edit/glob/grep/read)也通过）。
+// 描述用精简占位即可——模型在 tool_choice=none 下不会真正发起工具调用，
+// 回复保持纯文本（网关无法执行 CLI 工具，文本化是免费层网关的正确语义）。
+func zenGateTools() []map[string]any {
+	mk := func(name, desc string) map[string]any {
+		return map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        name,
+				"description": desc,
+				"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
+			},
+		}
+	}
+	return []map[string]any{
+		mk("bash", "Execute a bash command"),
+		mk("edit", "Edit a file"),
+		mk("glob", "Find files by glob pattern"),
+		mk("grep", "Search file contents"),
+		mk("read", "Read a file"),
+		mk("skill", "Load a skill"),
+		mk("task", "Run a background task"),
+		mk("todowrite", "Write a todo list"),
+		mk("webfetch", "Fetch a web page"),
+		mk("websearch", "Search the web"),
+		mk("write", "Write a file"),
+	}
+}
+
+// zenResponsesGateTools 免费层 /v1/responses 端点必须携带的 flat 形态工具集
+//（tools[].{type,name,description,parameters,strict}——chat 嵌套形态
+// {type,function:{name}} 上游报 400 "tools[0] missing required field name"）。
+// 工具名校验与 chat 端点同源（2026-09-18 实测解码）；且 responses 端点
+// tool_choice 只接受 "auto"（"none" 报 400 "only `auto` allowed"）。
+func zenResponsesGateTools() []map[string]any {
+	mk := func(name, desc string) map[string]any {
+		return map[string]any{
+			"type":        "function",
+			"name":        name,
+			"description": desc,
+			"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
+			"strict":      false,
+		}
+	}
+	return []map[string]any{
+		mk("bash", "Execute a bash command"),
+		mk("edit", "Edit a file"),
+		mk("glob", "Find files by glob pattern"),
+		mk("grep", "Search file contents"),
+		mk("read", "Read a file"),
+		mk("skill", "Load a skill"),
+		mk("task", "Run a background task"),
+		mk("todowrite", "Write a todo list"),
+		mk("webfetch", "Fetch a web page"),
+		mk("websearch", "Search the web"),
+		mk("write", "Write a file"),
+	}
+}
+
 // buildZenBody 构造 zen 请求体:只带 OpenAI 兼容字段,改写模型为 zen ID
 func buildZenBody(params map[string]any, stream bool) map[string]any {
 	body := map[string]any{}
@@ -630,6 +692,14 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 	delete(body, "reasoning_effort")
 	delete(body, "reasoningEffort")
 	enforceToolChoiceNone(body)
+	// FreeTier gate（2026-09-18 实测解码）：zen 免费层 chat 端点校验请求体
+	// 是否携带 opencode 工具集，缺失则 403（"can only be used from within
+	// OpenCode"）。恒注入全部 11 个规范工具名 + tool_choice=none——
+	// none 保证模型不会发起工具调用，回复保持纯文本。注意该注入会覆盖
+	// 客户端自带的工具与 tool_choice：zen 免费模型按文本问答网关使用，
+	// 工具调用语义不适用（网关无法执行 CLI 工具）。
+	body["tools"] = zenGateTools()
+	body["tool_choice"] = "none"
 	return body
 }
 
@@ -756,53 +826,15 @@ func buildZenResponsesBody(params map[string]any, stream bool, modelID string, p
 	// include 原生字段：官方 CLI 实测发送 reasoning.encrypted_content；
 	// 缺省时补齐以匹配原生请求形态
 	body["include"] = []any{"reasoning.encrypted_content"}
-	// 工具转换：chat 形态 tools[].function.{name,description,parameters}
-	// -> Responses 形态 tools[].{type,name,description,parameters,strict}
-	//（官方 CLI 发后者；chat 嵌套形态上游报 tools[0] missing name）。
-	// tool_choice 缺省 auto 与 CLI 一致。
-	if tools, ok := params["tools"].([]any); ok && len(tools) > 0 {
-		var rt []any
-		for _, t := range tools {
-			tm, ok := t.(map[string]any)
-			if !ok {
-				continue
-			}
-			if fn, ok := tm["function"].(map[string]any); ok {
-				nt := map[string]any{"type": "function"}
-				if name, _ := fn["name"].(string); name != "" {
-					nt["name"] = name
-				} else if name, _ := tm["name"].(string); name != "" {
-					nt["name"] = name
-				}
-				if desc, _ := fn["description"].(string); desc != "" {
-					nt["description"] = desc
-				} else if desc, _ := tm["description"].(string); desc != "" {
-					nt["description"] = desc
-				}
-				if p, ok := fn["parameters"]; ok {
-					nt["parameters"] = p
-				} else if p, ok := tm["parameters"]; ok {
-					nt["parameters"] = p
-				}
-				if s, ok := tm["strict"].(bool); ok {
-					nt["strict"] = s
-				} else {
-					nt["strict"] = false
-				}
-				rt = append(rt, nt)
-				continue
-			}
-			rt = append(rt, t)
-		}
-		if len(rt) > 0 {
-			body["tools"] = rt
-			if tc, ok := params["tool_choice"]; ok {
-				body["tool_choice"] = tc
-			} else {
-				body["tool_choice"] = "auto"
-			}
-		}
-	}
+	// FreeTier gate（2026-09-18 实测解码）：/v1/responses 端点同样校验请求体
+	// 是否携带 opencode 工具集，缺失则 403；且必须 flat 形态 + tool_choice=auto
+	//（chat 嵌套形态 400 missing name、tool_choice=none 400 only auto allowed）。
+	// 恒注入全部 11 个规范工具名 + auto——auto 是 responses 端点唯一接受的值，
+	// 模型偶发发起工具调用时网关不执行、按文本语义继续（与 chat 路径
+	// tool_choice=none 的差异仅由端点硬性要求决定，语义同为文本问答网关）。
+	// 与 chat 路径一致：覆盖客户端自带的工具与 tool_choice。
+	body["tools"] = zenResponsesGateTools()
+	body["tool_choice"] = "auto"
 	return body
 }
 

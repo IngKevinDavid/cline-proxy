@@ -1331,6 +1331,20 @@ type toolAccum struct {
 	args strings.Builder
 }
 
+// isSSELine 判断一行是否属于 SSE 语法（字段名 + 冒号，或注释行 ":..."）。
+// 上游心跳（": keep-alive"）、event:/id:/retry: 行都与 data: 同属一个流。
+func isSSELine(line string) bool {
+	if strings.HasPrefix(line, ":") {
+		return true // 注释/心跳
+	}
+	for _, f := range []string{"data:", "event:", "id:", "retry:"} {
+		if strings.HasPrefix(line, f) {
+			return true
+		}
+	}
+	return false
+}
+
 func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 	var (
 		model        string
@@ -1357,10 +1371,25 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 			break
 		}
 	}
-	// 非 SSE：整段按 JSON 错误体处理（error/data/普通对象都透传给调用方）
-	if firstNonEmpty != "" && !strings.HasPrefix(firstNonEmpty, "data:") {
+	// 非 SSE：整段按 JSON 错误体处理（error/data/普通对象都透传给调用方）。
+	// 判据是"首个非空行是否为 SSE 行"，而不是只看 data: —— 上游常在首个
+	// data 块之前发心跳注释（mimo 实测 ": keep-alive"），把它当非 SSE 会让
+	// 正常流被误判成 500 parse_error。
+	if firstNonEmpty != "" && !isSSELine(firstNonEmpty) {
 		var obj map[string]any
 		if err := json.Unmarshal(raw, &obj); err == nil {
+			// 带 error 的 JSON 是上游错误体：必须上抛。原样透传会让调用方把它
+			// 当成功响应下发（无 choices → 客户端收到"空 200"，错误被吞掉）。
+			if e, ok := obj["error"]; ok && e != nil {
+				msg := ""
+				if em, ok := e.(map[string]any); ok {
+					msg, _ = em["message"].(string)
+				}
+				if msg == "" {
+					msg = kit.Truncate(fmt.Sprint(e), 300)
+				}
+				return nil, fmt.Errorf("upstream error: %s", msg)
+			}
 			return obj, nil
 		}
 		if strings.Contains(strings.ToLower(body), "error") {
@@ -1438,6 +1467,10 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 							"function": map[string]any{"name": "", "arguments": ""},
 						}}
 						pendingTools[idx] = acc
+					} else if id, ok := tcMap["id"].(string); ok && id != "" {
+						// 后续分片才带到 id（部分上游首片 id 为空）——补齐，
+						// 否则工具结果回传时 tool_call_id 对不上
+						acc.call["id"] = id
 					}
 					if fn, ok := tcMap["function"].(map[string]any); ok {
 						if n, ok := fn["name"].(string); ok && n != "" {
@@ -1464,16 +1497,23 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 			break
 		}
 	}
-	// 按 index 顺序汇出工具调用
+	// 按 index 顺序汇出工具调用。按 map 键排序而不是 i++ 递增：上游 index
+	// 从 1 起跳（或缺号）时，递增式遍历会当场断链，后面的调用全部丢失。
 	toolCalls := make([]any, 0, len(pendingTools))
-	for i := 0; len(pendingTools) > 0; i++ {
-		acc, ok := pendingTools[i]
-		if !ok {
-			break
+	if len(pendingTools) > 0 {
+		idxs := make([]int, 0, len(pendingTools))
+		for i := range pendingTools {
+			idxs = append(idxs, i)
 		}
-		acc.call["function"].(map[string]any)["arguments"] = repairToolArguments(acc.args.String())
-		toolCalls = append(toolCalls, acc.call)
-		delete(pendingTools, i)
+		sort.Ints(idxs)
+		for _, i := range idxs {
+			acc := pendingTools[i]
+			acc.call["function"].(map[string]any)["arguments"] = chatToolArguments(acc.args.String())
+			if id, ok := acc.call["id"].(string); !ok || id == "" {
+				acc.call["id"] = fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), i)
+			}
+			toolCalls = append(toolCalls, acc.call)
+		}
 	}
 
 	message := map[string]any{
@@ -1487,6 +1527,11 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 		// 流以 EOF 结束但从未收到 finish_reason 块 —— 补一个合法值，
 		// 空串对 OpenAI 方言客户端是非法 finish_reason
 		finishReason = "stop"
+	}
+	if len(toolCalls) > 0 && finishReason == "stop" {
+		// 有工具调用却报 stop：agent 循环会把它当普通回复收尾，不再执行工具。
+		// length（被截断）保持原样，客户端应丢弃半截调用。
+		finishReason = "tool_calls"
 	}
 	choice := map[string]any{
 		"index":         0,
@@ -1798,6 +1843,50 @@ func repairToolArguments(args string) string {
 	return string(b)
 }
 
+// chatToolArguments chat 方言 tool_calls.arguments 归一化：空串补 "{}"
+// （OpenAI 方言要求合法 JSON 字符串，空串会让严格客户端/上游解析失败），
+// 其余交给 repairToolArguments。
+func chatToolArguments(args string) string {
+	if strings.TrimSpace(args) == "" {
+		return "{}"
+	}
+	return repairToolArguments(args)
+}
+
+// mergeConcatenatedJSON 合并粘连的多个 JSON 对象（上游把两次工具调用的参数
+// 串成一段时产生）。全部为对象时按键合并，后到的非空值覆盖；出现数组/非
+// 对象/截断则失败，交回上层兜底。
+func mergeConcatenatedJSON(raw string) (any, bool) {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	merged := map[string]any{}
+	count := 0
+	for {
+		var v any
+		err := dec.Decode(&v)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, false
+		}
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		for k, val := range m {
+			if s, isStr := val.(string); isStr && s == "" {
+				continue // 空值不覆盖已累积内容
+			}
+			merged[k] = val
+		}
+		count++
+	}
+	if count < 2 {
+		return nil, false // 单个对象不归这里管
+	}
+	return merged, true
+}
+
 // parseToolArgs 解析工具调用参数 JSON，带容错修复
 func parseToolArgs(raw string) (any, error) {
 	raw = strings.TrimSpace(raw)
@@ -1837,6 +1926,12 @@ func parseToolArgs(raw string) (any, error) {
 	}
 	if err := json.Unmarshal([]byte(fixed), &v); err == nil && v != nil {
 		return v, nil
+	}
+	// 粘连的多对象：上游把两次工具调用的参数串成一段
+	//（实测 spark 并行调用产出 {"query":...}{"url":...}）。
+	// 按键合并 —— 按"取首个对象"的兜底会把后一个调用的参数整段丢掉。
+	if v2, ok := mergeConcatenatedJSON(raw); ok {
+		return v2, nil
 	}
 	// 最终兜底：从杂散内容中提取首个 JSON 对象/数组
 	if i := strings.IndexAny(raw, "{["); i >= 0 {
@@ -2318,7 +2413,15 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 			tracker.finish(false, http.StatusInternalServerError)
 			return
 		}
+		chat["model"] = zm.ID
 		tracker.rec.RateLimited = rateLimited2
+		if isStream {
+			// 流式客户端：与原生分支一致地重发 Anthropic SSE 事件序列
+			//（回非流式 JSON 会让 SDK 的流解析器直接报错）
+			emitAnthropicSSEFromChat(w, normalizeOpenAIResponse(chat), nil)
+			tracker.finish(true, http.StatusOK)
+			return
+		}
 		finishZenAnthropicNonStream(w, chat, openAIReq, zm, tracker)
 		return
 	}
@@ -2647,10 +2750,17 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 		idxs = append(idxs, i)
 	}
 	sort.Ints(idxs)
+	emittedTools := 0
 	for _, i := range idxs {
 		if acc := pendingTools[i]; !acc.emitted {
 			emitToolBlock(acc)
 		}
+		emittedTools++
+	}
+	if emittedTools > 0 && stopReason == "end_turn" {
+		// 上游 finish_reason 常为 stop 但确实发了工具调用；报 end_turn 会让
+		// 客户端收尾而不执行工具（agent 循环当场断掉）
+		stopReason = "tool_use"
 	}
 
 	// 上游中途断流（非 EOF 的真实读错误）: 不能继续伪造 message_delta/end_turn
@@ -2762,9 +2872,14 @@ func emitAnthropicSSEFromChat(w http.ResponseWriter, chat map[string]any, usageF
 		})
 	}
 
-	// tool_use 块（如有）
+	// tool_use 块（如有）。块索引必须连续：无文本块时必须从 0 起，
+	// 否则 index 跳号会被客户端当成非法流丢弃工具块。
+	toolUseEmitted := false
 	if tcs, ok := getNested(chat, "choices", 0, "message", "tool_calls").([]any); ok {
-		idx := 1
+		idx := 0
+		if text != "" {
+			idx = 1
+		}
 		for _, tc := range tcs {
 			tcm, _ := tc.(map[string]any)
 			if tcm == nil {
@@ -2813,8 +2928,14 @@ func emitAnthropicSSEFromChat(w http.ResponseWriter, chat map[string]any, usageF
 				"type":  "content_block_stop",
 				"index": idx,
 			})
+			toolUseEmitted = true
 			idx++
 		}
+	}
+	if toolUseEmitted && stopReason == "end_turn" {
+		// 有工具块却报 end_turn：客户端会直接收尾、不执行工具（上游
+		// finish_reason 常为 stop，工具块却是真的）
+		stopReason = "tool_use"
 	}
 
 	// usage 透传 + 结束事件
@@ -2902,12 +3023,15 @@ func normalizeMessage(msg map[string]any) map[string]any {
 		if out["content"] == nil {
 			out["content"] = ""
 		}
-		// 非流式聚合路径的兜底修复：上游偶发损坏 arguments 在这里恢复
+		// 非流式聚合路径的兜底修复：上游偶发损坏 arguments 在这里恢复；
+		// 空串补 "{}"（严格客户端/上游不接受空 arguments）
 		for _, t := range tc {
 			if tm, ok := t.(map[string]any); ok {
 				if fn, ok := tm["function"].(map[string]any); ok {
 					if a, ok := fn["arguments"].(string); ok {
-						fn["arguments"] = repairToolArguments(a)
+						fn["arguments"] = chatToolArguments(a)
+					} else if fn["arguments"] == nil {
+						fn["arguments"] = "{}"
 					}
 				}
 			}

@@ -626,8 +626,12 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		if out.changed {
 			log.Printf("  responses zen: %s", out.note)
 		}
-		resp, _, err := callZenAPI(r.Context(), chat, isStream)
+		// 上游恒 stream=true：zen 免费层 chat 端点只接受 CLI 形态的流式请求，
+		// stream=false 会被 FreeTier gate 直接 403。非流式客户端在这里把 SSE
+		// 聚合回 JSON（原先透传 isStream 会让这类请求必 403）。
+		resp, _, err := callZenAPI(r.Context(), chat, true)
 		if err != nil {
+			log.Printf("  responses zen api error: %v", err)
 			writeJSON(w, http.StatusBadGateway, map[string]any{
 				"error": map[string]string{"message": err.Error(), "type": "api_error"},
 			})
@@ -643,17 +647,12 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 			chatStreamToResponses(w, resp, nil)
 			return
 		}
-		var raw map[string]any
-		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		raw, cerr := collectStreamResponse(resp)
+		if cerr != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"error": map[string]string{"message": cerr.Error(), "type": "api_error"},
+			})
 			return
-		}
-		// zen 可能把响应包在 {data:{...}} —— 与 cline 路径一致地解包 + 归一化，
-		// 否则 choices 为 nil，客户端拿到空 output 且无任何报错
-		if data, ok := raw["data"]; ok {
-			if d, ok := data.(map[string]any); ok {
-				raw = d
-			}
 		}
 		writeJSON(w, http.StatusOK, chatToResponses(normalizeOpenAIResponse(raw)))
 		return

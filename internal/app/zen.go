@@ -627,34 +627,17 @@ var zenGateToolSpecs = []struct{ name, desc string }{
 }
 
 // zenGateTools chat 端点形态：tools[].{type,function:{name,description,parameters}}。
-func zenGateTools() []map[string]any {
-	out := make([]map[string]any, 0, len(zenGateToolSpecs))
+// 返回 []any 与客户端解码出来的 tools 同型（下游要拼接两者）。
+func zenGateTools() []any {
+	out := make([]any, 0, len(zenGateToolSpecs))
 	for _, s := range zenGateToolSpecs {
 		out = append(out, map[string]any{
 			"type": "function",
 			"function": map[string]any{
 				"name":        s.name,
 				"description": s.desc,
-				"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
+				"parameters":  zenEmptySchema(),
 			},
-		})
-	}
-	return out
-}
-
-// zenResponsesGateTools responses 端点形态：flat tools[].{type,name,description,
-// parameters,strict}（chat 嵌套形态上游报 400 "tools[0] missing required field
-// name"）。工具名校验与 chat 端点同源；且 responses 端点 tool_choice 只接受
-// "auto"（"none" 报 400 "only `auto` allowed"）。
-func zenResponsesGateTools() []map[string]any {
-	out := make([]map[string]any, 0, len(zenGateToolSpecs))
-	for _, s := range zenGateToolSpecs {
-		out = append(out, map[string]any{
-			"type":        "function",
-			"name":        s.name,
-			"description": s.desc,
-			"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
-			"strict":      false,
 		})
 	}
 	return out
@@ -689,17 +672,32 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 	// 是否带工具分流（实测对比）：
 	//  - 客户端无工具（纯文本问答）：tool_choice=none。auto 会让部分模型
 	//    （ling 多轮实测）在有工具但无需调用时返回空文本；none 保证回复。
-	//  - 客户端带工具（IDE agent 模式，Cursor 等）：透传客户端工具 +
-	//    tool_choice=auto，模型可发起调用、IDE 执行后回传结果（实测
-	//    ling 调用客户端自定义 get_weather 成功）。覆盖客户端 tool_choice
-	//    为 auto：none 会同时压制客户端工具。
-	var clientTools []any
-	if ct, ok := params["tools"].([]any); ok && len(ct) > 0 {
-		clientTools = ct
+	//  - 客户端带工具（IDE agent 模式，Cursor 等）：客户端定义优先（同名时
+	//    覆盖 gate 占位 stub，模型才能拿到真实参数 schema）+ tool_choice=auto，
+	//    模型可发起调用、IDE 执行后回传结果（实测 ling 调用客户端自定义
+	//    get_weather 成功）。客户端显式 none 时尊重（实测 chat 端点接受 none）。
+	delete(body, "functions")
+	delete(body, "function_call")
+	clientTools := zenClientTools(params)
+	if len(clientTools) == 0 {
+		body["tools"] = zenGateTools()
+		body["tool_choice"] = "none"
+	} else {
+		body["tools"] = zenMergeTools(clientTools, zenGateTools())
+		body["tool_choice"] = "auto"
+		if tc, _ := params["tool_choice"].(string); tc == "none" {
+			body["tool_choice"] = "none"
+		}
 	}
-	if len(clientTools) > 0 {
-		merged := zenGateTools()
-		for _, t := range clientTools {
+	return body
+}
+
+// zenClientTools 提取客户端工具（chat 嵌套形态 tools[]，兼容已废弃的
+// functions[] 形态），返回可直接发给 chat 端点的嵌套定义。
+func zenClientTools(params map[string]any) []any {
+	var out []any
+	if ct, ok := params["tools"].([]any); ok {
+		for _, t := range ct {
 			tm, ok := t.(map[string]any)
 			if !ok {
 				continue
@@ -709,28 +707,83 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 				continue
 			}
 			n, _ := fn["name"].(string)
-			if n != "" && !containsGateTool(n) {
-				merged = append(merged, tm)
+			if n == "" {
+				continue
 			}
+			if fn["parameters"] == nil {
+				fn["parameters"] = zenEmptySchema() // null schema 上游判非法
+			}
+			out = append(out, tm)
 		}
-		body["tools"] = merged
-		body["tool_choice"] = "auto"
-	} else {
-		body["tools"] = zenGateTools()
-		body["tool_choice"] = "none"
 	}
-	return body
+	if len(out) > 0 {
+		return out
+	}
+	if fns, ok := params["functions"].([]any); ok {
+		for _, f := range fns {
+			fm, ok := f.(map[string]any)
+			if !ok {
+				continue
+			}
+			n, _ := fm["name"].(string)
+			if n == "" {
+				continue
+			}
+			fn := map[string]any{"name": n}
+			if d, ok := fm["description"].(string); ok {
+				fn["description"] = d
+			}
+			if p, ok := fm["parameters"]; ok && p != nil {
+				fn["parameters"] = p
+			} else {
+				fn["parameters"] = zenEmptySchema()
+			}
+			out = append(out, map[string]any{"type": "function", "function": fn})
+		}
+	}
+	return out
 }
 
-// containsGateTool 判断工具名是否为 FreeTier gate 的 11 个规范工具之一。
-// 客户端与 gate 重名的工具不加第二份（如 Cursor 也发 bash/edit/read）。
-func containsGateTool(name string) bool {
-	for _, s := range zenGateToolSpecs {
-		if s.name == name {
-			return true
+// zenMergeTools 合并客户端工具与 gate 占位工具：客户端定义优先，同名 gate
+// stub 跳过。gate 只校验工具名是否存在，带真实 schema 的客户端定义同样过闸，
+// 而 stub 抢先会让模型拿到空参数结构（如客户端 read 的 file_path 丢失）。
+func zenMergeTools(clientTools []any, gateTools []any) []any {
+	merged := make([]any, 0, len(clientTools)+len(gateTools))
+	provided := map[string]bool{}
+	for _, t := range clientTools {
+		tm, ok := t.(map[string]any)
+		if !ok {
+			continue
 		}
+		fn, _ := tm["function"].(map[string]any)
+		if fn == nil {
+			continue
+		}
+		n, _ := fn["name"].(string)
+		if n == "" || provided[n] {
+			continue
+		}
+		provided[n] = true
+		merged = append(merged, tm)
 	}
-	return false
+	for _, gt := range gateTools {
+		tm, ok := gt.(map[string]any)
+		if !ok {
+			continue
+		}
+		fn, _ := tm["function"].(map[string]any)
+		n, _ := fn["name"].(string)
+		if n == "" || provided[n] {
+			continue
+		}
+		provided[n] = true
+		merged = append(merged, tm)
+	}
+	return merged
+}
+
+func zenEmptySchema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
 
 // ============ zen 上游调用：原生 /v1/responses 端点 ============
@@ -806,7 +859,7 @@ func buildZenResponsesBody(params map[string]any, stream bool, modelID string, p
 			// 第一条且把 entry 换成 function_call，丢掉正文文本）。
 			if role == "assistant" {
 				if tcs, ok := mm["tool_calls"].([]any); ok {
-					for _, tc := range tcs {
+					for ci, tc := range tcs {
 						tcm, ok := tc.(map[string]any)
 						if !ok {
 							continue
@@ -818,6 +871,16 @@ func buildZenResponsesBody(params map[string]any, stream bool, modelID string, p
 						if fn != nil {
 							name, _ = fn["name"].(string)
 							args, _ = fn["arguments"].(string)
+						}
+						if id == "" {
+							// function_call 的 call_id 是必填：缺 id 的历史
+							// 条目会让整个请求 400；补一个稳定的合成 id
+							id = fmt.Sprintf("call_hist_%d_%d", len(input), ci)
+						}
+						if args == "" {
+							args = "{}" // 空串不是合法 JSON 参数
+						} else if !json.Valid([]byte(args)) {
+							args = repairToolArguments(args)
 						}
 						input = append(input, map[string]any{
 							"type":      "function_call",
@@ -864,37 +927,96 @@ func buildZenResponsesBody(params map[string]any, stream bool, modelID string, p
 	// FreeTier gate（2026-09-18 实测解码）：/v1/responses 端点同样校验请求体
 	// 是否携带 opencode 工具集，缺失则 403；且必须 flat 形态 + tool_choice=auto
 	//（chat 嵌套形态 400 missing name、tool_choice=none 400 only auto allowed）。
-	// 恒注入全部 11 个规范工具名 + auto——auto 是 responses 端点唯一接受的值。
-	// 与 chat 路径一致：透传客户端自定义工具（嵌套 chat 形态转 flat），
-	// 让 IDE agent 模式的工具调用在 spark 上可用。
-	merged := zenResponsesGateTools()
-	if ct, ok := params["tools"].([]any); ok && len(ct) > 0 {
+	// 恒注入 11 个规范工具名 + auto——auto 是 responses 端点唯一接受的值。
+	// 客户端工具（chat 嵌套或已是 flat）优先于同名 gate stub，schema 才不丢。
+	body["tools"] = zenMergeResponsesTools(zenClientFlatTools(params))
+	body["tool_choice"] = "auto"
+	return body
+}
+
+// zenClientFlatTools 提取客户端工具并转成 responses 端点要求的 flat 形态。
+// 同时接受 chat 嵌套形态 {type,function:{...}} 与 responses 原生 flat 形态
+// {type,name,description,parameters,strict}。
+func zenClientFlatTools(params map[string]any) []map[string]any {
+	var out []map[string]any
+	add := func(name, desc string, p any) {
+		if name == "" {
+			return
+		}
+		if p == nil {
+			p = zenEmptySchema()
+		}
+		out = append(out, map[string]any{
+			"type":        "function",
+			"name":        name,
+			"description": desc,
+			"parameters":  p,
+			"strict":      false,
+		})
+	}
+	if ct, ok := params["tools"].([]any); ok {
 		for _, t := range ct {
 			tm, ok := t.(map[string]any)
 			if !ok {
 				continue
 			}
-			fn, ok := tm["function"].(map[string]any)
+			if fn, ok := tm["function"].(map[string]any); ok {
+				n, _ := fn["name"].(string)
+				desc, _ := fn["description"].(string)
+				add(n, desc, fn["parameters"])
+				continue
+			}
+			n, _ := tm["name"].(string)
+			if n == "" {
+				continue
+			}
+			desc, _ := tm["description"].(string)
+			add(n, desc, tm["parameters"])
+		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	if fns, ok := params["functions"].([]any); ok {
+		for _, f := range fns {
+			fm, ok := f.(map[string]any)
 			if !ok {
 				continue
 			}
-			n, _ := fn["name"].(string)
-			if n == "" || containsGateTool(n) {
-				continue
-			}
-			desc, _ := fn["description"].(string)
-			merged = append(merged, map[string]any{
-				"type":        "function",
-				"name":        n,
-				"description": desc,
-				"parameters":  fn["parameters"],
-				"strict":      false,
-			})
+			n, _ := fm["name"].(string)
+			desc, _ := fm["description"].(string)
+			add(n, desc, fm["parameters"])
 		}
 	}
-	body["tools"] = merged
-	body["tool_choice"] = "auto"
-	return body
+	return out
+}
+
+// zenMergeResponsesTools 客户端 flat 工具优先，缺名补 gate stub 过闸。
+func zenMergeResponsesTools(clientTools []map[string]any) []any {
+	merged := make([]any, 0, len(clientTools)+len(zenGateToolSpecs))
+	provided := map[string]bool{}
+	for _, t := range clientTools {
+		n, _ := t["name"].(string)
+		if n == "" || provided[n] {
+			continue
+		}
+		provided[n] = true
+		merged = append(merged, t)
+	}
+	for _, s := range zenGateToolSpecs {
+		if provided[s.name] {
+			continue
+		}
+		provided[s.name] = true
+		merged = append(merged, map[string]any{
+			"type":        "function",
+			"name":        s.name,
+			"description": s.desc,
+			"parameters":  zenEmptySchema(),
+			"strict":      false,
+		})
+	}
+	return merged
 }
 
 // responsesContentToInput chat content -> Responses input content。
@@ -952,8 +1074,51 @@ func responsesContentToInput(content any) any {
 // 会串成一段坏 JSON（上游实测：webfetch 双调用 jam 成 {"query":...}{"url":...}）。
 type zenSSECall struct {
 	id, name, callID string
+	idx              int // response.output_index：无 id/call_id 时的绑定键（缺失为 -1）
 	args             strings.Builder
 	final            string // output_item.done 一次性给全参（无 delta 事件时）
+}
+
+// findZenSSECall 定位事件所属的累积器：id/call_id 精确匹配 → output_index
+// 匹配。两者都对不上时返回 nil，由调用方按场景决定要不要认领无主累积器 ——
+// 绝不"回退到最后一个调用"：并行调用时那会把 A 的参数 delta 追加到 B 上，
+// 拼出 {"query":...}{"url":...} 这种坏 JSON（上游实测的 jam 正是如此）。
+func findZenSSECall(calls []*zenSSECall, id, callID string, outIdx int) *zenSSECall {
+	for _, c := range calls {
+		if id != "" && (c.id == id || c.callID == id) {
+			return c
+		}
+		if callID != "" && (c.callID == callID || c.id == callID) {
+			return c
+		}
+	}
+	if outIdx >= 0 {
+		for _, c := range calls {
+			if c.idx == outIdx {
+				return c
+			}
+		}
+	}
+	return nil
+}
+
+// zenOrphanCall 返回第一个"无标识但已有内容"的累积器：delta/done 先于
+// added 到达时内容落在无主累积器里，随后的 added/done 按它归位。
+func zenOrphanCall(calls []*zenSSECall) *zenSSECall {
+	for _, c := range calls {
+		if c.id == "" && c.callID == "" && (c.args.Len() > 0 || c.final != "") {
+			return c
+		}
+	}
+	return nil
+}
+
+// zenSSEOutIdx 取事件里的 output_index，缺失返回 -1。
+func zenSSEOutIdx(ev map[string]any) int {
+	if v, ok := ev["output_index"].(float64); ok {
+		return int(v)
+	}
+	return -1
 }
 
 func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
@@ -961,7 +1126,11 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 	var text, reasoning strings.Builder
 	var usage map[string]any
 	var incompleteReason string
+	var failedMsg string
 	failed := false
+	textDeltas := false
+	sawData := false
+	var rawHead strings.Builder // 非 SSE 响应体（错误 JSON）的采样，用于报错
 	calls := []*zenSSECall{}
 	reader := bufio.NewReader(resp.Body)
 	for {
@@ -969,6 +1138,7 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 		if line != "" {
 			line = strings.TrimRight(line, "\r\n")
 			if strings.HasPrefix(line, "data:") {
+				sawData = true
 				payload := strings.TrimSpace(line[5:])
 				if payload != "" && payload != "[DONE]" {
 					var ev map[string]any
@@ -977,6 +1147,7 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 						switch typ {
 						case "response.output_text.delta":
 							if d, _ := ev["delta"].(string); d != "" {
+								textDeltas = true
 								text.WriteString(d)
 							}
 						case "response.reasoning_summary_text.delta":
@@ -985,40 +1156,65 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 							}
 						case "response.function_call_arguments.delta":
 							if d, _ := ev["delta"].(string); d != "" {
-								// 按 item_id 找累积器；找不到（顺序异常）时追加到最后
-								// 一个或新建。正常流：added 先于 delta。
-								var target *zenSSECall
-								if iid, _ := ev["item_id"].(string); iid != "" {
-									for _, c := range calls {
-										if c.id == iid || (c.callID != "" && c.callID == iid) {
-											target = c
-											break
-										}
+								iid, _ := ev["item_id"].(string)
+								c := findZenSSECall(calls, iid, "", zenSSEOutIdx(ev))
+								if c == nil {
+									switch {
+									case len(calls) == 0:
+										// 首个事件就是 delta：先建无主累积器，
+										// 用 item_id 当身份，后续 added/done 才找得回来
+										c = &zenSSECall{idx: zenSSEOutIdx(ev), id: iid}
+										calls = append(calls, c)
+									case len(calls) == 1 && calls[0].id == "" && calls[0].callID == "":
+										// 唯一且无主的累积器不可能是别人的
+										c = calls[0]
+									default:
+										// 归属不明的 delta：宁可丢弃（done 事件会带全量
+										// 参数），也不能把 A 的碎片拼进 B 的参数里
+										c = zenOrphanCall(calls)
 									}
 								}
-								if target == nil && len(calls) > 0 {
-									target = calls[len(calls)-1]
+								if c != nil {
+									c.args.WriteString(d)
 								}
-								if target == nil {
-									target = &zenSSECall{}
-									calls = append(calls, target)
+							}
+						case "response.function_call_arguments.done":
+							// 收尾事件：部分上游只发 delta + 本事件（无 output_item.done）
+							if a, _ := ev["arguments"].(string); a != "" {
+								iid, _ := ev["item_id"].(string)
+								c := findZenSSECall(calls, iid, "", zenSSEOutIdx(ev))
+								if c == nil {
+									c = zenOrphanCall(calls)
 								}
-								target.args.WriteString(d)
+								if c != nil && c.args.Len() == 0 && c.final == "" {
+									c.final = a
+								}
 							}
 						case "response.output_item.added":
 							if item, ok := ev["item"].(map[string]any); ok {
 								if it, _ := item["type"].(string); it == "function_call" {
-									call := &zenSSECall{}
-									if id, _ := item["id"].(string); id != "" {
-										call.id = id
+									id, _ := item["id"].(string)
+									cid, _ := item["call_id"].(string)
+									name, _ := item["name"].(string)
+									// 就地更新：重复 added、以及先到的孤儿 delta 都归位到
+									// 同一累积器，不再无条件新建（新建会把 delta 变成无名壳）
+									c := findZenSSECall(calls, id, cid, zenSSEOutIdx(ev))
+									if c == nil {
+										c = zenOrphanCall(calls)
 									}
-									if cid, _ := item["call_id"].(string); cid != "" {
-										call.callID = cid
+									if c == nil {
+										c = &zenSSECall{idx: zenSSEOutIdx(ev)}
+										calls = append(calls, c)
 									}
-									if n, _ := item["name"].(string); n != "" {
-										call.name = n
+									if id != "" {
+										c.id = id
 									}
-									calls = append(calls, call)
+									if cid != "" {
+										c.callID = cid
+									}
+									if name != "" {
+										c.name = name
+									}
 								}
 							}
 						case "response.output_item.done":
@@ -1027,6 +1223,10 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 							if item, ok := ev["item"].(map[string]any); ok {
 								switch it, _ := item["type"].(string); it {
 								case "message":
+									// delta 流已经给过正文时不再采纳全量文本，否则文本翻倍
+									if textDeltas {
+										break
+									}
 									if content, ok := item["content"].([]any); ok {
 										for _, part := range content {
 											pm, ok := part.(map[string]any)
@@ -1043,41 +1243,41 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 										}
 									}
 								case "function_call":
-									// 全量 arguments（无 delta 事件的模型一次给全）。
-									// 只在 args 尚未累积时采纳，避免与 delta 重复。
-									var a string
+									// 全量参数（无 delta 事件的模型一次给全）
+									a := ""
 									if av, ok := item["arguments"].(string); ok {
 										a = av
 									}
-									if a != "" {
-										var target *zenSSECall
-										if id, _ := item["id"].(string); id != "" {
-											for _, c := range calls {
-												if c.id == id {
-													target = c
-													break
-												}
-											}
-										}
-										if target == nil && len(calls) > 0 {
-											target = calls[len(calls)-1]
-										}
-										if target == nil {
-											target = &zenSSECall{}
+									id, _ := item["id"].(string)
+									cid, _ := item["call_id"].(string)
+									name, _ := item["name"].(string)
+									target := findZenSSECall(calls, id, cid, zenSSEOutIdx(ev))
+									if target == nil {
+										target = zenOrphanCall(calls)
+									}
+									if target == nil {
+										// 无标识可归属时只能收回"最后一个完全空的壳"；
+										// 否则新建（不能覆盖已有调用的 id/name/参数）
+										if n := len(calls); n > 0 && calls[n-1].id == "" &&
+											calls[n-1].callID == "" && calls[n-1].name == "" &&
+											calls[n-1].args.Len() == 0 && calls[n-1].final == "" {
+											target = calls[n-1]
+										} else {
+											target = &zenSSECall{idx: zenSSEOutIdx(ev)}
 											calls = append(calls, target)
 										}
-										if n, _ := item["name"].(string); n != "" {
-											target.name = n
-										}
-										if id, _ := item["id"].(string); id != "" {
-											target.id = id
-										}
-										if cid, _ := item["call_id"].(string); cid != "" {
-											target.callID = cid
-										}
-										if target.args.Len() == 0 {
-											target.final = a
-										}
+									}
+									if id != "" {
+										target.id = id
+									}
+									if cid != "" {
+										target.callID = cid
+									}
+									if name != "" {
+										target.name = name
+									}
+									if a != "" && target.args.Len() == 0 && target.final == "" {
+										target.final = a
 									}
 								}
 							}
@@ -1096,6 +1296,13 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 									if incompleteReason == "" {
 										incompleteReason = "error"
 									}
+									// failed 事件里 response.error.message 才是真因
+									// （限流/余额/会话失效），不带出去就只剩 "error"
+									if em, ok := r["error"].(map[string]any); ok {
+										if m, _ := em["message"].(string); m != "" {
+											failedMsg = m
+										}
+									}
 								}
 							}
 						}
@@ -1103,11 +1310,38 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 				}
 			}
 		}
+		if !sawData && !strings.HasPrefix(line, "data:") && rawHead.Len() < 8192 {
+			rawHead.WriteString(line)
+			rawHead.WriteString("\n")
+		}
 		if err != nil {
 			break
 		}
 	}
+	// 一个 data: 行都没有 = 上游返回的不是 SSE（402/403/500 全是 JSON 错误体）。
+	// 直接报错，别把它当成"空成功响应"下发（客户端会收到空 output 且无报错）。
+	if !sawData {
+		head := strings.TrimSpace(rawHead.String())
+		if head == "" {
+			return nil, fmt.Errorf("zen responses upstream returned empty body")
+		}
+		var obj map[string]any
+		if json.Unmarshal([]byte(head), &obj) == nil {
+			if e, ok := obj["error"].(map[string]any); ok {
+				if m, _ := e["message"].(string); m != "" {
+					return nil, fmt.Errorf("zen responses upstream error: %s", m)
+				}
+			}
+		}
+		if len(head) > 300 {
+			head = head[:300]
+		}
+		return nil, fmt.Errorf("zen responses upstream returned non-SSE body: %s", head)
+	}
 	if failed {
+		if failedMsg != "" {
+			return nil, fmt.Errorf("zen responses upstream failed: %s", failedMsg)
+		}
 		return nil, fmt.Errorf("zen responses upstream failed: %s", incompleteReason)
 	}
 	textStr := text.String()
@@ -1118,28 +1352,37 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 	}
 	if len(calls) > 0 {
 		outCalls := make([]any, 0, len(calls))
-		for _, call := range calls {
-			if call.name == "" && call.args.Len() == 0 && call.final == "" {
-				continue // 空壳（added 但无任何内容）
+		for i, call := range calls {
+			if call.name == "" {
+				// 无名调用客户端无法执行（多半是 added 后未闭合的空壳）。有内容时
+				// 说明上游真的发了调用却缺名字，值得留日志排查；空壳则静默丢弃。
+				if call.args.Len() > 0 || call.final != "" {
+					log.Printf("  zen responses: dropping nameless tool call (%d bytes args)",
+						call.args.Len()+len(call.final))
+				}
+				continue
 			}
 			raw := call.final
 			if call.args.Len() > 0 {
 				raw = call.args.String()
 			}
-			fixed := repairToolArguments(raw)
+			if raw == "" {
+				raw = "{}" // 无参调用：空串不是合法 JSON，IDE 解析会直接失败
+			}
 			id := call.callID
 			if id == "" {
 				id = call.id
 			}
 			if id == "" {
-				id = fmt.Sprintf("call_%x", time.Now().UnixNano())
+				// 带序号，避免同一响应内多个无 id 调用撞成同一个 call_id
+				id = fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), i)
 			}
 			outCalls = append(outCalls, map[string]any{
 				"id":   id,
 				"type": "function",
 				"function": map[string]any{
 					"name":      call.name,
-					"arguments": fixed,
+					"arguments": repairToolArguments(raw),
 				},
 			})
 		}

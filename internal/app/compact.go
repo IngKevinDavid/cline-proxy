@@ -222,25 +222,33 @@ func generateSummary(modelID, prompt string, maxSummary int) (string, error) {
 		"model":      modelID,
 		"messages":   []any{map[string]any{"role": "user", "content": prompt}},
 		"max_tokens": maxSummary,
-		"stream":     false,
+		"stream":     true, // 见下：上游只接受流式请求
 	}
 	// 后台摘要生成与客户端请求无关,用独立 context,不受客户端 abort 影响。
 	// 必须带超时: 上游连接挂起时否则永久占住请求与 zen 并发槽位
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	resp, _, err := callZenAPI(ctx, body, false)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
+	// 两个上游端点都只接受 stream=true（chat/responses 的 FreeTier gate 对
+	// stream=false 直接 403），非流式形态由这里聚合。此前恒发 stream=false，
+	// 每次摘要必然 403 然后退回有损截断。
 	var raw map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return "", err
-	}
-	if data, ok := raw["data"]; ok {
-		if d, ok := data.(map[string]any); ok {
-			raw = d
+	if zm, ok := resolveZenModel(modelID); ok && zm.Upstream == "responses" {
+		resp, _, err := callZenResponsesAPI(ctx, body, true)
+		if err != nil {
+			return "", err
+		}
+		raw, err = responsesSSEToChat(resp)
+		if err != nil {
+			return "", err
+		}
+	} else {
+		resp, _, err := callZenAPI(ctx, body, true)
+		if err != nil {
+			return "", err
+		}
+		raw, err = collectStreamResponse(resp)
+		if err != nil {
+			return "", err
 		}
 	}
 	if choices, ok := raw["choices"].([]any); ok && len(choices) > 0 {
@@ -253,6 +261,25 @@ func generateSummary(modelID, prompt string, maxSummary int) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no content in summary response")
+}
+
+// toolCallIDs 取 assistant 消息里所有 tool_calls 的 id（缺失的 id 也会列出，
+// 调用方按需要跳过空值）。
+func toolCallIDs(mm map[string]any) []string {
+	tcs, ok := mm["tool_calls"].([]any)
+	if !ok || len(tcs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(tcs))
+	for _, tc := range tcs {
+		tcm, _ := tc.(map[string]any)
+		if tcm == nil {
+			continue
+		}
+		id, _ := tcm["id"].(string)
+		out = append(out, id)
+	}
+	return out
 }
 
 // ============ 估算(官方 Token.estimate 近似: JSON 长度 / 4) ============
@@ -544,19 +571,62 @@ func fallbackTruncate(params map[string]any, m *ZenModel) compactOutcome {
 		used += t
 	}
 	sort.Slice(kept, func(a, b int) bool { return kept[a].idx < kept[b].idx })
-	// 孤儿 tool 结果剔除：前一条消息未保留的 tool 消息会被上游 400 拒绝
-	keptIdx := map[int]bool{}
-	for _, k := range kept {
-		keptIdx[k.idx] = true
-	}
-	filtered := kept[:0]
-	for _, k := range kept {
-		if mm, ok := k.msg.(map[string]any); ok && strField(mm, "role") == "tool" && !keptIdx[k.idx-1] {
-			continue
+	// 工具链完整性：截断是按预算逐条挑选的，天然会拆散"调用 → 结果"配对，
+	// 而只留其一上游一律 400（assistant.tool_calls 缺结果 / tool 结果缺调用）。
+	// 两个方向互相影响（丢弃 assistant 会让它的结果变孤儿，反之亦然），
+	// 所以反复剔除直到稳定。上一版只查"前一条消息是否保留"，遗漏了
+	// 反向孤儿（assistant 的调用被保留、结果被丢弃）。
+	for pass := 0; pass < 5; pass++ {
+		callIDs := map[string]bool{}
+		resultIDs := map[string]bool{}
+		for _, k := range kept {
+			mm, _ := k.msg.(map[string]any)
+			if mm == nil {
+				continue
+			}
+			switch strField(mm, "role") {
+			case "assistant":
+				for _, id := range toolCallIDs(mm) {
+					callIDs[id] = true
+				}
+			case "tool":
+				if id := strField(mm, "tool_call_id"); id != "" {
+					resultIDs[id] = true
+				}
+			}
 		}
-		filtered = append(filtered, k)
+		next := make([]idxMsg, 0, len(kept))
+		dropped := false
+		for _, k := range kept {
+			mm, _ := k.msg.(map[string]any)
+			if mm != nil {
+				switch strField(mm, "role") {
+				case "assistant":
+					complete := true
+					for _, id := range toolCallIDs(mm) {
+						if id != "" && !resultIDs[id] {
+							complete = false
+							break
+						}
+					}
+					if !complete {
+						dropped = true
+						continue
+					}
+				case "tool":
+					if id := strField(mm, "tool_call_id"); id != "" && !callIDs[id] {
+						dropped = true
+						continue
+					}
+				}
+			}
+			next = append(next, k)
+		}
+		kept = next
+		if !dropped {
+			break
+		}
 	}
-	kept = filtered
 	out := make([]any, 0, len(kept)+1)
 	out = append(out, map[string]any{
 		"role":    "system",

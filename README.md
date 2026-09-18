@@ -152,7 +152,7 @@ Verified against live upstreams with real free-tier credentials (16-probe chat m
 - `stream_options.include_usage`, array content parts, long multi-turn histories, parameter passthrough, clean 4xx errors
 - Client aborts propagate (no account/key cooldown pollution), 8-way parallel load, container healthcheck, seed import, key rotation
 
-Known upstream quirks (not gateway bugs): zen's `muse-spark-*-free` and `deepseek-v4-flash-free` were broken upstream-side at testing time; cline's `stop` handling wipes content when the model's reasoning echoes the stop word (gateway truncates non-stream output as compensation); some reasoning-heavy models eat small `max_tokens` budgets before producing visible text.
+Known upstream quirks (not gateway bugs): zen's `muse-spark-*-free` models only work on the native `/v1/responses` endpoint (the gateway routes them there automatically and re-emits chat/Anthropic shapes); `deepseek-v4-flash-free` was removed from the catalog as deprecated; cline's `stop` handling wipes content when the model's reasoning echoes the stop word (gateway truncates non-stream output as compensation); some reasoning-heavy models eat small `max_tokens` budgets before producing visible text. For zen deployment details (session harvester, env vars) see [docs/zen-harvester.md](docs/zen-harvester.md).
 
 ## Development
 
@@ -173,8 +173,12 @@ Project layout:
 │   ├── proxy.go             /v1 routing, chat handler, upstream calls, aggregation
 │   ├── responses.go         /v1/responses dialect translation
 │   ├── zen.go               opencode zen upstream, routing, rate-limit defense
+│   ├── zen_session.go       sticky zen sessions (CLI-minted sess_, per-key identity)
+│   ├── zen_harvest.go       session harvester (embedded opencode CLI, self-maintaining)
+│   ├── zen_endpoint.go      endpoint auto-learn (chat vs /v1/responses per model)
+│   ├── tls_bun.go           uTLS ClientHello mimicry for the zen upstream
 │   ├── compact.go           opencode-style context compaction for zen free models
-│   ├── proxy_pool.go        egress proxy pool (uTLS/h2 client cache, per-request rotation)
+│   ├── proxy_pool.go        egress proxy pool (uTLS/h1 client cache, per-request rotation)
 │   ├── models.go            cline free-model feed sync + default model
 │   ├── pool.go              cline account pool (OAuth refresh, static API keys, cooldowns)
 │   ├── seed.go              boot-time account seeding

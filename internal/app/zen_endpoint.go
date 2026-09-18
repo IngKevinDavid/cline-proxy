@@ -35,8 +35,10 @@ func zenEndpointFile() string {
 }
 
 // isWrongEndpoint 上游错误是否呈"走错端点"特征：
-// 5xx（实测 spark 在 chat 端点上 500）或 4xx 带端点/模型路由特征词。
-// 限流/配额/会话/超载一律排除（isRateLimited 先行）。
+// 500（实测 spark 在 chat 端点上 500，body 是通用 "Internal server error"）
+// 或 4xx 带端点/模型路由特征词。限流/配额/会话/超载一律排除（isRateLimited
+// 先行）。502/503/504 视为瞬时网关/过载，不学习——它们会误把模型翻转并
+// 持久化到错误端点。
 func isWrongEndpoint(err error) bool {
 	if err == nil {
 		return false
@@ -52,8 +54,10 @@ func isWrongEndpoint(err error) bool {
 			return false
 		}
 	}
-	// 走错端点特征：5xx 服务端错误，或 4xx 带路由特征词
-	if strings.Contains(msg, "zen api 5") {
+	// 走错端点特征：精确的 500（错误串以 "zen api 500" 开头，见
+	// callZenAPI/callZenResponsesAPI 的 reason 格式），或 4xx 带路由特征词。
+	// 不做裸 "zen api 5" 子串匹配——那会把 502/503/504 也当成走错端点。
+	if strings.HasPrefix(msg, "zen api 500") {
 		return true
 	}
 	for _, kw := range []string{

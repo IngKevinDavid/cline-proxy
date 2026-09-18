@@ -389,7 +389,6 @@ func setZenConfig(c *zenConfigData) {
 	zenConfig = c
 	zenConfigMu.Unlock()
 	saveZenConfig()
-	rebuildZenTransport()
 	rebuildZenSem()
 	// 清理已移除 key 的轮转状态
 	valid := map[string]bool{}
@@ -606,66 +605,59 @@ func pinnedZenKey() string {
 
 // ============ zen 上游调用 ============
 
-// zenGateTools 免费层 chat 端点必须携带的 opencode 工具集（工具名与官方
+// zenGateToolSpecs 免费层两个端点必须携带的 opencode 工具集（工具名与官方
 // CLI 一致）。FreeTier 中间件按工具名校验"请求是否来自 opencode CLI"
 //（2026-09-18 实测解码：缺工具/工具名不齐 → 403 FreeTierError，即使会话
 // 有效；乱序、假描述、仅核心 5 名(bash/edit/glob/grep/read)也通过）。
-// 描述用精简占位即可——模型在 tool_choice=none 下不会真正发起工具调用，
-// 回复保持纯文本（网关无法执行 CLI 工具，文本化是免费层网关的正确语义）。
-func zenGateTools() []map[string]any {
-	mk := func(name, desc string) map[string]any {
-		return map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name":        name,
-				"description": desc,
-				"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
-			},
-		}
-	}
-	return []map[string]any{
-		mk("bash", "Execute a bash command"),
-		mk("edit", "Edit a file"),
-		mk("glob", "Find files by glob pattern"),
-		mk("grep", "Search file contents"),
-		mk("read", "Read a file"),
-		mk("skill", "Load a skill"),
-		mk("task", "Run a background task"),
-		mk("todowrite", "Write a todo list"),
-		mk("webfetch", "Fetch a web page"),
-		mk("websearch", "Search the web"),
-		mk("write", "Write a file"),
-	}
+// 描述用精简占位即可——工具注入后模型在 tool_choice=none（chat）或
+// 文本语义（responses）下不产生实质工具调用，回复保持纯文本。
+// 单一来源：改名/增删必须同时满足两个端点的校验，只改这里。
+var zenGateToolSpecs = []struct{ name, desc string }{
+	{"bash", "Execute a bash command"},
+	{"edit", "Edit a file"},
+	{"glob", "Find files by glob pattern"},
+	{"grep", "Search file contents"},
+	{"read", "Read a file"},
+	{"skill", "Load a skill"},
+	{"task", "Run a background task"},
+	{"todowrite", "Write a todo list"},
+	{"webfetch", "Fetch a web page"},
+	{"websearch", "Search the web"},
+	{"write", "Write a file"},
 }
 
-// zenResponsesGateTools 免费层 /v1/responses 端点必须携带的 flat 形态工具集
-//（tools[].{type,name,description,parameters,strict}——chat 嵌套形态
-// {type,function:{name}} 上游报 400 "tools[0] missing required field name"）。
-// 工具名校验与 chat 端点同源（2026-09-18 实测解码）；且 responses 端点
-// tool_choice 只接受 "auto"（"none" 报 400 "only `auto` allowed"）。
+// zenGateTools chat 端点形态：tools[].{type,function:{name,description,parameters}}。
+func zenGateTools() []map[string]any {
+	out := make([]map[string]any, 0, len(zenGateToolSpecs))
+	for _, s := range zenGateToolSpecs {
+		out = append(out, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        s.name,
+				"description": s.desc,
+				"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
+			},
+		})
+	}
+	return out
+}
+
+// zenResponsesGateTools responses 端点形态：flat tools[].{type,name,description,
+// parameters,strict}（chat 嵌套形态上游报 400 "tools[0] missing required field
+// name"）。工具名校验与 chat 端点同源；且 responses 端点 tool_choice 只接受
+// "auto"（"none" 报 400 "only `auto` allowed"）。
 func zenResponsesGateTools() []map[string]any {
-	mk := func(name, desc string) map[string]any {
-		return map[string]any{
+	out := make([]map[string]any, 0, len(zenGateToolSpecs))
+	for _, s := range zenGateToolSpecs {
+		out = append(out, map[string]any{
 			"type":        "function",
-			"name":        name,
-			"description": desc,
+			"name":        s.name,
+			"description": s.desc,
 			"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
 			"strict":      false,
-		}
+		})
 	}
-	return []map[string]any{
-		mk("bash", "Execute a bash command"),
-		mk("edit", "Edit a file"),
-		mk("glob", "Find files by glob pattern"),
-		mk("grep", "Search file contents"),
-		mk("read", "Read a file"),
-		mk("skill", "Load a skill"),
-		mk("task", "Run a background task"),
-		mk("todowrite", "Write a todo list"),
-		mk("webfetch", "Fetch a web page"),
-		mk("websearch", "Search the web"),
-		mk("write", "Write a file"),
-	}
+	return out
 }
 
 // buildZenBody 构造 zen 请求体:只带 OpenAI 兼容字段,改写模型为 zen ID
@@ -691,7 +683,6 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 	}
 	delete(body, "reasoning_effort")
 	delete(body, "reasoningEffort")
-	enforceToolChoiceNone(body)
 	// FreeTier gate（2026-09-18 实测解码）：zen 免费层 chat 端点校验请求体
 	// 是否携带 opencode 工具集，缺失则 403（"can only be used from within
 	// OpenCode"）。恒注入全部 11 个规范工具名 + tool_choice=none——
@@ -720,8 +711,10 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 func buildZenResponsesBody(params map[string]any, stream bool, modelID string, promptKey string) map[string]any {
 	body := map[string]any{
 		"model":  modelID,
-		"stream": stream,
-		"store":  false,
+		"stream": true, // FreeTier gate 硬要求：responses 端点只接受 stream=true，
+		// stream=false（即使显式传）上游按"非 CLI"请求 403。网关非流式客户端
+		// 由调用方聚合（responsesSSEToChat），body 恒发 true。
+		"store": false,
 	}
 	if promptKey != "" {
 		body["prompt_cache_key"] = promptKey
@@ -768,7 +761,10 @@ func buildZenResponsesBody(params map[string]any, stream bool, modelID string, p
 				continue
 			}
 			entry := map[string]any{"role": role, "content": content}
-			// assistant 历史 tool_calls -> function_call 条目（保留调用链）
+			// assistant 历史 tool_calls -> function_call 条目（保留调用链）。
+			// 内容与工具调用分开：assistant 的文本内容仍在 entry 里，每个
+			// tool_call 各 append 一条 function_call 输入（旧实现 break 只保
+			// 第一条且把 entry 换成 function_call，丢掉正文文本）。
 			if role == "assistant" {
 				if tcs, ok := mm["tool_calls"].([]any); ok {
 					for _, tc := range tcs {
@@ -778,19 +774,19 @@ func buildZenResponsesBody(params map[string]any, stream bool, modelID string, p
 						}
 						fn, _ := tcm["function"].(map[string]any)
 						id, _ := tcm["id"].(string)
-						name, _ := fn["name"].(string)
+						name := ""
 						args := ""
 						if fn != nil {
+							name, _ = fn["name"].(string)
 							args, _ = fn["arguments"].(string)
 						}
-						entry = map[string]any{
+						input = append(input, map[string]any{
 							"type":      "function_call",
 							"id":        id,
 							"call_id":   id,
 							"name":      name,
 							"arguments": args,
-						}
-						break
+						})
 					}
 				}
 			}
@@ -865,7 +861,9 @@ func responsesContentToInput(content any) any {
 				url, _ = u["url"].(string)
 			}
 			if url != "" {
-				out = append(out, map[string]any{"type": "image_url", "image_url": url})
+				// Responses 原生图片 part 是 input_image；chat 形态的
+				// image_url 会被上游拒绝/忽略
+				out = append(out, map[string]any{"type": "input_image", "image_url": url})
 			}
 		}
 	}
@@ -891,6 +889,7 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 	var text, args, reasoning strings.Builder
 	var usage map[string]any
 	var incompleteReason string
+	failed := false
 	toolName, toolCallID, itemID := "", "", ""
 	reader := bufio.NewReader(resp.Body)
 	for {
@@ -931,9 +930,11 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 								}
 							}
 						case "response.output_item.done":
-							// 全量输出项：message 条目 content[].output_text/text 即最终文本
+							// 全量输出项：message 条目 content[].output_text/text 即最终文本；
+							// function_call 条目（无 delta 事件的模型）一次性给全参
 							if item, ok := ev["item"].(map[string]any); ok {
-								if it, _ := item["type"].(string); it == "message" {
+								switch it, _ := item["type"].(string); it {
+								case "message":
 									if content, ok := item["content"].([]any); ok {
 										for _, part := range content {
 											pm, ok := part.(map[string]any)
@@ -949,6 +950,19 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 											}
 										}
 									}
+								case "function_call":
+									if n, _ := item["name"].(string); n != "" {
+										toolName = n
+									}
+									if id, _ := item["id"].(string); id != "" {
+										itemID = id
+									}
+									if cid, _ := item["call_id"].(string); cid != "" {
+										toolCallID = cid
+									}
+									if a, _ := item["arguments"].(string); a != "" && args.Len() == 0 {
+										args.WriteString(a)
+									}
 								}
 							}
 						case "response.completed", "response.incomplete", "response.failed":
@@ -961,8 +975,11 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 										incompleteReason = reason
 									}
 								}
-								if typ == "response.failed" && incompleteReason == "" {
-									incompleteReason = "error"
+								if typ == "response.failed" {
+									failed = true
+									if incompleteReason == "" {
+										incompleteReason = "error"
+									}
 								}
 							}
 						}
@@ -974,13 +991,14 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 			break
 		}
 	}
+	if failed {
+		return nil, fmt.Errorf("zen responses upstream failed: %s", incompleteReason)
+	}
 	textStr := text.String()
 	msg := map[string]any{"role": "assistant", "content": textStr}
 	finish := "stop"
 	if incompleteReason == "max_output_tokens" || incompleteReason == "length" {
 		finish = "length"
-	} else if incompleteReason != "" {
-		finish = "stop"
 	}
 	if args.Len() > 0 || toolName != "" {
 		fixed := repairToolArguments(args.String())
@@ -1022,20 +1040,20 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 	}
 	if usage != nil {
 		u := map[string]any{
-			"prompt_tokens":     0,
-			"completion_tokens": 0,
-			"total_tokens":      0,
+			"prompt_tokens":     float64(0),
+			"completion_tokens": float64(0),
+			"total_tokens":      float64(0),
 		}
 		if v, ok := usage["input_tokens"].(float64); ok {
-			u["prompt_tokens"] = int(v)
+			u["prompt_tokens"] = v
 		}
 		if v, ok := usage["output_tokens"].(float64); ok {
-			u["completion_tokens"] = int(v)
+			u["completion_tokens"] = v
 		}
 		if v, ok := usage["total_tokens"].(float64); ok {
-			u["total_tokens"] = int(v)
+			u["total_tokens"] = v
 		} else {
-			u["total_tokens"] = u["prompt_tokens"].(int) + u["completion_tokens"].(int)
+			u["total_tokens"] = u["prompt_tokens"].(float64) + u["completion_tokens"].(float64)
 		}
 		out["usage"] = u
 	}
@@ -1176,6 +1194,10 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 			rl := parseRetryAfter(resp.Header.Get("Retry-After"))
 			cooldownZenKey(key, rl)
 			if next := pickZenKey(); next != "" && next != key && !zenKeyCooling(next) {
+				// 必须同步改写 retryKey：循环头 key=retryKey，只改 key 不改
+				// retryKey 会让下一次迭代继续用刚冷却的旧 key，无限 429 空转。
+				key = next
+				retryKey = next
 				log.Printf("  zen responses rate limited (%d), switching to next zen key (%d configured)", resp.StatusCode, len(cfg.Keys))
 				continue
 			}
@@ -1202,17 +1224,15 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 			markZenFail()
 		}
 		// 会话失效（FreeTier 403 且非限流）：该 key 的 sess_ 已被服务端
-		// 遗忘，复用只会持续 403。换新会话后按轮转换 key（retryKey 语义：
-		// 同一 attempt 链内 pick 出来的就是下一个 key）继续重试。
-		// 收割机启用时后台 mint 真会话补上（本地随机 ID 只是止损）。
+		// 遗忘，复用只会持续 403。本地随机 sess_ 必 403，不轮换；后台
+		// 收割机（连续 403 达阈值）mint 真会话补上。本次按轮转换 key 重试。
 		if resp.StatusCode == http.StatusForbidden {
-			MarkZenSessionDead(key)
 			go harvestOnForbidden(key)
 			if attempt < retries {
 				if next := pickZenKey(); next != "" && !zenKeyCooling(next) {
 					key = next
 					retryKey = next
-					log.Printf("  zen responses session rejected (403), rotated session for old key, switching to key#%d", keyIndex(next))
+					log.Printf("  zen responses session rejected (403), switching to key#%d", keyIndex(next))
 					continue
 				}
 			}
@@ -1284,10 +1304,6 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 		req.Header.Set("x-opencode-client", "cli")
 		req.Header.Set("x-opencode-project", "global")
 
-		model, _ := params["model"].(string)
-		// x-opencode-model 由官方 CLI 的实际请求头核对：原生客户端不发送
-		// 该头，模型只放在请求体 model 字段——网关与之保持一致
-		_ = model
 		log.Printf("  zen upstream: model=%s stream=%v msgs=%d via=%s key=#%d attempt=%d session=%s",
 			body["model"], stream, getMsgCount(params), viaProxy, keyIndex(key), attempt+1, kit.Truncate(sess, 24))
 
@@ -1318,6 +1334,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 		if resp.StatusCode == http.StatusOK {
 			markZenKeySuccess(key)
 			markZenSuccess()
+			harvestMarkSuccess(key)
 			return resp, rateLimited, nil
 		}
 
@@ -1362,6 +1379,15 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 		// 客户端侧 400/401（提示词超限、key 配错）不应污染 failover 状态
 		if resp.StatusCode >= 500 {
 			markZenFail()
+		}
+		// 会话失效（FreeTier 403 且非限流）：该 key 的 sess_ 已被服务端遗忘，
+		// 复用只会持续 403。后台收割机（连续 403 达阈值）mint 真会话补上；
+		// 本次直接轮转下一 key 重试（循环头每次 pickZenKey，天然换 key）。
+		if resp.StatusCode == http.StatusForbidden {
+			go harvestOnForbidden(key)
+			if attempt < retries {
+				continue
+			}
 		}
 		return nil, rateLimited, fmt.Errorf("%s", reason)
 	}
@@ -1416,6 +1442,76 @@ func zenModelList() []map[string]any {
 // opencodeModelsRegistry 公共模型目录（官方 CLI 同源，无需认证；
 // 替代 zen /v1/models，后者用 "public" key 恒失败，只能靠种子兜底）。
 const opencodeModelsRegistry = "https://models.opencode.ai/api.json"
+
+// zenModelOverlay 公共目录里比 zen 真源多的限额/旗标字段。
+type zenModelOverlay struct {
+	Context, Output       int
+	ToolCall, Reasoning   bool
+	Attachment            bool
+}
+
+// fetchZenRegistry 拉取公共目录 api.json，返回（限额 overlay、价格门集合、
+// 是否可达）。价格门 = cost.input==0 && cost.output==0 且 status 非
+// deprecated。模型 ID 以条目内 id 优先、map key 兜底。目录不可达返回
+// (空, 空, false)，调用方按 fail-open 处理。
+// 唯一实现：syncZenModels 的层 2/3 与收割机 harvestMintModels 共用，
+// 避免两处价格门逻辑漂移。
+func fetchZenRegistry() (map[string]zenModelOverlay, map[string]bool, bool) {
+	overlay := map[string]zenModelOverlay{}
+	freeGate := map[string]bool{}
+	oreq, err := http.NewRequest("GET", opencodeModelsRegistry, nil)
+	if err != nil {
+		return overlay, freeGate, false
+	}
+	oreq.Header.Set("User-Agent", "opencode/latest/cli")
+	client := &http.Client{Timeout: 25 * time.Second}
+	oresp, err := client.Do(oreq)
+	if err != nil {
+		return overlay, freeGate, false
+	}
+	defer oresp.Body.Close()
+	if oresp.StatusCode != 200 {
+		return overlay, freeGate, false
+	}
+	var payload map[string]struct {
+		Models map[string]struct {
+			ID         string `json:"id"`
+			Status     string `json:"status"`
+			ToolCall   bool   `json:"tool_call"`
+			Reasoning  bool   `json:"reasoning"`
+			Attachment bool   `json:"attachment"`
+			Limit      struct {
+				Context int `json:"context"`
+				Output  int `json:"output"`
+			} `json:"limit"`
+			Cost struct {
+				Input  float64 `json:"input"`
+				Output float64 `json:"output"`
+			} `json:"cost"`
+		} `json:"models"`
+	}
+	if json.NewDecoder(oresp.Body).Decode(&payload) != nil {
+		return overlay, freeGate, false
+	}
+	prov, ok := payload["opencode"]
+	if !ok {
+		return overlay, freeGate, false
+	}
+	for id, m := range prov.Models {
+		if m.ID != "" {
+			id = m.ID
+		}
+		overlay[id] = zenModelOverlay{
+			Context: m.Limit.Context, Output: m.Limit.Output,
+			ToolCall: m.ToolCall, Reasoning: m.Reasoning, Attachment: m.Attachment,
+		}
+		if m.Cost.Input == 0 && m.Cost.Output == 0 &&
+			!strings.Contains(strings.ToLower(m.Status), "deprecat") {
+			freeGate[id] = true
+		}
+	}
+	return overlay, freeGate, true
+}
 
 // syncZenModels 同步免费模型，三层来源：
 //  1. 真源（membership）：GET zen /v1/models（Bearer "public" 即可，无需认证），
@@ -1472,64 +1568,7 @@ func syncZenModels() (int, error) {
 
 	// --- 层 2+3：公共目录价格门 + 限额 overlay（失败不致命：价格门沿用
 	// "ID 含 free 即免费"旧规则，限额保留种子估算） ---
-	overlay := map[string]struct {
-		Context, Output       int
-		ToolCall, Reasoning   bool
-		Attachment            bool
-	}{}
-	freeGate := map[string]bool{} // 目录价格门：cost 0/0 且非 deprecated
-	registryOK := false
-	if oreq, err := http.NewRequest("GET", opencodeModelsRegistry, nil); err == nil {
-		oreq.Header.Set("User-Agent", "opencode/latest/cli")
-		if oresp, err := client.Do(oreq); err == nil {
-			func() {
-				defer oresp.Body.Close()
-				if oresp.StatusCode != 200 {
-					return
-				}
-				var payload map[string]struct {
-					Models map[string]struct {
-						ID         string `json:"id"`
-						Status     string `json:"status"`
-						ToolCall   bool   `json:"tool_call"`
-						Reasoning  bool   `json:"reasoning"`
-						Attachment bool   `json:"attachment"`
-						Limit      struct {
-							Context int `json:"context"`
-							Output  int `json:"output"`
-						} `json:"limit"`
-						Cost struct {
-							Input  float64 `json:"input"`
-							Output float64 `json:"output"`
-						} `json:"cost"`
-					} `json:"models"`
-				}
-				if json.NewDecoder(oresp.Body).Decode(&payload) != nil {
-					return
-				}
-				prov, ok := payload["opencode"]
-				if !ok {
-					return
-				}
-				registryOK = true
-				for id, m := range prov.Models {
-					if m.ID != "" {
-						id = m.ID
-					}
-					overlay[id] = struct {
-						Context, Output     int
-						ToolCall, Reasoning bool
-						Attachment          bool
-					}{m.Limit.Context, m.Limit.Output, m.ToolCall, m.Reasoning, m.Attachment}
-					// 价格门：输入输出价格均为 0 且状态非 deprecated
-					if m.Cost.Input == 0 && m.Cost.Output == 0 &&
-						!strings.Contains(strings.ToLower(m.Status), "deprecat") {
-						freeGate[id] = true
-					}
-				}
-			}()
-		}
-	}
+	overlay, freeGate, registryOK := fetchZenRegistry()
 	// isFreeModel 免费判定：目录可达时以价格门为准；目录不可达时回退到
 	// 旧规则（ID 含 free），保证离线/抖动时免费模型仍可用。
 	isFreeModel := func(id string) bool {
@@ -1557,11 +1596,7 @@ func syncZenModels() (int, error) {
 			if ov.Output > 0 {
 				cur.Output = ov.Output
 			}
-			if ov != (struct {
-				Context, Output     int
-				ToolCall, Reasoning bool
-				Attachment          bool
-			}{}) {
+			if ov != (zenModelOverlay{}) {
 				cur.ToolCall, cur.Reasoning, cur.Attach = ov.ToolCall, ov.Reasoning, ov.Attachment
 			}
 			if cur.Source == "seed" {
@@ -1608,14 +1643,16 @@ func syncZenModels() (int, error) {
 	// 现有 managed 一半才修剪。
 	managedCount := 0
 	for _, m := range zenModels {
-		if m.Source == "live" || m.Source == "registry" || m.Source == "synced" {
+		// 只统计 managed 来源（live）；seed 由下方种子对账单独处理。
+		// 早期版本还写过 registry/synced，现统一只写 live。
+		if m.Source == "live" {
 			managedCount++
 		}
 	}
 	pruned := 0
 	if len(liveFree) > 0 && len(liveFree)*2 >= managedCount {
 		for id, m := range zenModels {
-			if (m.Source == "live" || m.Source == "registry" || m.Source == "synced") && (!liveFree[id] || !isFreeModel(id)) {
+			if m.Source == "live" && (!liveFree[id] || !isFreeModel(id)) {
 				delete(zenModels, id)
 				pruned++
 			}

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -104,11 +103,20 @@ func harvestSession(ctx context.Context, key string) (string, error) {
 	home := harvestHome()
 	authPath := harvestAuthPath()
 
-	// 1. 备份现有 auth.json（多 key 轮流覆盖，必须恢复）
+	// 1. 备份现有 auth.json（多 key 轮流覆盖，必须恢复）。defer 必须在
+	// 任何可能覆盖/截断原文件的写操作之前注册——否则 WriteFile 失败路径
+	//（已截断原文件）会跳过恢复，永久丢掉管理员 token。
 	var prevAuth []byte
 	if b, err := os.ReadFile(authPath); err == nil {
 		prevAuth = b
 	}
+	defer func() {
+		if prevAuth != nil {
+			_ = os.WriteFile(authPath, prevAuth, 0600)
+		} else {
+			_ = os.Remove(authPath)
+		}
+	}()
 	if err := os.MkdirAll(filepath.Dir(authPath), 0700); err != nil {
 		return "", fmt.Errorf("harvest mkdir: %w", err)
 	}
@@ -119,13 +127,6 @@ func harvestSession(ctx context.Context, key string) (string, error) {
 	if err := os.WriteFile(authPath, ab, 0600); err != nil {
 		return "", fmt.Errorf("harvest write auth: %w", err)
 	}
-	defer func() {
-		if prevAuth != nil {
-			_ = os.WriteFile(authPath, prevAuth, 0600)
-		} else {
-			_ = os.Remove(authPath)
-		}
-	}()
 
 	// 2. 跑最小 run：transient 会话 + 免费模型。首选 opencode/big-pickle
 	//（zen 免费层默认模型别名），失败则依次尝试至多 2 个动态获取的价格 0
@@ -172,7 +173,8 @@ func harvestSession(ctx context.Context, key string) (string, error) {
 		return "", fmt.Errorf("harvest: no session minted (tried %s)", strings.Join(harvestMintModels(), ", "))
 	}
 
-	// 4. 写入 sticky 表
+	// 4. 写入 sticky 表（标记 CLI mint 与会话新鲜度：启动扫描不再跳过、
+	// 周期收割按 HarvestedAt 判断而非每次请求刷新的 Updated）
 	loadZenSessions()
 	zenSessMu.Lock()
 	e, ok := zenSessions[key]
@@ -181,6 +183,8 @@ func harvestSession(ctx context.Context, key string) (string, error) {
 		zenSessions[key] = e
 	}
 	e.Session = sess
+	e.Minted = true
+	e.HarvestedAt = time.Now().Unix()
 	zenSessMu.Unlock()
 	saveZenSessions()
 	log.Printf("zen harvest: key#%d minted live session %s", keyIndex(key), kit.Truncate(sess, 24))
@@ -253,49 +257,9 @@ func cliModelIDs() []string {
 
 // registryFreeModelIDs 公共目录 api.json 的价格门：cost 0/0 且非 deprecated
 // 的模型 ID 集合（与 syncZenModels 同规则；目录不可达返回空集）。
+// 实现复用 fetchZenRegistry（zen.go），避免价格门逻辑漂移。
 func registryFreeModelIDs() map[string]bool {
-	free := map[string]bool{}
-	req, err := http.NewRequest("GET", opencodeModelsRegistry, nil)
-	if err != nil {
-		return free
-	}
-	req.Header.Set("User-Agent", "opencode/latest/cli")
-	client := &http.Client{Timeout: 25 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return free
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return free
-	}
-	var payload map[string]struct {
-		Models map[string]struct {
-			ID     string `json:"id"`
-			Status string `json:"status"`
-			Cost   struct {
-				Input  float64 `json:"input"`
-				Output float64 `json:"output"`
-			} `json:"cost"`
-		} `json:"models"`
-	}
-	if json.NewDecoder(resp.Body).Decode(&payload) != nil {
-		return free
-	}
-	prov, ok := payload["opencode"]
-	if !ok {
-		return free
-	}
-	for mid, m := range prov.Models {
-		id := mid
-		if m.ID != "" {
-			id = m.ID
-		}
-		if m.Cost.Input == 0 && m.Cost.Output == 0 &&
-			!strings.Contains(strings.ToLower(m.Status), "deprecat") {
-			free[id] = true
-		}
-	}
+	_, free, _ := fetchZenRegistry()
 	return free
 }
 
@@ -372,12 +336,19 @@ func startZenHarvester() {
 				loadZenSessions()
 				zenSessMu.Lock()
 				e := zenSessions[k]
-				var updated int64
+				// 新鲜度基准：CLI 收割时间（HarvestedAt）。旧版本文件只有
+				// Updated（每次请求刷新）——回退用 Updated 但该值对活跃 key
+				// 恒新，等于"活跃 key 永不周期收割"，容忍为历史行为。
+				var fresh int64
 				if e != nil {
-					updated = e.Updated
+					if e.HarvestedAt > 0 {
+						fresh = e.HarvestedAt
+					} else {
+						fresh = e.Updated
+					}
 				}
 				zenSessMu.Unlock()
-				if time.Since(time.Unix(updated, 0)) < interval {
+				if fresh > 0 && time.Since(time.Unix(fresh, 0)) < interval {
 					continue
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
@@ -404,9 +375,12 @@ func harvestMissingSessions() {
 		}
 		loadZenSessions()
 		zenSessMu.Lock()
-		_, ok := zenSessions[k]
+		e := zenSessions[k]
+		// 只跳过 CLI mint 过的会话；本地随机占位（启动竞态窗口内
+		// StickyZenIdentity 创建）必须收割，否则该 key 永久 403。
+		skip := e != nil && e.Minted
 		zenSessMu.Unlock()
-		if ok {
+		if skip {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
@@ -420,6 +394,9 @@ func harvestMissingSessions() {
 
 // harvestOnForbidden 某 key 连续 FreeTier 403 时调用：阈值（默认连续 2 次）
 // 达到后后台收割新会话。同步返回（收割本身串行快，失败不阻塞请求）。
+// 前 1 次 403 只计数不收割（避免瞬态 403 触发 CLI 子进程）；连续第 2 次
+// 才真正收割——403 路径不再做本地随机轮换（随机 sess_ 必 403，见
+// zen_session.go 顶部注释），恢复唯一靠这里 mint 真会话。
 func harvestOnForbidden(key string) {
 	if !harvestEnabled() {
 		return
@@ -431,7 +408,7 @@ func harvestOnForbidden(key string) {
 	harvestMu.Unlock()
 
 	if n < 2 {
-		return // 给 MarkZenSessionDead 的随机轮换一次机会
+		return // 前 1 次仅计数：瞬态 403 不收割
 	}
 	if time.Since(last) < 10*time.Minute {
 		return // 冷却：同 key 10 分钟内只收割一次

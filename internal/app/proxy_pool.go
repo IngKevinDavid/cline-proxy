@@ -10,21 +10,17 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
-	"golang.org/x/net/http2"
 	"golang.org/x/net/proxy"
 )
 
 var (
-	zenHTTPClient  = &http.Client{Transport: buildZenTransport()}
-	zenProxyCount  atomic.Uint64
-	zenTransportMu sync.Mutex
+	zenProxyCount atomic.Uint64
 
 	zenProxyCooldowns   = map[int]time.Time{} // 代理索引 -> 冷却截止
 	zenProxyCooldownsMu sync.Mutex
@@ -107,19 +103,6 @@ func zenProxyCooldownStatus() map[string]string {
 	return out
 }
 
-// rebuildZenTransport 代理池或配置变化时重建 zen 上游 HTTP 客户端
-func rebuildZenTransport() {
-	zenTransportMu.Lock()
-	defer zenTransportMu.Unlock()
-	zenHTTPClient = &http.Client{Transport: buildZenTransport()}
-}
-
-func getZenHTTPClient() *http.Client {
-	zenTransportMu.Lock()
-	defer zenTransportMu.Unlock()
-	return zenHTTPClient
-}
-
 // pickUpstreamProxy 按策略为一次上游尝试选择代理,返回 (代理URL, 索引);
 // 无代理配置返回 ("", -1)。跳过冷却中的代理;全部冷却时返回轮转位。
 // 由调用方在每次上游尝试时显式调用 —— 请求级轮转（round_robin 一比一）,
@@ -190,10 +173,6 @@ func buildTransport(dial func(ctx context.Context, network, addr string) (net.Co
 		uconn := utls.UClient(raw, &utls.Config{
 			ServerName: host,
 			NextProtos: []string{"http/1.1"},
-			// ZEN_TLS_INSECURE=1 仅供本地 mitm 抓包排障（跳过服务端证书校验，
-			// 明文仍经代理可见）。生产/容器默认关闭；该 env 在 Docker/文档中
-			// 从不设置。
-			InsecureSkipVerify: os.Getenv("ZEN_TLS_INSECURE") == "1",
 		}, utls.HelloCustom)
 		if err := uconn.ApplyPreset(bunSpecForConn()); err != nil {
 			raw.Close()
@@ -206,32 +185,6 @@ func buildTransport(dial func(ctx context.Context, network, addr string) (net.Co
 		return uconn, nil
 	}
 	return t
-}
-
-// http2TransportWithDial 保留给 cline 上游等仍需 h2+Chrome 指纹的调用方。
-func http2TransportWithDial(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http2.Transport {
-	return &http2.Transport{
-		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-			raw, err := dial(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-			host, _, err := net.SplitHostPort(addr)
-			if err != nil {
-				raw.Close()
-				return nil, err
-			}
-			uconn := utls.UClient(raw, &utls.Config{
-				ServerName: host,
-				NextProtos: []string{"h2", "http/1.1"},
-			}, utls.HelloChrome_120)
-			if err := uconn.HandshakeContext(ctx); err != nil {
-				raw.Close()
-				return nil, err
-			}
-			return uconn, nil
-		},
-	}
 }
 
 // dialViaProxy 统一拨号:http/https 走 CONNECT,socks5 走 SOCKS5 握手

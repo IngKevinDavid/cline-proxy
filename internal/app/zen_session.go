@@ -23,13 +23,20 @@ import (
 //
 // 限流规避的取舍：此前"每次新身份"策略正是为了规避 session 维度限流；
 // 但免费层会话绑定的优先级更高——无存活会话时请求根本到不了记账层。
-// 若某会话被服务端限流（429/503），调用方按 key 冷却语义处理，必要时可
-// 主动调用 ResetZenSession(key) 换新身份（保留手动逃生口）。
+// 若某会话被服务端限流（429/503），调用方按 key 冷却语义处理；会话失效
+// （FreeTier 403）由收割机后台换新（harvestOnForbidden，见 zen_harvest.go），
+// 本地随机 sess_ 必 403，无手动换新意义。
 
 type zenSessionEntry struct {
 	Session string `json:"session"`
 	UA      string `json:"ua"`
 	Updated int64  `json:"updated"`
+	// Minted 标记该会话由收割机 CLI 实际 mint（服务端见过）；false 表示
+	// 本地随机兜底（启动竞态窗口内的占位），收割机不得跳过此类 key。
+	Minted bool `json:"minted,omitempty"`
+	// HarvestedAt 最近一次成功收割时间（unix 秒）；周期性收割以此为准，
+	// 区别于 Updated（每次请求都会刷新，活跃 key 会被永久跳过）。
+	HarvestedAt int64 `json:"harvestedAt,omitempty"`
 }
 
 var (
@@ -37,6 +44,9 @@ var (
 	zenSessions    = map[string]*zenSessionEntry{} // zen key -> sticky identity
 	zenSessLoaded  bool
 	zenSessPath    string
+	// zenNativeUA 官方 CLI 1.18.31 的原生 ai-sdk 形态 UA（会话粘性与
+	// 轮换列表共用；与 Dockerfile opencode-ai@1.18.31、tls_bun.go 指纹
+	// 版本耦合——升 CLI 版本需同步这三处）。
 	zenNativeUA    = "opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14"
 )
 
@@ -101,35 +111,21 @@ func StickyZenIdentity(key string) (sess, req, ua string) {
 		e = &zenSessionEntry{
 			Session: "sess_" + kit.RandAlphaNum(26),
 			UA:      zenNativeUA,
+			// Minted=false：随机 ID 只是启动竞态窗口内的占位（真实请求
+			// 先于收割机到达时），收割机启动扫描不跳过此类 key。
 		}
 		zenSessions[key] = e
 		saveZenSessionsLocked()
-		log.Printf("zen sticky session created for key#%d: %s", keyIndex(key), kit.Truncate(e.Session, 24))
+		log.Printf("zen sticky session created for key#%d: %s (unminted placeholder, harvester will mint)", keyIndex(key), kit.Truncate(e.Session, 24))
 	}
 	e.Updated = time.Now().Unix()
 	return e.Session, "msg_" + kit.RandAlphaNum(26), e.UA
 }
 
-// ResetZenSession 丢弃 key 绑定的会话并换新身份（限流逃生口）。
-// 下一次 StickyZenIdentity 会创建全新会话。
-func ResetZenSession(key string) {
-	loadZenSessions()
-	zenSessMu.Lock()
-	defer zenSessMu.Unlock()
-	delete(zenSessions, key)
-	saveZenSessionsLocked()
-}
+// ResetZenSession 曾用于丢弃 key 绑定的会话并换新身份（限流逃生口）。
+// 已移除：本地随机 sess_ 必 403（服务端只认见过存活的会话），换新必须
+// 走收割机 harvestSession（CLI mint），见 harvestOnForbidden。
 
-// MarkZenSessionDead 标记 key 绑定的会话已失效（上游 FreeTier 403）：
-// 下一次 StickyZenIdentity 会换新会话 ID（同 key 下 UA 保留）。
-// 避免失效会话被永久复用导致整 key 持续 403。
-func MarkZenSessionDead(key string) {
-	loadZenSessions()
-	zenSessMu.Lock()
-	defer zenSessMu.Unlock()
-	if e, ok := zenSessions[key]; ok && e != nil {
-		e.Session = "sess_" + kit.RandAlphaNum(26)
-		saveZenSessionsLocked()
-		log.Printf("zen sticky session rotated for key#%d (upstream rejected old session)", keyIndex(key))
-	}
-}
+// MarkZenSessionDead 曾把失效会话轮换成随机 ID。已移除：随机 ID 必 403
+//（zen_session.go 顶部注释），403 恢复直接走收割机 harvestOnForbidden
+//（2 次连续 403 触发，10 分钟冷却），旧 CLI 会话保留为"最后已知"标记。

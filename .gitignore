@@ -31,6 +31,7 @@ capture-logs/
 
 # Battle-test / local-run data (contains real keys - never commit)
 bt-data/
+bt-data;C
 
 # State files if DATA_DIR points at the repo root
 cline-seed.json

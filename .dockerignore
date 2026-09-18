@@ -8,6 +8,9 @@ data/
 .cline-accounts.json
 .cline-credentials.json
 .zen-config.json
+.zen-sessions.json
+.zen-endpoints.json
+zen-stats.jsonl
 combos.json
 .session-secret
 

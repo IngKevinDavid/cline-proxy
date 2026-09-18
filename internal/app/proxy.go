@@ -556,22 +556,7 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 	}
 	// FreeTier gate 要求上游恒 stream=true（buildZenBody 恒注入）；非流式
 	// 客户端在此把上游 chat SSE 聚合回 chat JSON，语义与直连非流式一致。
-	chat, aerr := collectStreamResponse(resp)
-	if aerr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error": map[string]string{"message": aerr.Error(), "type": "parse_error"},
-		})
-		tracker.finish(false, http.StatusInternalServerError)
-		return
-	}
-	if u, ok := chat["usage"].(map[string]any); ok && len(u) > 0 {
-		usageFn(u)
-	}
-	chat["model"] = zm.ID
-	chat = normalizeOpenAIResponse(chat)
-	truncateAtStopSequences(chat, stopSequencesFrom(params))
-	writeJSON(w, http.StatusOK, chat)
-	tracker.finish(true, resp.StatusCode)
+	finishZenChatNonStream(w, resp, zm, params, usageFn, tracker)
 }
 
 // handleZenChatDirect chat/completions 直调（端点自适应的反向纠错口：
@@ -601,22 +586,7 @@ func handleZenChatDirect(w http.ResponseWriter, r *http.Request, params map[stri
 		tracker.finish(true, resp.StatusCode)
 		return
 	}
-	chat, aerr := collectStreamResponse(resp)
-	if aerr != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"error": map[string]string{"message": aerr.Error(), "type": "parse_error"},
-		})
-		tracker.finish(false, http.StatusInternalServerError)
-		return
-	}
-	if u, ok := chat["usage"].(map[string]any); ok && len(u) > 0 {
-		usageFn(u)
-	}
-	chat["model"] = zm.ID
-	chat = normalizeOpenAIResponse(chat)
-	truncateAtStopSequences(chat, stopSequencesFrom(params))
-	writeJSON(w, http.StatusOK, chat)
-	tracker.finish(true, resp.StatusCode)
+	finishZenChatNonStream(w, resp, zm, params, usageFn, tracker)
 }
 
 // handleZenResponsesNative 原生 responses 端点模型（Upstream=="responses"）的
@@ -666,7 +636,6 @@ func handleZenResponsesNative(w http.ResponseWriter, r *http.Request, params map
 		// 原生 responses SSE 需要先转成 chat SSE 再下发：
 		// 先聚合（保持 tool_calls/reasoning/usage 完整），再以 chat
 		// chunk 形态逐块发出（长文本仍保持流式体感）
-		log.Printf("  zen responses upstream stream: aggregating then re-emitting as chat SSE")
 		chat, aerr := responsesSSEToChat(resp)
 		if aerr != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{
@@ -802,7 +771,6 @@ func emitChatAsSSE(w http.ResponseWriter, chat map[string]any, usageFn func(map[
 	}
 	w.Write([]byte("data: [DONE]\n\n"))
 	flush()
-	log.Printf("  zen responses re-emitted as chat SSE: finish=%s", finish)
 }
 
 func cleanMessages(messages []any) []any {
@@ -1374,7 +1342,34 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 		pendingTools = map[int]*toolAccum{}
 	)
 
-	reader := bufio.NewReader(upstream.Body)
+	// 整段缓冲再逐行解析：能区分"真 SSE 流"与"上游 200 但返回 JSON 错误体"
+	//（后者以单行 JSON 到达，无 data: 前缀；按 SSE 解析会得到空 200，把
+	// 上游错误伪装成空成功）。
+	raw, readErr := io.ReadAll(upstream.Body)
+	if readErr != nil {
+		return nil, fmt.Errorf("upstream read failed: %w", readErr)
+	}
+	body := string(raw)
+	firstNonEmpty := ""
+	for _, l := range strings.Split(body, "\n") {
+		if t := strings.TrimSpace(l); t != "" {
+			firstNonEmpty = t
+			break
+		}
+	}
+	// 非 SSE：整段按 JSON 错误体处理（error/data/普通对象都透传给调用方）
+	if firstNonEmpty != "" && !strings.HasPrefix(firstNonEmpty, "data:") {
+		var obj map[string]any
+		if err := json.Unmarshal(raw, &obj); err == nil {
+			return obj, nil
+		}
+		if strings.Contains(strings.ToLower(body), "error") {
+			return nil, fmt.Errorf("upstream returned non-SSE error body: %s", kit.Truncate(body, 300))
+		}
+		return nil, fmt.Errorf("upstream returned non-SSE body: %s", kit.Truncate(body, 300))
+	}
+
+	reader := bufio.NewReader(strings.NewReader(body))
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {
@@ -1519,6 +1514,28 @@ func modelNeedsStream(modelID string) bool {
 		return true
 	}
 	return false
+}
+
+// finishZenChatNonStream 非流式 zen 应答收尾（chat 形态）：上游已被强制
+// stream=true，此处把 chat SSE 聚合回 chat JSON 再呈现。handleZenChat /
+// handleZenChatDirect 共用同一序列，避免 copy-paste 漂移。
+func finishZenChatNonStream(w http.ResponseWriter, resp *http.Response, zm *ZenModel, params map[string]any, usageFn func(map[string]any), tracker *zenStatsTracker) {
+	chat, aerr := collectStreamResponse(resp)
+	if aerr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": map[string]string{"message": aerr.Error(), "type": "parse_error"},
+		})
+		tracker.finish(false, http.StatusInternalServerError)
+		return
+	}
+	if u, ok := chat["usage"].(map[string]any); ok && len(u) > 0 {
+		usageFn(u)
+	}
+	chat["model"] = zm.ID
+	chat = normalizeOpenAIResponse(chat)
+	truncateAtStopSequences(chat, stopSequencesFrom(params))
+	writeJSON(w, http.StatusOK, chat)
+	tracker.finish(true, resp.StatusCode)
 }
 
 // Anthropic Messages API support
@@ -1952,7 +1969,7 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 	}
 	if msg != nil {
 		if c, ok := msg["content"].(string); ok {
-			text = sanitizeContent(c)
+			text = c
 		}
 	}
 
@@ -2183,6 +2200,28 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleZenAnthropic Anthropic Messages 请求路由到 zen 免费模型上游
+// finishZenAnthropicNonStream 聚合好的 responses chat → Anthropic 非流式应答：
+// usage 提取 → model 回填 → normalize → stop 截断 → openAIToAnthropic →
+// tool_calls 时 stop_reason=tool_use。handleZenAnthropic 的 responses 直达分支
+// 与 auto-learn 重试分支共用，避免 copy-paste 漂移。
+func finishZenAnthropicNonStream(w http.ResponseWriter, chat map[string]any, openAIReq map[string]any, zm *ZenModel, tracker *zenStatsTracker) {
+	tracker.rec.Status = http.StatusOK
+	if u, ok := chat["usage"].(map[string]any); ok && len(u) > 0 {
+		if ct, ok := u["completion_tokens"].(float64); ok {
+			tracker.rec.CompletionTokens = int(ct)
+		}
+	}
+	chat["model"] = zm.ID
+	chat = normalizeOpenAIResponse(chat)
+	truncateAtStopSequences(chat, stopSequencesFrom(openAIReq))
+	anthropicResp := openAIToAnthropic(chat)
+	if tc, ok := getNested(chat, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
+		anthropicResp["stop_reason"] = "tool_use"
+	}
+	tracker.finish(true, http.StatusOK)
+	writeJSON(w, http.StatusOK, anthropicResp)
+}
+
 func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq, openAIReq map[string]any, toolSchemas map[string]map[string]bool) {
 	cfg := getZenConfig()
 	if !cfg.Enabled {
@@ -2243,31 +2282,15 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 		// 形态都要回填网关模型 ID，避免 Anthropic 应答 model 为空。
 		chat["model"] = zm.ID
 		if isStream {
-			// responses 原生流已聚合为 chat：按非流式 anthropic 呈现
-			//（SSE 逐块转发需原生 event 形态，聚合后已无原生块可转）
-			anthropicResp := openAIToAnthropic(normalizeOpenAIResponse(chat))
-			if tc, ok := getNested(chat, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
-				anthropicResp["stop_reason"] = "tool_use"
-			}
+			// responses 原生流已聚合为 chat：对 Anthropic 流式客户端按
+			// Anthropic SSE 事件序列重发（message_start → 文本/工具块 →
+			// message_delta → message_stop），不能回非流式 JSON。
+			emitAnthropicSSEFromChat(w, normalizeOpenAIResponse(chat), nil)
 			tracker.finish(true, http.StatusOK)
-			writeJSON(w, http.StatusOK, anthropicResp)
 			return
 		}
 		tracker.rec.RateLimited = rateLimited
-		tracker.rec.Status = http.StatusOK
-		if u, ok := chat["usage"].(map[string]any); ok && len(u) > 0 {
-			if ct, ok := u["completion_tokens"].(float64); ok {
-				tracker.rec.CompletionTokens = int(ct)
-			}
-		}
-		chat = normalizeOpenAIResponse(chat)
-		truncateAtStopSequences(chat, stopSequencesFrom(openAIReq))
-		anthropicResp := openAIToAnthropic(chat)
-		if tc, ok := getNested(chat, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
-			anthropicResp["stop_reason"] = "tool_use"
-		}
-		tracker.finish(true, http.StatusOK)
-		writeJSON(w, http.StatusOK, anthropicResp)
+		finishZenAnthropicNonStream(w, chat, openAIReq, zm, tracker)
 		return
 	}
 
@@ -2296,21 +2319,7 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 			return
 		}
 		tracker.rec.RateLimited = rateLimited2
-		tracker.rec.Status = http.StatusOK
-		if u, ok := chat["usage"].(map[string]any); ok && len(u) > 0 {
-			if ct, ok := u["completion_tokens"].(float64); ok {
-				tracker.rec.CompletionTokens = int(ct)
-			}
-		}
-		chat["model"] = zm.ID
-		chat = normalizeOpenAIResponse(chat)
-		truncateAtStopSequences(chat, stopSequencesFrom(openAIReq))
-		anthropicResp := openAIToAnthropic(chat)
-		if tc, ok := getNested(chat, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
-			anthropicResp["stop_reason"] = "tool_use"
-		}
-		tracker.finish(true, http.StatusOK)
-		writeJSON(w, http.StatusOK, anthropicResp)
+		finishZenAnthropicNonStream(w, chat, openAIReq, zm, tracker)
 		return
 	}
 	if err != nil {
@@ -2555,7 +2564,7 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 				"index": *textIndex,
 				"delta": map[string]any{
 					"type": "text_delta",
-					"text": sanitizeContent(c),
+					"text": c,
 				},
 			})
 		}
@@ -2680,6 +2689,158 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 	log.Printf("  anthropic stream done: hasText=%v tools=%d reason=%s", hasText, len(pendingTools), stopReason)
 }
 
+// emitAnthropicSSEFromChat 把聚合好的 chat completions 应答按 Anthropic SSE
+// 事件序列重发：message_start → text 块（content_block_start/delta/stop）→
+// tool_use 块（如有）→ message_delta（stop_reason + usage）→ message_stop。
+// 用于 responses 路径的流式 Anthropic 客户端：上游原生 responses SSE 已
+// 被聚合为 chat（handleZenAnthropic responses 分支），再以 Anthropic 形态
+// 逐事件下发，避免对 stream=true 客户端回非流式 JSON。
+func emitAnthropicSSEFromChat(w http.ResponseWriter, chat map[string]any, usageFn func(map[string]any)) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+
+	emit := func(event string, data any) {
+		d, _ := json.Marshal(data)
+		w.Write([]byte(fmt.Sprintf("event: %s\ndata: %s\n\n", event, string(d))))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	modelName, _ := chat["model"].(string)
+	msgID := "msg_" + fmt.Sprintf("%x", time.Now().UnixMilli())
+	stopReason := "end_turn"
+	switch getNested(chat, "choices", 0, "finish_reason") {
+	case "length":
+		stopReason = "max_tokens"
+	case "tool_calls":
+		stopReason = "tool_use"
+	}
+
+	emit("message_start", map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id":      msgID,
+			"type":    "message",
+			"role":    "assistant",
+			"content": []any{},
+			"model":   modelName,
+			"usage": map[string]any{
+				"input_tokens":  0,
+				"output_tokens": 0,
+			},
+			"stop_reason": nil,
+		},
+	})
+
+	// text 块：整段内容一次下发（上游已聚合，无逐 token 增量）
+	text, _ := getNested(chat, "choices", 0, "message", "content").(string)
+	if text != "" {
+		emit("content_block_start", map[string]any{
+			"type":  "content_block_start",
+			"index": 0,
+			"content_block": map[string]any{
+				"type": "text",
+				"text": "",
+			},
+		})
+		emit("content_block_delta", map[string]any{
+			"type":  "content_block_delta",
+			"index": 0,
+			"delta": map[string]any{
+				"type": "text_delta",
+				"text": text,
+			},
+		})
+		emit("content_block_stop", map[string]any{
+			"type":  "content_block_stop",
+			"index": 0,
+		})
+	}
+
+	// tool_use 块（如有）
+	if tcs, ok := getNested(chat, "choices", 0, "message", "tool_calls").([]any); ok {
+		idx := 1
+		for _, tc := range tcs {
+			tcm, _ := tc.(map[string]any)
+			if tcm == nil {
+				continue
+			}
+			fn, _ := tcm["function"].(map[string]any)
+			name := ""
+			if fn != nil {
+				name, _ = fn["name"].(string)
+			}
+			if name == "" {
+				continue
+			}
+			id, _ := tcm["id"].(string)
+			if id == "" {
+				id = fmt.Sprintf("toolu_%x_%d", time.Now().UnixMilli(), idx)
+			}
+			argsObj := map[string]any{}
+			if fn != nil {
+				if argsStr, ok := fn["arguments"].(string); ok {
+					if json.Unmarshal([]byte(argsStr), &argsObj) != nil {
+						argsObj = map[string]any{}
+					}
+				}
+			}
+			emit("content_block_start", map[string]any{
+				"type":  "content_block_start",
+				"index": idx,
+				"content_block": map[string]any{
+					"type":  "tool_use",
+					"id":    id,
+					"name":  name,
+					"input": map[string]any{},
+				},
+			})
+			parsed, _ := json.Marshal(argsObj)
+			emit("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": idx,
+				"delta": map[string]any{
+					"type":         "input_json_delta",
+					"partial_json": string(parsed),
+				},
+			})
+			emit("content_block_stop", map[string]any{
+				"type":  "content_block_stop",
+				"index": idx,
+			})
+			idx++
+		}
+	}
+
+	// usage 透传 + 结束事件
+	usageOut := map[string]any{"output_tokens": 0}
+	if u, ok := chat["usage"].(map[string]any); ok {
+		if ct, ok := u["completion_tokens"].(float64); ok {
+			usageOut["output_tokens"] = int(ct)
+		}
+		if pt, ok := u["prompt_tokens"].(float64); ok {
+			usageOut["input_tokens"] = int(pt)
+		}
+		if usageFn != nil {
+			usageFn(u)
+		}
+	}
+	emit("message_delta", map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason":   stopReason,
+			"stop_sequence": nil,
+		},
+		"usage": usageOut,
+	})
+	emit("message_stop", map[string]any{"type": "message_stop"})
+}
+
 func normalizeOpenAIResponse(obj map[string]any) map[string]any {
 	out := make(map[string]any)
 	for k, v := range obj {
@@ -2729,10 +2890,6 @@ func normalizeOpenAIResponse(obj map[string]any) map[string]any {
 	return out
 }
 
-func sanitizeContent(s string) string {
-	return s
-}
-
 func normalizeMessage(msg map[string]any) map[string]any {
 	out := make(map[string]any)
 	for k, v := range msg {
@@ -2757,7 +2914,7 @@ func normalizeMessage(msg map[string]any) map[string]any {
 		}
 	}
 	if c, ok := out["content"].(string); ok {
-		out["content"] = sanitizeContent(c)
+		out["content"] = c
 	}
 	return out
 }

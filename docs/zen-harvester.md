@@ -19,7 +19,7 @@ FreeTier 检查。本地随机生成的 `sess_` 必 403。网关自身无法凭�
 3. **定时**：每小时检查，最久未更新超过 `ZEN_HARVEST_INTERVAL_HOURS`
    （默认 6h）的 key 补一个。
 
-## 部署：写入 CLI 认证
+## 部署：CLI 认证
 
 收割机用容器内 CLI 的 `auth.json`（与网关 `DATA_DIR` 分开，互不干扰）：
 
@@ -27,19 +27,32 @@ FreeTier 检查。本地随机生成的 `sess_` 必 403。网关自身无法凭�
 $ZEN_HARVEST_HOME/.local/share/opencode/auth.json   （默认 HOME=/app/.opencode-home）
 ```
 
-该文件是容器本地状态（volume 或首次写入），**永不进 git**。
-每个 key 收割时临时覆盖该文件，收割完恢复原值（串行化保证并发安全）。
+**认证由收割机自给自足**：`harvestSession` 每次收割前把当前 key 以单 key
+形态 `{"opencode":{"type":"api","key":"sk-..."}}` 临时写入该文件，跑完
+`opencode run` 后恢复原值（串行化 + defer 保证并发安全与失败恢复）。因此
+多 key 部署无需手动准备认证——ZEN_KEYS 里配好的 zen key 即可直接收割。
 
-首次部署（二选一）：
+仅当**还需要 CLI 的其他功能**（人工 `opencode` 登录、非 zen 用法）时才需
+手动写入初始认证，二选一：
 
 - **A. 从本机复制**（已有 `opencode` 登录的电脑）：
   ```
   docker cp ~/.local/share/opencode/auth.json <container>:/app/.opencode-home/.local/share/opencode/auth.json
   ```
-  文件内是单 key 形态 `{"opencode":{"type":"api","key":"sk-..."}}`；
-  收割机按 key 轮流覆盖它，多 key 无需手动准备多个文件。
 - **B. 在容器内登录**：`docker exec -it <container> /app/bin/opencode auth login`
  （需 CLI 支持的登录方式，成功后文件自动落到上述路径）。
+
+注意 `docker-compose.yml` 默认只挂载 `./data:/app/data`，`/app/.opencode-home`
+不在 volume 里——容器重建后手动写入的认证会丢失（自动收割写入的每次覆盖
+恢复，无持久化需求）。如需持久化可给 `ZEN_HARVEST_HOME` 加 volume。
+
+## 收割模型
+
+`harvestSession` 首选 `opencode/big-pickle`（zen 免费层默认模型别名），失败
+则依次尝试至多 2 个动态获取的价格 0 模型（`opencode models` 在线列表 ∩
+公共目录 cost 0/0 且非 deprecated，列表缓存 1h）——big-pickle 未来下架后
+自动落到其余免费模型，收割不中断。模型只用于在服务端 mint 会话，回答
+内容不关心。
 
 ## 环境变量
 
@@ -53,7 +66,8 @@ $ZEN_HARVEST_HOME/.local/share/opencode/auth.json   （默认 HOME=/app/.opencod
 ## 降级语义
 
 - CLI 二进制不存在（arm64 等 postinstall 不支持的架构）→ 自动降级为纯网关
-  模式（sticky 会话 + 403 轮换），日志提示一次，不影响正常代理。
+  模式（sticky 会话 + 403 收割路径不可用，请求按原有 403/轮换语义返回），
+  静默降级，不影响正常代理。
 - 收割失败 → 保留旧会话，请求按原有 403/轮换语义返回，不阻塞。
 - `ZEN_HARVEST=0` → 行为与收割机不存在完全一致。
 

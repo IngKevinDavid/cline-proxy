@@ -1634,7 +1634,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				if next := pickZenKey(); next != "" && !zenKeyCooling(next) {
 					key = next
 					retryKey = next
-					log.Printf("  zen responses session rejected (403), switching to key#%d", keyIndex(next))
+					log.Printf("  zen responses session rejected (403) [%s], switching to key#%d", zenSessionDesc(key), keyIndex(next))
 					continue
 				}
 			}
@@ -1787,6 +1787,10 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 		// 复用只会持续 403。后台收割机（连续 403 达阈值）mint 真会话补上；
 		// 本次直接轮转下一 key 重试（循环头每次 pickZenKey，天然换 key）。
 		if resp.StatusCode == http.StatusForbidden {
+			// 记录会话年龄：这是"会话能活多久"的唯一观测点（403 只报
+			// FreeTier，不含原因）。占位会话 403 是预期内的，minted 会话
+			// 403 才是额度窗口/寿命到期的证据。
+			log.Printf("  zen chat session rejected (403) [%s], key#%d", zenSessionDesc(key), keyIndex(key))
 			go harvestOnForbidden(key)
 			if attempt < retries {
 				continue

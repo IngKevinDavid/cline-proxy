@@ -385,3 +385,77 @@ func waitZenMintJobDone(t *testing.T) {
 	}
 	t.Fatal("mint job did not finish in time")
 }
+
+// 刷新间隔必须短于 zen 的 5h 额度窗口：等于/超过窗口意味着每轮都有一段时间
+// 全池会话已过期（请求先 403，再靠 harvestOnForbidden 逐个补救）。
+func TestHarvestIntervalBelowQuotaWindow(t *testing.T) {
+	t.Setenv("ZEN_HARVEST_INTERVAL_HOURS", "")
+	if got := harvestInterval(); got != 4*time.Hour {
+		t.Fatalf("default interval = %v, want 4h", got)
+	}
+	if got := harvestInterval(); got >= 5*time.Hour {
+		t.Fatalf("default interval %v must stay under the 5h quota window", got)
+	}
+	// 显式配置仍然被尊重（大池子/小池子可以自己权衡）
+	t.Setenv("ZEN_HARVEST_INTERVAL_HOURS", "2")
+	if got := harvestInterval(); got != 2*time.Hour {
+		t.Fatalf("explicit interval = %v, want 2h", got)
+	}
+	t.Setenv("ZEN_HARVEST_INTERVAL_HOURS", "99")
+	if got := harvestInterval(); got != 99*time.Hour {
+		t.Fatalf("explicit interval = %v, want 99h (operator's call)", got)
+	}
+	// 非法值回落到默认，而不是 0（0 会让 fresh > 0 && ... 的判断永远为真，
+	// 每小时给每个 key 都收割一次）
+	t.Setenv("ZEN_HARVEST_INTERVAL_HOURS", "abc")
+	if got := harvestInterval(); got != 4*time.Hour {
+		t.Fatalf("garbage interval = %v, want the 4h default", got)
+	}
+}
+
+// 403 日志要能区分"从未 mint 的占位会话"（预期内）与"minted 会话被拒"
+// （会话寿命到期的证据）——没有这个区分就无法回答"会话能活多久"。
+func TestZenSessionDescDistinguishesExpiry(t *testing.T) {
+	setupHarvestTest(t)
+	key := "sk-desc"
+	if got := zenSessionDesc(key); got != "no session" {
+		t.Fatalf("unharvested key desc = %q", got)
+	}
+
+	zenSessMu.Lock()
+	zenSessions[key] = &zenSessionEntry{Session: "sess_placeholder"}
+	zenSessMu.Unlock()
+	if got := zenSessionDesc(key); !contains(got, "placeholder") {
+		t.Fatalf("placeholder desc = %q; must be distinguishable from a minted session", got)
+	}
+
+	zenSessMu.Lock()
+	zenSessions[key] = &zenSessionEntry{Session: "ses_real", Minted: true, HarvestedAt: time.Now().Add(-5 * time.Hour).Unix()}
+	zenSessMu.Unlock()
+	got := zenSessionDesc(key)
+	if !contains(got, "minted") || !contains(got, "ago") {
+		t.Fatalf("minted desc = %q; must report the session age", got)
+	}
+}
+
+// 定时补收的检查频率必须明显高于刷新间隔：间隔到与真正执行之间差一个 tick，
+// 若两者同量级（4h 目标 + 1h ticker），实际刷新落在 4h-5h，顶到额度窗口边缘。
+func TestPeriodicTickFinerThanInterval(t *testing.T) {
+	tick := 10 * time.Minute
+	for _, hours := range []int{1, 4, 6, 24} {
+		t.Setenv("ZEN_HARVEST_INTERVAL_HOURS", fmt.Sprint(hours))
+		iv := harvestInterval()
+		if iv <= tick*4 {
+			t.Fatalf("interval %v is too close to the %v tick; refresh timing would drift a whole tick", iv, tick)
+		}
+	}
+	// 默认值必须小于 5h 额度窗口，且比 tick 粗得多
+	t.Setenv("ZEN_HARVEST_INTERVAL_HOURS", "")
+	def := harvestInterval()
+	if def >= 5*time.Hour {
+		t.Fatalf("default %v must stay under the 5h window", def)
+	}
+	if def < 2*time.Hour {
+		t.Fatalf("default %v is needlessly aggressive for the shared IP quota", def)
+	}
+}

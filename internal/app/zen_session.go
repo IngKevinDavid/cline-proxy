@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"sync"
@@ -152,6 +153,24 @@ func zenSessionSnapshotOf(key string) zenSessionSnapshot {
 		Live:        live,
 		Session:     kit.Truncate(e.Session, 12),
 		HarvestedAt: e.HarvestedAt,
+	}
+}
+
+// zenSessionDesc 供日志使用的会话描述：一眼区分"从未 mint 的本地占位"和
+// "mint 过但被服务端拒绝"——前者必然 403（预期内），后者才是会话寿命到期的证据。
+// 没有这个区分，403 日志无法回答"会话到底能活多久"，只能靠猜。
+func zenSessionDesc(key string) string {
+	s := zenSessionSnapshotOf(key)
+	switch {
+	case !s.Minted && s.Session == "":
+		return "no session"
+	case !s.Minted:
+		return "placeholder (never minted, always 403)"
+	case s.HarvestedAt <= 0:
+		return "minted (age unknown)"
+	default:
+		age := time.Since(time.Unix(s.HarvestedAt, 0)).Round(time.Minute)
+		return fmt.Sprintf("minted %v ago", age)
 	}
 }
 

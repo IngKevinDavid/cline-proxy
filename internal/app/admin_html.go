@@ -619,7 +619,7 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
     <span id="ocSessSummary" class="probe-pill" style="font-weight:normal;margin-left:auto"></span>
   </div>
   <div class="section-body">
-    <p class="hint" style="margin-top:0">The free tier only accepts session IDs the upstream has actually seen, minted by the opencode CLI. A key without a live session <b>always</b> fails with 403 — normally the harvester mints one on startup, on repeated 403s, and every few hours; use the buttons below to mint immediately (e.g. right after a fresh deploy with many keys).</p>
+    <p class="hint" style="margin-top:0" id="ocSessHint">The free tier only accepts session IDs the upstream has actually seen, minted by the opencode CLI. A key without a live session <b>always</b> fails with 403 — normally the harvester mints one on startup, on repeated 403s, and every few hours; use the buttons below to mint immediately (e.g. right after a fresh deploy with many keys).</p>
     <div class="flex" style="gap:10px;margin-bottom:10px;flex-wrap:wrap">
       <button class="btn btn-primary" onclick="mintZenSessions(false)">Mint missing sessions</button>
       <button class="btn" onclick="mintZenSessions(true)">Force mint / refresh all</button>
@@ -1417,6 +1417,15 @@ function renderOcSessions(s) {
     ? '<span style="color:' + (s.liveCount === s.total ? 'var(--accent2)' : 'var(--danger)') + '">' +
       s.liveCount + '/' + s.total + ' live</span>'
     : '';
+  // 刷新节奏与并发写进提示行：用户据此判断"自动维护是否够用"，以及
+  // 调 ZEN_HARVEST_INTERVAL_HOURS / ZEN_HARVEST_CONCURRENCY 要不要改。
+  const h = _('ocSessHint');
+  if (h) {
+    const base = 'The free tier only accepts session IDs the upstream has actually seen, minted by the opencode CLI. A key without a live session <b>always</b> fails with 403.';
+    h.innerHTML = base + (s.harvestEnabled
+      ? ' Auto-refresh every <b>' + (s.intervalHours || 4) + 'h</b> (kept below the 5h quota window), concurrency <b>' + (s.concurrency || 3) + '</b>.'
+      : ' <b>Harvester unavailable</b> — no opencode CLI in this container (ZEN_HARVEST_BIN).');
+  }
   _('ocSessBody').innerHTML = rows.length
     ? rows.map(k => {
         const state = k.noKey

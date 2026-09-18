@@ -521,3 +521,50 @@ Root cause was two-independent things:
 - **Skip-if-live is the default; force is explicit.** Re-minting a working
   session wastes upstream quota for no benefit, so the non-force button is the
   normal action and only the force path re-mints live keys.
+
+## Session refresh interval vs the zen 5h quota window (2026-09-18)
+
+Operator question: zen's free tier is ~200 requests per egress IP per 5 hours,
+so are session IDs only valid inside that window — should the refresh interval
+change? **Half right, and the half that's wrong matters:** the quota is keyed on
+the egress **IP**, not on the session, so re-minting a session does not reset or
+refill anything. Extra capacity comes from more exits (13 socks5 IPs × 200 ≈
+2600/5h), never from fresher sessions. Minting in fact *spends* quota: harvest
+runs deliberately go direct, so they egress the container's own IP and share
+that IP's bucket with request traffic (and with any socks5 exit served from the
+same host).
+
+The half that's right is the *upper bound* on session lifetime. If sessions die
+with the window, an interval above it guarantees a stretch where every key's
+session is stale: requests start 403ing and recovery depends on
+`harvestOnForbidden` (2 consecutive 403s per key, 10-minute per-key cooldown),
+so failure rate and first-byte latency spike every cycle.
+
+### Changes
+- **Default `ZEN_HARVEST_INTERVAL_HOURS` 6 → 4.** Under the window, so sessions
+  are replaced before they expire. Cost is ~66 mints/day for 11 keys against a
+  ~960/day bucket — noise. Going to 1h would be ~264/day and would actually
+  compete with request traffic for quota.
+- **Periodic tick 1h → 10min.** The check runs on a ticker, so the real refresh
+  time is interval + up to one tick: a 4h target with an hourly ticker lands at
+  4h-5h, i.e. right on the window boundary. A 10-minute tick pins it at 4h-4h10m.
+- **Overlapping periodic batches are skipped** (`periodicBatchMu.TryLock`): the
+  stale list is computed before a batch runs, so a second tick during a long
+  batch would re-mint the same keys (the batch hasn't written `HarvestedAt`
+  back yet). The next tick recomputes the list anyway.
+- **403 logs now carry the rejected session's age** —
+  `[placeholder (never minted, always 403)]` vs `[minted 5h12m ago]`. Without
+  the distinction a 403 tells you nothing about session lifetime; with it, the
+  first `minted ... ago` rejection in the logs *is* the measured lifetime, and
+  the interval can be tuned from evidence instead of assumption.
+- Panel shows the active cadence ("Auto-refresh every 4h … concurrency 3") so
+  the setting is visible without reading env vars.
+
+### Settled trade-offs (do not re-propose)
+- **Refresh interval stays a fixed timer, not a per-session TTL probe.** We do
+  not yet know the real lifetime; until the new 403 log lines produce one, any
+  probe would be guessing with extra requests. 4h is safe under either outcome.
+- **Harvest runs stay direct (no proxy pool).** Routing the CLI through socks5
+  would spread mint traffic across exits, but the mint is the CLI's own
+  registration handshake and going direct is what has been verified to work;
+  mint volume is small enough that the quota sharing is not worth the risk.

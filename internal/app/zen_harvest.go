@@ -45,7 +45,7 @@ import (
 //
 // 开关：ZEN_HARVEST=0 关闭（默认开启，需 CLI 存在）；ZEN_HARVEST_BIN 指定
 // CLI 路径（默认 /app/bin/opencode）；ZEN_HARVEST_HOME 指定 CLI HOME 根
-//（默认 /app/.opencode-home）；ZEN_HARVEST_INTERVAL_HOURS 默认 6；
+//（默认 /app/.opencode-home）；ZEN_HARVEST_INTERVAL_HOURS 默认 4（见 harvestInterval 注释）；
 // ZEN_HARVEST_CONCURRENCY 默认 3。CLI 认证由收割机自给自足：每次收割把当前
 // key 以单 key 形态写入该 key 专属 HOME 的 auth.json，跑完删除（不落盘留存）。
 
@@ -162,13 +162,25 @@ func lockHarvestKey(key string) func() {
 	return mu.Unlock
 }
 
-// harvestInterval 定时收割间隔（默认 6h，最小 1h）。
+// harvestInterval 定时收割间隔（默认 4h，最小 1h）。
+//
+// 为什么是 4 而不是 6：zen 免费层按出口 IP 记账（实测 200 req/5h per IP），
+// 服务端只认得"见过的"会话；会话寿命的上界疑似就是这个 5h 额度窗口。间隔设在
+// 窗口之上（旧默认 6h）意味着每轮都有一段时间**全池会话已过期**：请求开始 403，
+// 只能靠 harvestOnForbidden 逐个补救（每 key 需 2 次连续 403，且同 key 10 分钟
+// 冷却），那段时间的失败率与首字节延迟都会抬起来。4h 留出余量：会话过期前就换新，
+// 死窗口不再出现。
+//
+// 不要再往短了调（1h 之类）：收割 run 为了走 CLI 自己的注册握手**直连公网**，
+// 出口就是容器自己的 IP——那个 IP 同样按 200/5h 记账（若该 IP 还提供 socks5
+// 出口，收割流量会和请求流量抢同一个额度桶）。11 个 key × 每 4h 一轮 ≈ 66 次
+// mint/天，相对 960/天 的桶是零头；改成 1h 就是 264 次/天，开始有实际成本。
 func harvestInterval() time.Duration {
 	var hours int
 	if n, err := fmt.Sscanf(strings.TrimSpace(os.Getenv("ZEN_HARVEST_INTERVAL_HOURS")), "%d", &hours); err == nil && n == 1 && hours >= 1 {
 		return time.Duration(hours) * time.Hour
 	}
-	return 6 * time.Hour
+	return 4 * time.Hour
 }
 
 // harvestKeyBudget 单个 key 的收割总预算（默认 150s）。
@@ -635,14 +647,24 @@ func zenMintJobStatus() map[string]any {
 
 // ============ 触发路径 ============
 
-// startZenHarvester 启动定时收割循环：每小时检查一次，为"从未收割成功"的 key
+// periodicBatchMu 保证同一时间只有一个"定时补收"批次在跑。检查间隔已缩到
+// 10 分钟，而一个批次（11 个 key、含失败重试）最坏可能跑到十几分钟——不挡住
+// 会叠起第二个批次：stale 名单在批次开始前算好，上一批还没写回 HarvestedAt，
+// 于是同一批 key 被重复收割（白烧出口 IP 的额度）。
+var periodicBatchMu sync.Mutex
+
+// startZenHarvester 启动定时收割循环：每 10 分钟检查一次，为"从未收割成功"的 key
 // 或"最久未收割超过间隔"的 key 补收（并行，受 harvestConcurrency 约束）。
+//
+// 检查频率必须明显高于 harvestInterval：间隔到与真正执行之间会差一个 tick，
+// 4h 目标配 1h ticker 实际落在 4h-5h——正好顶到 5h 额度窗口的边。10 分钟
+// ticker 把误差压到 10 分钟，刷新稳稳发生在窗口之内。
 func startZenHarvester() {
 	go func() {
 		// 启动时先给无会话的 key 收割（错开 10s，避免与 model sync 抢资源）
 		time.Sleep(10 * time.Second)
 		harvestMissingSessions()
-		ticker := time.NewTicker(time.Hour)
+		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
 			if !harvestEnabled() {
@@ -684,10 +706,14 @@ func startZenHarvester() {
 			if len(stale) == 0 {
 				continue
 			}
+			if !periodicBatchMu.TryLock() {
+				continue // 上一批还没跑完，不必排队（下一 tick 会重算 stale）
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 			// force=true：这些 key 是"按新鲜度挑出来的"，正是要重 mint。
 			mintZenSessions(ctx, stale, true, nil)
 			cancel()
+			periodicBatchMu.Unlock()
 		}
 	}()
 }

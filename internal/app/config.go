@@ -32,7 +32,8 @@ import (
 //	ZEN_HARVEST                zen 会话收割机开关，默认开启；"0" 关闭（纯网关模式）
 //	ZEN_HARVEST_BIN            收割机 CLI 二进制路径，默认 /app/bin/opencode
 //	ZEN_HARVEST_HOME           收割机 CLI 的 HOME（auth.json/sqlite 落点），默认 /app/.opencode-home
-//	ZEN_HARVEST_INTERVAL_HOURS 定时补收割间隔小时数，默认 6，最小 1
+//	ZEN_HARVEST_INTERVAL_HOURS 定时补收割间隔小时数，默认 4，最小 1
+//	  （须小于 zen 的 5h 额度窗口，否则每轮都有一段时间全池会话已过期）
 //	CLINE_ACCOUNTS_SEED_FILE   cline 账号种子文件（[{refreshToken,email}] JSON 数组），
 //	                           池为空时启动自动导入
 //	CLINE_USE_PROXIES          true 时 cline 上游全部走出口代理池（zen 上游配置

@@ -18,8 +18,8 @@ FreeTier 检查。本地随机生成的 `sess_` 必 403。网关自身无法凭�
    2-4 分钟完成；启动日志会打印 `minting N key(s) at startup (concurrency N)`。
 2. **运行时**：某 key 连续 FreeTier 403 ≥ 2 次 → 后台收割新会话替换
    （同 key 10 分钟内最多一次）；
-3. **定时**：每小时检查，最久未收割超过 `ZEN_HARVEST_INTERVAL_HOURS`
-   （默认 6h）的 key 补一个；
+3. **定时**：每 10 分钟检查，最久未收割超过 `ZEN_HARVEST_INTERVAL_HOURS`
+   （默认 **4h**，见下方"为什么是 4h"）的 key 补一个；
 4. **手动**：管理面板「opencode free models → Live session IDs」→
    **Mint missing sessions**（只补未 mint 的）/ **Force mint / refresh all**
    （全部重 mint），后台执行并显示每个 key 的进度与耗时。
@@ -77,7 +77,7 @@ per-key HOME 有两个作用：**(a) 可并行**（不同 key 无共享 auth.jso
 | `ZEN_HARVEST` | 开启 | `0` 关闭收割机（纯网关模式） |
 | `ZEN_HARVEST_BIN` | `/app/bin/opencode` | CLI 二进制路径 |
 | `ZEN_HARVEST_HOME` | `/app/.opencode-home` | 容器内 CLI 的 HOME |
-| `ZEN_HARVEST_INTERVAL_HOURS` | `6` | 定时补收割间隔（最小 1h） |
+| `ZEN_HARVEST_INTERVAL_HOURS` | `4` | 定时补收割间隔（最小 1h）。**必须小于 zen 的 5h 额度窗口**，否则每轮都有一段时间全池会话已过期 |
 | `ZEN_HARVEST_CONCURRENCY` | `3` | 并行收割上限（1..8）。CLI 是 Bun 进程，调高会吃内存 |
 | `ZEN_HARVEST_KEY_TIMEOUT_SECONDS` | `150` | 单个 key 的收割总预算（最小 30s）。失败路径最多 3 模型 × 3 次尝试，不封顶会占住 worker 9 分钟 |
 
@@ -100,6 +100,33 @@ per-key HOME 有两个作用：**(a) 可并行**（不同 key 无共享 auth.jso
   解包，用 ELF 头校验架构、不执行二进制。两种产物相同，真机运行时均原生执行。
 - CLI 二进制约 +185MB（node:22-alpine 构建阶段，不进最终层；
   最终镜像只多一个静态二进制 + libstdc++）。
+
+## 额度窗口与会话寿命（为什么是 4h）
+
+zen 免费层按**出口 IP** 记账（实测约 200 请求 / 5 小时 / IP）。两点推论要说清楚：
+
+- **重新 mint 会话不会重置额度。** 额度记在 IP 上，会话只是"来自 OpenCode"的
+  凭证。想提高吞吐只能加出口（多个 socks5 IP 各自一份额度），不能靠换会话。
+- **反过来，mint 本身要花额度。** 收割 run 直连公网（不走代理池），出口就是
+  容器自己的 IP，与请求共用同一个 200/5h 桶（若该 IP 同时对外提供 socks5
+  出口，则和池子里的请求抢同一个桶）。所以 mint 频率不能调太高。
+
+会话寿命的上界疑似就是同一个 5h 窗口（服务端只认得"窗口内见过"的会话）。因此
+刷新间隔必须**短于**窗口，默认取 4h：
+
+- 6h（旧默认）> 5h 窗口 → 每轮都会出现"全池会话已过期"的时段，请求开始 403，
+  只能靠 `harvestOnForbidden` 逐个补救（每 key 需 2 次连续 403，且同 key 10 分钟
+  冷却），那段时间失败率和首字节延迟都会抬起来。
+- 4h 在过期前换新，死窗口不出现。11 个 key × 每 4h 一轮 ≈ 66 次 mint/天，
+  相对该 IP 约 960/天 的桶是零头。
+- 检查 tick 是 **10 分钟**（不是 1 小时）：间隔到与真正执行之间差一个 tick，
+  4h 目标配 1h ticker 实际会落在 4h-5h，正好顶到窗口边缘。
+- 1h 之类则要 264 次 mint/天，开始真的抢额度，得不偿失。
+
+**想确认会话到底能活多久**：403 日志现在带上被拒会话的年龄
+（`[minted 5h12m ago]` / `[placeholder (never minted, always 403)]`）。
+占位会话 403 是预期内的；出现 `minted ... ago` 的 403 就说明会话确实到期，
+那一刻的年龄就是实测寿命——据此再决定要不要把间隔调得更紧。
 
 ## 运维
 

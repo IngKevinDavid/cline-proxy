@@ -236,3 +236,29 @@ Known deferred (low risk, revisit if needed):
   own tools. Keep the split: making auto unconditional regressed ling
   multi-turn to empty text. Responses path (spark) must always send auto
   (gate rejects none) and passes client tools through as flat items.
+
+## Audit of 8a9e2c3 (2026-09-18, fixed in b50191f)
+Reviewed the tool-call/IDE changes with three parallel reviewers, then fixed
+and re-probed (spark-1.3 + mimo, 21/21 on a fresh container). Points worth
+remembering, either as behaviour or as "don't re-propose":
+- Client tool definitions intentionally win over the gate stubs of the same
+  name (the gate only checks that the *names* exist; the stub's empty schema
+  was what made a client `read` call lose `file_path`). Gate names still all
+  ship in the request, so the FreeTier check is unaffected.
+- A delta whose item_id/output_index belongs to no accumulator is dropped on
+  purpose (the later done/output_item event carries the full arguments);
+  adopting it into another call is what produced the {"query":..}{"url":..}
+  jam. Do not "fix" this by falling back to the last call again.
+- SSE comment/heartbeat lines (": keep-alive", mimo sends them before the
+  first chunk) are valid SSE; the non-SSE detector must only classify a body
+  as JSON when the first non-empty line is not an SSE field line.
+- Compaction summary generation now issues stream=true and aggregates it
+  (both zen endpoints 403 on stream=false). Remaining limitation: for a
+  responses-native model (spark) the summary request still carries the gate
+  tools with tool_choice=auto, so the model may answer with a tool call and
+  the summary falls back to truncation. Accepted; revisit only if spark
+  compaction quality becomes a real complaint.
+- Reasoning-heavy models (spark) need real max_tokens headroom: with
+  max_tokens≈400 the reasoning consumes the budget and the client gets empty
+  content with finish_reason=length. That is upstream model behaviour, not a
+  gateway bug — probes should use ≥1500-2000 tokens for tool turns.

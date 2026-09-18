@@ -700,3 +700,84 @@ CLI never got that far, not that the upstream refused it.
   wrong for small instances** and has been removed; the guidance is now "2-3,
   and only if the box has headroom — if all keys fail while parallel, go back
   to 1."
+
+## Audit of cc48b4c (2026-09-18, fixed in the follow-up commit)
+
+Reviewed the serial-default change set line by line, re-ran the constrained-box
+A/B, and checked every claim in the message against the code. The change set's
+core is right (serial default + work-derived batch bound + real per-attempt
+retries), and the field failure is reproduced and fixed. Four defects found:
+
+### Fixed
+- **`no session minted` could report `exit=0 err=<nil>`.** `last` is only
+  assigned inside the attempt loop, so when the per-key budget is spent before
+  the first attempt (batch timeout / cancel landing between the auth.json write
+  and the first run), the error rendered a zero-value result — which reads as
+  "the CLI ran fine and the upstream gave nothing" and sends the next debugger
+  to the upstream. `harvestNoSessionErr` now names that case explicitly
+  (`no CLI run started: per-key budget 2m30s was already exhausted`). A real
+  run and every stub both set `Elapsed`, so zero-value is unambiguous.
+  (Compared field-by-field, not `== harvestRunResult{}`: `Err` is an interface
+  and comparing it panics when the dynamic type is uncomparable.)
+- **`cliModelIDs` had no pipe bound.** It used `CombinedOutput` with a 30s ctx
+  and no `WaitDelay`: when the ctx kills `opencode models`, any quietly alive
+  grandchild holding the inherited pipe keeps the read open — and this call
+  holds `mintModelsMu`, so a hang there stalls the whole batch, not just one
+  key. Same `WaitDelay = 10s` as `runHarvestCLI` now. (Could not reproduce the
+  hold with the real binary inside the container — `opencode models` releases
+  its pipe promptly when killed — so this is a latent hazard, fixed for
+  consistency with the run path rather than for a reproduced failure.)
+- **Panel poll cap was missing the backend's 15-minute floor.** The JS formula
+  was `ceil(total/workers) × perKey + 120`, which for 1-4 keys is 5.5-13 min,
+  while `harvestBatchTimeout` floors at 15 min. The polling stopped before the
+  backend could still be working, so the progress panel silently froze. Now
+  `Math.max(900, …)`. Verified all sizes 1-50 keys: panel cap >= backend bound.
+- **Package-level doc comments still advertised the old default.** Two spots
+  said `ZEN_HARVEST_CONCURRENCY 默认 3`; the change set updated the function
+  comments but not the file header. Also corrected the adjacent stale claims
+  (`每小时检查 … 默认 6h` → every 10 minutes, default 4h) and "隔离天然并发"
+  (isolation makes concurrency *possible*; it is not the default).
+
+### Verified, not defects
+- **The concurrency path is race-free.** `go test -race` on the whole package
+  inside `golang:1.26-alpine`: clean. `TestMintRespectsConcurrencyLimit` also
+  run 10× for flakiness: stable.
+- **Minting uses one goroutine per key up to `harvestConcurrency`, not one per
+  key plus a semaphore.** `workers` is clamped to `len(todo)`, and `harvestSem`
+  (sized `harvestConcurrency`) is the belt to that suspenders. With the default
+  of 1 this is exactly one goroutine per batch, and `wg.Wait()` means a timed-out
+  batch still returns (remaining keys are marked `canceled`), so no goroutine or
+  slot leak. Verified by reading both paths.
+- **A key minted by the 60s-kill path is genuinely usable.** In both serial
+  runs key#1's session was captured *after* its 60s attempt was killed, so this
+  was worth proving: a real `/v1/chat/completions` (big-pickle) through the
+  gateway returned **200 OK in 3.6s** on those sessions, and the container log
+  has no 403 / session-rejected lines. The CLI registers the session upstream
+  (~4s in) well before the run is killed, so truncating the run does not
+  produce a half-registered session.
+- **Measured numbers are reproducible.** Serial, 0.5 core / 600MB: 4/4 minted
+  twice in a row (125s and 124s; key#1 ~60s including the model-list fetch,
+  the rest 16-19s). At concurrency 5 on the same shape: 3 of 4 first attempts
+  killed at `elapsed=60.5s`. Both match the commit message.
+- **A pre-existing 150s literal.** `harvestOnForbidden` still uses
+  `150*time.Second` instead of `harvestKeyBudget()`, so
+  `ZEN_HARVEST_KEY_TIMEOUT_SECONDS` doesn't affect that path. Pre-existing, not
+  introduced here, and behaviourally identical at the default — left alone to
+  keep this diff scoped.
+- **gofmt "failures" are the known pre-existing comment reformat drift**, not
+  this change: 21 files flagged both at cc48b4c and in the current tree, and
+  CI runs only `go build` + `go vet`.
+
+### Settled trade-offs (do not re-propose)
+- **A batch's 45-minute ceiling means at most ~17 keys at the default budget.**
+  Beyond that the batch is truncated and the tail keys are reported `canceled`
+  (never falsely OK); they are re-minted by the next 403 trigger or periodic
+  sweep. The ceiling exists so one wedged job cannot hold the worker forever.
+  Raising it is the wrong fix — the keys that need re-minting are exactly the
+  ones the 403/sweep triggers already cover.
+- **At concurrency 1 the global harvest slot serialises the manual mint job
+  against 403-triggered per-key mints.** A reactive mint that cannot get the
+  slot inside its own 150s budget fails and is remembered by the 10-minute
+  throttle, then covered by the periodic sweep. Accepted cost of not letting
+  the CLI saturate a 1-core box.
+

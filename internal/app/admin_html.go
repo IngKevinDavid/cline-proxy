@@ -1492,7 +1492,10 @@ async function mintZenSessions(force) {
     const j0 = s0.job;
     const workers = Math.max(1, s0.concurrency || 1);
     const perKey = s0.keyTimeoutSeconds || 150;
-    const batchSeconds = Math.ceil((j0.total || 1) / workers) * perKey + 120;
+    // 下限 15 分钟与后端 harvestBatchTimeout 的下限对齐：key 少时后端照样跑满
+    // 15 分钟，而 ceil(total/workers)×perKey 只有几分钟，不夹下限轮询会在后端
+    // 放弃之前就停掉（之后只剩 20s 的可见标签页轮询，进度更新变粗）。
+    const batchSeconds = Math.max(900, Math.ceil((j0.total || 1) / workers) * perKey + 120);
     const maxTicks = Math.min(1800, Math.ceil(batchSeconds / 2) + 30);
     ocSessPoll = setInterval(async () => {
       const s = await loadOcSessions();

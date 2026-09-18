@@ -33,21 +33,24 @@ import (
 // sticky 会话表。触发时机：
 //  1. 启动时：key 无 live 会话 → 收割一个（避免首请求必 403）；
 //  2. 运行时：某 key 连续 FreeTier 403 达阈值 → 后台收割新会话替换；
-//  3. 定时：每小时检查，最久未收割超过 HARVEST_INTERVAL 的 key 补一个（默认 6h）；
+//  3. 定时：每 10 分钟检查一次，最久未 mint 超过 ZEN_HARVEST_INTERVAL_HOURS
+//     （默认 4h）的 key 补一个；
 //  4. 手动：管理面板「Force mint/refresh live session ids」→ 全池 mint，立即见效。
 //
 // 并行与隔离：**每个 key 一个独立 CLI HOME**（`ZEN_HARVEST_HOME/keys/<hash>`），
-// auth.json 与 CLI 日志天然隔离，因此多 key 可并行收割（上限
-// ZEN_HARVEST_CONCURRENCY，默认 3，见 harvestSem）；同一 key 仍串行（per-key 锁）。
+// auth.json 与 CLI 日志天然隔离，因此多 key 具备并行的条件（上限
+// ZEN_HARVEST_CONCURRENCY）；但**默认 1（串行）**——CLI 是 Bun 二进制，每个
+// 进程启动都 burst 一大块 CPU，小实例上并发会把每个 mint 都拖过预算（见
+// harvestConcurrency 注释）。同一 key 始终串行（per-key 锁）。
 // 早期实现共用单一 HOME + 全局锁：11 个 key 首启要串行数分钟（每个失败点还要
 // 3 模型 × 3 次尝试），且每次收割都要覆盖再恢复管理员写在公共 HOME 里的
 // auth.json——恢复一旦失败即丢掉管理员的真实凭据。per-key HOME 两个问题
-// 一起消失：隔离天然并发，且公共 HOME 完全不被触碰。
+// 一起消失：隔离使并发成为可能，且公共 HOME 完全不被触碰。
 //
 // 开关：ZEN_HARVEST=0 关闭（默认开启，需 CLI 存在）；ZEN_HARVEST_BIN 指定
 // CLI 路径（默认 /app/bin/opencode）；ZEN_HARVEST_HOME 指定 CLI HOME 根
 //（默认 /app/.opencode-home）；ZEN_HARVEST_INTERVAL_HOURS 默认 4（见 harvestInterval 注释）；
-// ZEN_HARVEST_CONCURRENCY 默认 3。CLI 认证由收割机自给自足：每次收割把当前
+// ZEN_HARVEST_CONCURRENCY 默认 1（串行）。CLI 认证由收割机自给自足：每次收割把当前
 // key 以单 key 形态写入该 key 专属 HOME 的 auth.json，跑完删除（不落盘留存）。
 
 var (
@@ -319,6 +322,21 @@ func harvestAttemptNote(res harvestRunResult) string {
 	return note
 }
 
+// harvestNoSessionErr 组装"没拿到会话"的错误。真实 run 与桩都会留下 Elapsed，
+// 所以零值结果只能意味着**一次 CLI 都没跑**（每 key 预算在第一次尝试前就耗尽，
+// 比如批次超时 / 任务取消正好卡在写 auth.json 与首次尝试之间）。这种情况绝不
+// 能报 `exit=0 err=<nil>`——那读起来像"CLI 成功但上游没给会话"，会把人引到
+// 上游去查，而这正是本次改动要消掉的那类误导。
+func harvestNoSessionErr(models []string, last harvestRunResult) error {
+	// 逐字段判断：直接比较整个结构体会去比较 Err 接口，动态类型不可比较时 panic。
+	if last.Elapsed == 0 && last.Err == nil && last.ExitCode == 0 && last.Output == "" {
+		return fmt.Errorf("harvest: no session minted (no CLI run started: per-key budget %s was already exhausted; tried %s)",
+			harvestKeyBudget(), strings.Join(models, ", "))
+	}
+	return fmt.Errorf("harvest: no session minted (tried %s; last CLI %s)",
+		strings.Join(models, ", "), harvestAttemptNote(last))
+}
+
 // harvestSession 为指定 key 收割一个新 live 会话：
 // 用该 key 的 zen token 写入**该 key 专属** HOME 的 auth.json，跑最小 run，
 // 从 CLI 日志中提取本次 mint 的 sess_，写入 sticky 表。
@@ -396,8 +414,7 @@ func harvestSession(ctx context.Context, key string) (string, error) {
 		}
 	}
 	if sess == "" {
-		return "", fmt.Errorf("harvest: no session minted (tried %s; last CLI %s)",
-			strings.Join(models, ", "), harvestAttemptNote(last))
+		return "", harvestNoSessionErr(models, last)
 	}
 
 	// 3. 写入 sticky 表（标记 CLI mint 与会话新鲜度：启动扫描不再跳过、
@@ -470,6 +487,10 @@ func cliModelIDs() []string {
 		"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
 		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
 	)
+	// 与 runHarvestCLI 同理：子孙进程继承管道时，ctx 到期只杀得掉直接子进程，
+	// CombinedOutput 会一直等管道关闭。这条调用还额外持有 mintModelsMu（收割
+	// 模型列表缓存），一旦挂住就是整批 key 全卡在锁上——同样用 WaitDelay 兜底。
+	cmd.WaitDelay = 10 * time.Second
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil

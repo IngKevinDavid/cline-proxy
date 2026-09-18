@@ -783,3 +783,22 @@ func TestMintFailureSurfacesCLIOutput(t *testing.T) {
 		t.Fatalf("error does not carry the CLI's own output: %q", msg)
 	}
 }
+
+// 一次 CLI 都没跑起来时，错误里绝不能出现 `exit=0 err=<nil>` 这种零值——那读
+// 起来像"CLI 跑成功了但上游没给会话"，会把排查引到上游去。真实 run 与桩都会
+// 留下 Elapsed，所以零值只可能意味着预算在首次尝试前就耗尽（批次超时 / 取消）。
+func TestNoSessionErrDistinguishesNeverRan(t *testing.T) {
+	never := harvestNoSessionErr([]string{"opencode/big-pickle"}, harvestRunResult{})
+	if contains(never.Error(), "exit=0") || contains(never.Error(), "err=<nil>") {
+		t.Fatalf("zero-value result rendered as a successful run: %q", never.Error())
+	}
+	if !contains(never.Error(), "no CLI run started") {
+		t.Fatalf("never-ran case not named: %q", never.Error())
+	}
+	// 真的跑过（有 Elapsed）时仍要转述 CLI 的输出。
+	ran := harvestNoSessionErr([]string{"opencode/big-pickle"},
+		harvestRunResult{ExitCode: -1, Err: fmt.Errorf("signal: killed"), Elapsed: 60 * time.Second, Output: "killed by timeout"})
+	if !contains(ran.Error(), "exit=-1") || !contains(ran.Error(), "killed by timeout") {
+		t.Fatalf("real run lost its diagnostics: %q", ran.Error())
+	}
+}

@@ -393,7 +393,7 @@ func harvestMissingSessions() {
 }
 
 // harvestOnForbidden 某 key 连续 FreeTier 403 时调用：阈值（默认连续 2 次）
-// 达到后后台收割新会话。同步返回（收割本身串行快，失败不阻塞请求）。
+// 达到后后台收割新会话。调用方以 `go harvestOnForbidden(key)` 触发，失败不阻塞请求。
 // 前 1 次 403 只计数不收割（避免瞬态 403 触发 CLI 子进程）；连续第 2 次
 // 才真正收割——403 路径不再做本地随机轮换（随机 sess_ 必 403，见
 // zen_session.go 顶部注释），恢复唯一靠这里 mint 真会话。
@@ -401,19 +401,24 @@ func harvestOnForbidden(key string) {
 	if !harvestEnabled() {
 		return
 	}
+	// "public" 是"无 key"哨兵，不是真凭据：收割会往 auth.json 写入
+	// {"opencode":{"type":"api","key":"public"}} 覆盖管理员的真实凭据，并起一个
+	// 注定失败的 CLI 子进程。同族函数 harvestMissingSessions / 周期收割都已跳过它。
+	if key == "" || key == "public" {
+		return
+	}
+
+	// 计数、阈值、冷却判定与时间戳必须在一个临界区内完成。拆成两段会让同一
+	// 会话失效引发的 N 个并发 403 全部读到"还没收割过"，于是 N 个 goroutine
+	// 各起一次 CLI 收割（每次最多 3 模型 × 3 次尝试、150s 超时），把子进程
+	// 排成一条长队。
 	harvestMu.Lock()
 	harvestFails[key]++
 	n := harvestFails[key]
-	last := harvestLastTry[key]
-	harvestMu.Unlock()
-
-	if n < 2 {
-		return // 前 1 次仅计数：瞬态 403 不收割
+	if n < 2 || time.Since(harvestLastTry[key]) < 10*time.Minute {
+		harvestMu.Unlock()
+		return
 	}
-	if time.Since(last) < 10*time.Minute {
-		return // 冷却：同 key 10 分钟内只收割一次
-	}
-	harvestMu.Lock()
 	harvestLastTry[key] = time.Now()
 	harvestMu.Unlock()
 
@@ -433,4 +438,37 @@ func harvestMarkSuccess(key string) {
 	harvestMu.Lock()
 	delete(harvestFails, key)
 	harvestMu.Unlock()
+}
+
+// pruneZenKeyState 配置变更后清理已移除 key 的运行时状态（会话粘性 + 收割计数）。
+// valid 为当前有效 key 集合。
+func pruneZenKeyState(valid map[string]bool) {
+	harvestMu.Lock()
+	for k := range harvestFails {
+		if !valid[k] {
+			delete(harvestFails, k)
+		}
+	}
+	for k := range harvestLastTry {
+		if !valid[k] {
+			delete(harvestLastTry, k)
+		}
+	}
+	harvestMu.Unlock()
+
+	zenSessMu.Lock()
+	removed := 0
+	for k := range zenSessions {
+		if !valid[k] {
+			delete(zenSessions, k)
+			removed++
+		}
+	}
+	if removed > 0 {
+		saveZenSessionsLocked()
+	}
+	zenSessMu.Unlock()
+	if removed > 0 {
+		log.Printf("zen sessions pruned: %d removed key(s)", removed)
+	}
 }

@@ -669,16 +669,12 @@ const fmtNum = n => (n || 0).toLocaleString('en-US');
 // fmtWhen 把服务器发来的 RFC3339 时刻渲染成浏览器的本地时间（同一时刻在不同
 // 时区看到各自的钟点）。容器时区是 UTC，直接显示服务器格式化的读数会和本地
 // 时间差一个时差；解析失败则原样返回，至少不丢信息。
+// 零值时间（Go 的 time.Time{} = 0001-01-01T00:00:00Z）视为"没有这个时刻"：
+// 它是 truthy，会被 new Date 解析成年份 1 并渲染成 "1/1/1, 12:00:00 AM"。
 const fmtWhen = s => {
-  if (!s) return '';
+  if (!s || String(s).startsWith('0001-')) return '';
   const d = new Date(s);
   return isNaN(d.getTime()) ? s : d.toLocaleString('en-US');
-};
-// fmtClock 同上，只显示钟点（用于几分钟级的短冷却）
-const fmtClock = s => {
-  if (!s) return '';
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? s : d.toLocaleTimeString('en-US');
 };
 const fmtTokens = n => {
   n = n || 0;
@@ -825,11 +821,13 @@ async function testAccount(id, btn) {
     const statusMap = { active: 'Available', cooldown: 'Cooldown', expired: 'Expired', error: 'Error' };
     const label = statusMap[r.status] || r.status;
     const prevMap = { active: 'Active', cooldown: 'Cooldown', expired: 'Expired', '': '' };
-    let msg = 'Account ' + esc(r.email || '') + ' — ' + label;
+    // toast 用 textContent 渲染，参数一律不要再 esc()：转义会以字面量显示
+    //（429 的错误体就变成可见的 &quot;error&quot;:…）
+    let msg = 'Account ' + (r.email || '') + ' — ' + label;
     if (r.prevStatus && r.prevStatus !== r.status) msg += ' (was: ' + (prevMap[r.prevStatus] || r.prevStatus) + ')';
-    if (r.cooldownUntil) msg += '\nEstimated recovery: ' + esc(fmtWhen(r.cooldownUntil));
-    if (r.remaining) msg += ' (remaining ' + esc(r.remaining) + ')';
-    if (r.reason) msg += '\nReason: ' + esc(r.reason);
+    if (r.cooldownUntil) msg += '\nEstimated recovery: ' + fmtWhen(r.cooldownUntil);
+    if (r.remaining) msg += ' (remaining ' + r.remaining + ')';
+    if (r.reason) msg += '\nReason: ' + r.reason;
     if (r.httpStatus) msg += '\nHTTP: ' + r.httpStatus;
     const type = r.status === 'active' ? 'success' : (r.status === 'cooldown' ? 'warning' : 'error');
     toast(msg, type, 6000);
@@ -859,9 +857,10 @@ async function resetAccount(id, btn) {
     const type = d.success ? 'success' : (r.status === 'cooldown' ? 'warning' : 'error');
     let msg = d.message || 'Check complete';
     // 恢复时刻与剩余时长都由面板渲染：服务器发的是 RFC3339 时刻（浏览器本地
-    // 时区显示），remaining 只在这里加一次，避免与服务器消息重复
-    if (r.cooldownUntil && r.status === 'cooldown') msg += ' (estimated recovery ' + esc(fmtWhen(r.cooldownUntil)) + ')';
-    if (r.remaining && r.status !== 'active') msg += ' (remaining ' + esc(r.remaining) + ')';
+    // 时区显示），remaining 只在这里加一次，避免与服务器消息重复。
+    // toast 走 textContent，不要再 esc()（会显示成字面量 &quot;）
+    if (r.cooldownUntil && r.status === 'cooldown') msg += ' (estimated recovery ' + fmtWhen(r.cooldownUntil) + ')';
+    if (r.remaining && r.status !== 'active') msg += ' (remaining ' + r.remaining + ')';
     toast(msg, type, 6000);
     loadAccounts(); loadStats();
   } catch (e) {
@@ -1342,7 +1341,7 @@ async function loadProxyPool() {
     const cd = (c.runtime || {}).proxyCooldowns || {};
     const keys = Object.keys(cd);
     _('ppCooldownInfo').textContent = keys.length
-      ? keys.map(k => k + ' cooldown until ' + fmtClock(cd[k])).join('; ')
+      ? keys.map(k => k + ' cooldown until ' + fmtWhen(cd[k])).join('; ')
       : 'No proxies cooling down';
   } catch (e) { /* ignore */ }
 }

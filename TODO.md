@@ -361,3 +361,98 @@ degrade to gateway-only, as harvestEnabled() already documented.
 Verified end to end: both CI jobs green, manifest publishes amd64 + arm64,
 and the pulled `ghcr.io/foxy1402/cline-proxy:latest` arm64 image boots with
 /health ok and its embedded CLI printing 1.18.31.
+
+## Whole-codebase audit (2026-09-18) — findings, fixes, and settled trade-offs
+
+Four parallel audit agents covered the tree (~14.7k lines) partitioned by
+subsystem: zen path, proxy + cline_stream, admin/panel/pool, responses +
+compact + kit. Every P0/P1 was re-verified against the code before patching;
+each fix below was then re-verified in a container against the real upstreams
+(21/21 behaviour regression + 8/8 new patch cases).
+
+### P0 — features that were dead or destructive in production
+- **cline "requires stream" self-learning never fired.** `callClineAPI` returns
+  a nil response for every non-200 (body read and closed), but
+  `callClineAutoStream` only sniffed the body when it got a 500 *response* —
+  a shape the real callee cannot produce. The unit test passed because the
+  fake upstream returned `(500 response, nil error)`. Fixed by adding a typed
+  `clineAPIError{Status, Body}` and classifying by status, and by rewriting
+  the test fake to mirror the real contract. A new end-to-end test drives the
+  **real** `callClineAPI` against a local upstream (injectable `clineAPIBase`).
+- **"Refresh all tokens" expired every static-key account.** The admin loop
+  called `refreshAccountToken` for all accounts; `doRefreshAccountToken` marks
+  any `APIToken` account `expired` ("static key cannot refresh"). The startup
+  prewarm already guarded this, the admin path did not. Now skips them and
+  reports the count.
+- **A transient zen 500 permanently misrouted a model.** `isWrongEndpoint`
+  substring-matched the whole error text against a keyword list containing
+  `"no such"` and `"endpoint"` — and Go's DNS failure text is "dial tcp:
+  lookup …: no such host", so one network blip was learned and persisted as
+  "this model needs /responses", which the catalog sync never rewrites.
+  Classification is now status-code based (`zenHTTPError`), and 502/503/504
+  are excluded.
+- **Learning now requires the retry to succeed.** Probing live showed
+  muse-spark returning a bare 500 on its *correct* responses endpoint twice in
+  five minutes, so a bare 500 is not proof of a wrong endpoint.
+  `handleZenResponsesNative` returns whether the request was actually served,
+  and the flip is persisted only then.
+
+### P1 — silently wrong behaviour
+- SSE-level `error` events were swallowed by `collectStreamResponse` (empty
+  200 instead of an error).
+- `emitChatAsSSE` sliced content at byte 2048, splitting multi-byte runes into
+  U+FFFD; it now retreats to a rune boundary. Verified live with 372 CJK
+  characters over the SSE path (0 replacement chars).
+- `chatStreamToResponses` sent `response.completed` with empty output when the
+  upstream answered 200 with a non-SSE JSON body; it now emits
+  `response.failed`, matching `collectStreamResponse`.
+- The zen Anthropic non-stream path skipped `truncateAtStopSequences`, so
+  `stop_sequences` silently did not apply there.
+- `ZenModel` fields were mutated in place while request paths read the same
+  pointer outside the lock. Writers now use copy-on-write and the invariant is
+  documented on the type.
+- `harvestOnForbidden` did a split check-and-set (N concurrent 403s each
+  spawned a CLI harvest) and did not skip the `"public"` sentinel, so it would
+  overwrite the admin's real `auth.json` credential with `key:"public"`.
+- `Retries` had no cap: `delay *= 2` overflowed to a negative duration and
+  retries became a no-backoff hot loop. Now capped at 30s via
+  `zenRetryDelay`.
+- `buildTransport` set no `TLSHandshakeTimeout`/`ResponseHeaderTimeout`, so a
+  hung upstream could hold all 8 zen semaphore slots forever. Set to 15s/5min
+  — **5 minutes, not 90s**, because this transport is shared with cline, whose
+  non-stream requests legitimately take minutes to first byte. Deliberately a
+  guard against "never responds", not a latency budget.
+- `ADMIN_PASSWORD_FILE` / `API_KEY_FILE` failed **open**: if the file became
+  unreadable at runtime the value became "" (meaning "not configured"), which
+  disabled panel auth and made `/v1` fall through to "no key required". Both
+  now return a per-process random un-matchable sentinel, logging once.
+- `collectStreamResponse` never closed the response body (its sibling
+  `responsesSSEToChat` always did).
+- `fallbackTruncate` `continue`d past non-fitting messages, keeping older
+  history and dropping the newest turn; it now breaks, keeping a contiguous
+  tail.
+- `compactThreshold` had no floor, so a small-window model with a large
+  declared output re-summarised on every single turn.
+- `/v1/responses` ignored the admin "zen disabled" switch; the `429` panel
+  toast double-escaped (showing `&quot;error&quot;:` literally), zero times
+  rendered as year 1, and proxy cooldowns used a clock-only formatter for
+  cooldowns that can reach 24h.
+- `getNested` accepted negative indices (latent panic).
+
+### Settled trade-offs (do not re-propose)
+- **Endpoint learning is confirmation-based, not fingerprint-based.** An extra
+  retry per request for the affected model, in exchange for never
+  permanently misrouting a healthy model. Rejected alternatives: trusting a
+  bare 500 (disproved live), and sniffing `provider.npm` from the catalog
+  (23 of 29 free models have no npm field, no pattern).
+- **`ResponseHeaderTimeout` stays at 5 minutes.** A tighter value would break
+  cline's legitimate long non-stream generations; the goal is only to break
+  the "accepts the connection and never answers" case.
+- **Secret files seal instead of falling back.** An explicit `ADMIN_PASSWORD`
+  is still ignored while `ADMIN_PASSWORD_FILE` is set but unreadable — this is
+  intentional: a broken secret mount must not silently downgrade auth.
+- **The cline naming convention stays** (`":" ⇒ no forced stream) and learning
+  remains one-directional: a false positive only costs one server-side
+  aggregation, a false negative is what the learning path exists to repair.
+- **`zenSessions` / harvest counters are pruned on key removal**; the learn
+  cooldown map is not (bounded by the model count, which the catalog sync owns).

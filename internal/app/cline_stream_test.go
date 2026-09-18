@@ -19,6 +19,13 @@ func fakeUpstream(status int, body string) *http.Response {
 	}
 }
 
+// 假上游必须复刻 callClineAPI 的真实契约：非 200 时返回 nil 响应 + *clineAPIError
+//（响应体在 callee 里已读尽并关闭）。早期版本返回 (500 响应, nil error) —— 那是
+// 生产里不存在的形态，导致学习逻辑在真实上游面前永远不会触发。
+func fakeUpstreamErr(status int, body string) (*http.Response, *Account, error) {
+	return nil, &Account{Email: "err@x"}, &clineAPIError{Status: status, Body: body}
+}
+
 // 非流式请求撞上"500 empty response content"时：学习该模型 + 立刻改用流式重试，
 // 并把 streamed=true 交回调用方（调用方据此走聚合路径）。这正是命名约定漏判时
 // 用户唯一会碰到的失败形态，必须自动愈合。
@@ -35,7 +42,7 @@ func TestCallClineAutoStreamLearnsAndRetries(t *testing.T) {
 	clineCallFn = func(ctx context.Context, params map[string]any, stream, useProxies bool) (*http.Response, *Account, error) {
 		seenStream = append(seenStream, stream)
 		if !stream {
-			return fakeUpstream(500, `{"error":"empty response content","success":false}`), &Account{Email: "first@x"}, nil
+			return fakeUpstreamErr(500, `{"error":"empty response content","success":false}`)
 		}
 		return fakeUpstream(200, "data: {\"choices\":[]}\n\n"), &Account{Email: "second@x"}, nil
 	}
@@ -66,7 +73,8 @@ func TestCallClineAutoStreamLearnsAndRetries(t *testing.T) {
 	}
 }
 
-// 重试也失败时：交回原始 500（调用方照旧报上游错误），且不谎报 streamed。
+// 重试也失败时：交回第一次的错误（调用方照旧报上游错误），且不谎报 streamed；
+// 模型仍被学习，因此后续请求不会再走这条非流式失败路径。
 func TestCallClineAutoStreamRetryFailureKeepsOriginalError(t *testing.T) {
 	t.Setenv("DATA_DIR", t.TempDir())
 	clineStreamMu.Lock()
@@ -77,22 +85,27 @@ func TestCallClineAutoStreamRetryFailureKeepsOriginalError(t *testing.T) {
 	defer func() { clineCallFn = orig }()
 	clineCallFn = func(ctx context.Context, params map[string]any, stream, useProxies bool) (*http.Response, *Account, error) {
 		if !stream {
-			return fakeUpstream(500, `{"error":"empty response content"}`), &Account{Email: "a@x"}, nil
+			return fakeUpstreamErr(500, `{"error":"empty response content"}`)
 		}
 		return nil, nil, context.DeadlineExceeded
 	}
 
 	params := map[string]any{"model": "z-ai/glm-5.3-flash"}
 	resp, _, streamed, err := callClineAutoStream(context.Background(), params, false, false)
-	if err != nil {
-		t.Fatalf("original response should be handed back, got err=%v", err)
+	if err == nil {
+		t.Fatal("retry failure must surface the upstream error, got nil")
 	}
 	if streamed {
 		t.Fatal("streamed must be false when the retry never produced a stream")
 	}
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 500 || !strings.Contains(string(body), "empty response content") {
-		t.Fatalf("original 500 body must survive: status=%d body=%s", resp.StatusCode, body)
+	if resp != nil {
+		t.Fatal("no response body exists for a non-200 upstream reply")
+	}
+	if !strings.Contains(err.Error(), "empty response content") {
+		t.Fatalf("the first failure should be reported, got %v", err)
+	}
+	if !clineStreamRequired("z-ai/glm-5.3-flash") {
+		t.Fatal("model must still be learned even when the retry failed")
 	}
 }
 
@@ -108,13 +121,13 @@ func TestCallClineAutoStreamIgnoresPlain500(t *testing.T) {
 	calls := 0
 	clineCallFn = func(ctx context.Context, params map[string]any, stream, useProxies bool) (*http.Response, *Account, error) {
 		calls++
-		return fakeUpstream(500, `{"error":"Internal server error"}`), &Account{Email: "a@x"}, nil
+		return fakeUpstreamErr(500, `{"error":"Internal server error"}`)
 	}
 
 	params := map[string]any{"model": "z-ai/glm-5.3-flash"}
 	_, _, streamed, err := callClineAutoStream(context.Background(), params, false, false)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("plain 500 must still be an error")
 	}
 	if streamed || calls != 1 {
 		t.Fatalf("plain 500 must pass through untouched: streamed=%v calls=%d", streamed, calls)

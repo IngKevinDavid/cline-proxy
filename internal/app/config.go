@@ -1,10 +1,14 @@
 package app
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"strings"
+	"sync"
 )
 
 // 环境变量配置层。优先级：显式命令行 flag > 环境变量 > 内置默认值。
@@ -90,26 +94,80 @@ func envList(key string) []string {
 
 // APIKeyEnv 返回 /v1 接口的固定 API key：API_KEY_FILE（docker secrets，
 // 整个文件内容去除首尾空白）优先，其次 API_KEY。均未设置返回 ""。
+// 文件已配置却不可读/为空时返回不可匹配的哨兵（fail closed，见 readSecretFileEnv）。
 func APIKeyEnv() string {
-	if path := envStr("API_KEY_FILE"); path != "" {
-		if data, err := os.ReadFile(path); err == nil {
-			if k := strings.TrimSpace(string(data)); k != "" {
-				return k
-			}
-		}
+	if v, ok := readSecretFileEnv("API_KEY_FILE", "/v1 API key"); ok {
+		return v
 	}
 	return envStr("API_KEY")
 }
 
+// sealedSecretValue 哨兵：secret 文件已配置但读不到（权限变更、secret 轮换、
+// 挂载丢失）或内容为空时，用它代替"空值"，让依赖"空=未配置"的判定全部失效为
+// fail-closed 而不是 fail-open。
+//
+// 两处失效点（都只在启动时检查过一次，运行中失效不会被发现）：
+//   - ADMIN_PASSWORD_FILE 读不到 → 密码为空 → AdminAuthRequired()=false →
+//     公网面板静默免认证。
+//   - API_KEY_FILE 读不到 → key 为空 → /v1 回落到"动态 key 列表为空则放行" →
+//     公网 /v1 静默免认证。
+//
+// 每进程随机而非固定串：固定串等于一个公开密码，知道这个常量就能在读不到文件时
+// 照样通过校验。随机值没有任何来源可提交，因此请求一律 401/拒绝。
+var sealedSecretValue = func() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		// 熵源不可用属极端情况：退化为含 NUL 的值（表单与 JSON 都无法承载），
+		// 而不是一个可被猜测的普通字符串
+		return "\x00sealed-secret\x00"
+	}
+	return hex.EncodeToString(b)
+}()
+
+var (
+	sealedLogMu     sync.Mutex
+	sealedLoggedFor = map[string]bool{}
+)
+
+// logSealedOnce 同一 secret 只记一次日志：AdminPasswordEnv 每个管理请求都会重新
+// 读文件，挂载损坏时按请求刷屏没有意义。
+func logSealedOnce(what, detail string) {
+	sealedLogMu.Lock()
+	first := !sealedLoggedFor[detail]
+	sealedLoggedFor[detail] = true
+	sealedLogMu.Unlock()
+	if first {
+		log.Printf("secret file: %s (%s); refusing to treat it as \"not configured\" — "+
+			"requests needing it stay rejected until the file is readable again", detail, what)
+	}
+}
+
+// readSecretFileEnv 读取 fileEnvVar 指向的 secret 文件。
+// ok=false 表示该 FILE 变量未配置，调用方回退到普通环境变量；
+// ok=true 时返回值一定非空（要么是文件内容，要么是不可匹配的哨兵）。
+func readSecretFileEnv(fileEnvVar, what string) (string, bool) {
+	path := envStr(fileEnvVar)
+	if path == "" {
+		return "", false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		logSealedOnce(what, fmt.Sprintf("%s=%s unreadable: %v", fileEnvVar, path, err))
+		return sealedSecretValue, true
+	}
+	if v := strings.TrimSpace(string(data)); v != "" {
+		return v, true
+	}
+	logSealedOnce(what, fmt.Sprintf("%s=%s is empty", fileEnvVar, path))
+	return sealedSecretValue, true
+}
+
 // AdminPasswordEnv 解析管理密码：ADMIN_PASSWORD_FILE（docker secrets，整个文件
 // 内容去除首尾空白）优先，其次 ADMIN_PASSWORD。均未设置返回 ""。
+// 文件已配置却不可读/为空时返回不可匹配的哨兵（fail closed，见 readSecretFileEnv）。
 func AdminPasswordEnv() string {
-	if path := envStr("ADMIN_PASSWORD_FILE"); path != "" {
-		if data, err := os.ReadFile(path); err == nil {
-			if pw := strings.TrimSpace(string(data)); pw != "" {
-				return pw
-			}
-		}
+	if v, ok := readSecretFileEnv("ADMIN_PASSWORD_FILE", "admin panel password"); ok {
+		return v
 	}
 	return envStr("ADMIN_PASSWORD")
 }

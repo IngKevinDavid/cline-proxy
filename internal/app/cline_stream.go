@@ -4,7 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -51,6 +52,18 @@ func clineEmptyStreamErr(status int, body []byte) bool {
 	return bytes.Contains(bytes.ToLower(body), []byte("empty response content"))
 }
 
+// clineAPIError cline 上游的非 200 答复。callClineAPI 对非 200 会读尽并关闭响应体
+// 后返回 error，调用方拿不到 *http.Response；但"该模型必须流式"的判定只需要状态码
+// + 错误体，用类型化错误把它们带出来即可，无需改动"非 200 返回 nil 响应"的既有约定。
+type clineAPIError struct {
+	Status int
+	Body   string
+}
+
+func (e *clineAPIError) Error() string {
+	return fmt.Sprintf("API %d: %s", e.Status, e.Body)
+}
+
 // clineStreamRequired 该模型是否已被学习为"必须流式"。
 func clineStreamRequired(modelID string) bool {
 	clineStreamMu.RLock()
@@ -65,16 +78,24 @@ func learnClineStreamRequired(modelID string) {
 		return
 	}
 	clineStreamMu.Lock()
-	defer clineStreamMu.Unlock()
 	if clineStreamLearned == nil {
 		clineStreamLearned = map[string]string{}
 	}
 	if _, ok := clineStreamLearned[modelID]; ok {
+		clineStreamMu.Unlock()
 		return
 	}
 	clineStreamLearned[modelID] = time.Now().Format(time.RFC3339)
+	// 持锁只做内存改动：写盘是慢 I/O，快照出去在锁外做，避免阻塞并发请求的
+	// modelNeedsStream 读路径。
+	snapshot := make(map[string]string, len(clineStreamLearned))
+	for k, v := range clineStreamLearned {
+		snapshot[k] = v
+	}
+	clineStreamMu.Unlock()
+
 	log.Printf("cline stream learned: model=%s requires stream=true (persisted)", modelID)
-	saveClineStreamLocked()
+	saveClineStream(snapshot)
 }
 
 // loadClineStreamLearned 启动时恢复学习结果。
@@ -97,10 +118,10 @@ func loadClineStreamLearned() {
 	}
 }
 
-// saveClineStreamLocked 原子写盘（调用方持锁）。写失败只记日志不阻断请求——
+// saveClineStream 原子写盘（入参是不持锁的快照）。写失败只记日志不阻断请求——
 // 学习结果是优化项，丢失只会让下一次非流式请求再付一次重试代价。
-func saveClineStreamLocked() {
-	data, err := json.MarshalIndent(clineStreamLearned, "", "  ")
+func saveClineStream(learned map[string]string) {
+	data, err := json.MarshalIndent(learned, "", "  ")
 	if err != nil {
 		return
 	}
@@ -125,18 +146,14 @@ var clineCallFn = callClineAPI
 // 只有非流式请求才探测：客户端本来就要流式时无需任何判断。
 func callClineAutoStream(ctx context.Context, params map[string]any, stream, useProxies bool) (*http.Response, *Account, bool, error) {
 	resp, acc, err := clineCallFn(ctx, params, stream, useProxies)
-	if err != nil || stream || resp == nil {
+	// 只看非流式请求的失败：流式请求不会被这条约定拒绝，成功响应（resp != nil）照旧直通。
+	if err == nil || stream || resp != nil {
 		return resp, acc, false, err
 	}
-	// 只窥探错误体（几十字节），且读前限长；正常 200 响应体可能很大，不碰。
-	if resp.StatusCode != http.StatusInternalServerError {
-		return resp, acc, false, nil
-	}
-	body, rerr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	resp.Body.Close()
-	resp.Body = io.NopCloser(bytes.NewReader(body))
-	if rerr != nil || !clineEmptyStreamErr(resp.StatusCode, body) {
-		return resp, acc, false, nil
+	// callClineAPI 对非 200 返回的是 nil 响应 + clineAPIError；指纹只在其中。
+	var apiErr *clineAPIError
+	if !errors.As(err, &apiErr) || !clineEmptyStreamErr(apiErr.Status, []byte(apiErr.Body)) {
+		return resp, acc, false, err
 	}
 
 	model, _ := params["model"].(string)
@@ -146,8 +163,8 @@ func callClineAutoStream(ctx context.Context, params map[string]any, stream, use
 
 	resp2, acc2, err2 := clineCallFn(ctx, params, true, useProxies)
 	if err2 != nil {
-		// 重试连不上：交回原始 500，调用方照旧报错
-		return resp, acc, false, nil
+		// 重试也失败：把第一次的错误照旧上报（模型已学会，下一个请求直接走流式）
+		return nil, acc, false, err
 	}
 	if acc2 != nil {
 		acc = acc2

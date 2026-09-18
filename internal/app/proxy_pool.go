@@ -142,15 +142,6 @@ func maskProxyURL(raw string) string {
 	return u.String()
 }
 
-func buildZenTransport() *http.Transport {
-	// 共享 zenHTTPClient 现仅作为直连兜底（如模型同步）；带代理的请求
-	// 走 proxyClientFor() 按次钉定代理。拨号不再隐式挑选代理。
-	return buildTransport(func(ctx context.Context, network, addr string) (net.Conn, error) {
-		d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
-		return d.DialContext(ctx, network, addr)
-	})
-}
-
 // buildTransport 构造 Bun/BoringSSL 指纹(h1,官方 CLI 实测只用 http/1.1)+
 // 可注入拨号的 Transport。注意: Bun 指纹 ALPN 只报 http/1.1,握手协商出 h1,
 // 因此不能再 RegisterProtocol("https"→h2),否则 h2 帧解析器会对 h1 明文
@@ -161,6 +152,15 @@ func buildTransport(dial func(ctx context.Context, network, addr string) (net.Co
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  false,
+		// 上游"接受连接后不再回任何字节"时必须能自愈。这条 transport 同时服务
+		// zen 与 cline：zen 恒 stream=true（首字节很快），但 cline 的非流式请求
+		// 上游要等生成完成才发响应头，长生成合法地可能好几分钟 —— 所以取 5 分钟
+		// 这个"远超正常首字节、又远小于永久"的值，而不是 90s 那种会砍掉正常请求
+		// 的激进值。此前完全不设，一个挂死的上游能让 zen 的 MaxConcurrency(默认 8)
+		// 槽位被永久占满、整条 zen 链路停摆。
+		// 只限握手与响应头，不影响 SSE 响应体的长读取。
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 5 * time.Minute,
 	}
 	t.DialContext = dial
 	t.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {

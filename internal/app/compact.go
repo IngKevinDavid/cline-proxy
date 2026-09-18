@@ -380,7 +380,7 @@ func maybeCompact(params map[string]any, m *ZenModel, sessionID string) compactO
 		maxSum = summaryOutputTokens
 	}
 
-	threshold := context - max(output, buffer)
+	threshold := compactThreshold(context, output, buffer)
 	if estimateJSON(params) <= threshold {
 		return compactOutcome{}
 	}
@@ -521,6 +521,20 @@ func findExistingSummary(messages []any, upTo int) string {
 	return ""
 }
 
+// compactThreshold 触发压缩的估算 token 阈值。
+//
+// 下限兜底：目录/overlay 的 output 声明若不小于 context（小窗口模型配默认 32768
+// output 就会这样），threshold 会算成 0 或负数 —— 于是每个请求都判定"需要压缩"，
+// 而压缩又永远降不到阈值以下，形成每次请求都多跑一次摘要模型的循环。至少给输入
+// 留一半窗口。
+func compactThreshold(context, output, buffer int) int {
+	threshold := context - max(output, buffer)
+	if threshold < context/2 {
+		return context / 2
+	}
+	return threshold
+}
+
 // fallbackTruncate 摘要失败时退回老式截断: 保留 system + 尾部消息至 60% 预算
 func fallbackTruncate(params map[string]any, m *ZenModel) compactOutcome {
 	messages, _ := params["messages"].([]any)
@@ -565,7 +579,11 @@ func fallbackTruncate(params map[string]any, m *ZenModel) compactOutcome {
 			t += estimateJSON(tc)
 		}
 		if used+t > budget {
-			continue
+			// 放不下就停：从尾部往前扫，一旦超预算即结束，保证保留的是**连续尾部**。
+			// 早先这里是 continue —— 跳过放不下的继续找更老的，结果会在会话中间
+			// 挖洞（保留 0..3 和 20..25，丢掉 4..19），模型看到的是断裂且无提示的
+			// 历史；更糟的是最新一轮的上下文（最相关）常被更古老的记忆挤掉。
+			break
 		}
 		kept = append(kept, idxMsg{i, messages[i]})
 		used += t

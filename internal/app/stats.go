@@ -65,6 +65,20 @@ func newZenStatsTracker(rec zenStatsRecord) *zenStatsTracker {
 	return &zenStatsTracker{rec: rec, started: time.Now()}
 }
 
+// zenUsageFn 统计回调：从上游 usage 取 completion_tokens 记进本次记录。
+// 供没有 accountUsageFn（那是 cline 账号记账）的 zen 聚合路径使用 ——
+// 这类路径此前传 nil，token 用量从不入统计。
+func zenUsageFn(t *zenStatsTracker) func(map[string]any) {
+	if t == nil {
+		return nil
+	}
+	return func(u map[string]any) {
+		if ct, ok := u["completion_tokens"].(float64); ok {
+			t.rec.CompletionTokens = int(ct)
+		}
+	}
+}
+
 func (t *zenStatsTracker) finish(ok bool, status int) {
 	if t.finished {
 		return

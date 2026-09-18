@@ -599,12 +599,34 @@ func handleAdminRefreshAll(w http.ResponseWriter, r *http.Request) {
 	poolMu.Lock()
 	accounts := append([]*Account(nil), p.Accounts...)
 	poolMu.Unlock()
+	refreshed, skipped, failed := 0, 0, 0
 	for _, a := range accounts {
+		// 静态 key（APIToken）没有刷新能力：doRefreshAccountToken 会直接把账号判为
+		// expired。启动预热早已按这条规则跳过它们（见 proxy.go 的 prewarm），这里是
+		// 同一规则——否则面板上点一次"刷新全部 token"就会作废所有 sk_ 账号。
+		if a.APIToken != "" {
+			skipped++
+			continue
+		}
 		if err := refreshAccountToken(a); err != nil {
 			log.Printf("Refresh failed for %s: %v", a.Email, err)
+			failed++
+			continue
 		}
+		refreshed++
 	}
-	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "All tokens refreshed"})
+	msg := fmt.Sprintf("Refreshed %d token(s)", refreshed)
+	if skipped > 0 {
+		msg += fmt.Sprintf(", skipped %d static api key account(s)", skipped)
+	}
+	if failed > 0 {
+		msg += fmt.Sprintf(", %d failed", failed)
+	}
+	writeAPI(w, http.StatusOK, apiResponse{
+		Success: true,
+		Message: msg,
+		Data:    map[string]any{"refreshed": refreshed, "skipped": skipped, "failed": failed},
+	})
 }
 
 // POST /admin/api/accounts/delete-all
@@ -731,9 +753,11 @@ func handleAdminAccountTest(w http.ResponseWriter, r *http.Request) {
 // 都会尝试刷新 Token 并发起一次真实探测；成功则清除所有异常状态。
 // 返回的 status: active / cooldown / expired / error
 func testAccount(acc *Account) (map[string]any, string) {
+	// 状态快照必须在池锁内取：探测可能持续数秒，期间刷新协程/其他请求会改写
+	// 同一结构体，锁外读是数据竞争。
+	poolMu.Lock()
 	prevStatus := acc.Status
-	prevCooldownUntil := acc.CooldownUntil
-	_ = prevCooldownUntil
+	poolMu.Unlock()
 
 	// 取 token（expired/cooldown 也尝试刷新，测试按钮不因状态直接拒绝）
 	token, err := ensureAccountToken(acc)
@@ -789,10 +813,10 @@ func testAccount(acc *Account) (map[string]any, string) {
 		reason := "network error: " + err.Error()
 		until := markAccountCooldown(acc, reason, 5*time.Minute)
 		return map[string]any{
-			"accountId":     acc.AccountID,
-			"email":         acc.Email,
-			"status":        "cooldown",
-			"reason":        reason,
+			"accountId": acc.AccountID,
+			"email":     acc.Email,
+			"status":    "cooldown",
+			"reason":    reason,
 			// RFC3339（带时区）：面板用 new Date(...).toLocaleString() 渲染成浏览器本地时间；
 			// 服务器格式化只能给出容器时区读数，同一时刻会显示成两个钟点
 			"cooldownUntil": until.UTC().Format(time.RFC3339),
@@ -813,10 +837,10 @@ func testAccount(acc *Account) (map[string]any, string) {
 		until := markAccountCooldown(acc, reason, duration)
 		log.Printf("Test hit 429 on %s, cooldown %v", truncateEmail(acc.Email), duration)
 		return map[string]any{
-			"accountId":     acc.AccountID,
-			"email":         acc.Email,
-			"status":        "cooldown",
-			"reason":        reason,
+			"accountId": acc.AccountID,
+			"email":     acc.Email,
+			"status":    "cooldown",
+			"reason":    reason,
 			// RFC3339（带时区）：面板用 new Date(...).toLocaleString() 渲染成浏览器本地时间；
 			// 服务器格式化只能给出容器时区读数，同一时刻会显示成两个钟点
 			"cooldownUntil": until.UTC().Format(time.RFC3339),

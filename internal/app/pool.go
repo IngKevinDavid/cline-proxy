@@ -256,10 +256,14 @@ func refreshAccountToken(acc *Account) error {
 	refreshFlight[acc] = c
 	refreshFlightMu.Unlock()
 
-	c.err = doRefreshAccountToken(acc)
-	// panic 安全: 中途 panic 也要 close(done)，否则该账号的所有后续
-	// 刷新调用方会永久阻塞在 <-c.done 上
-	defer close(c.done)
+	// panic 安全：中途 panic 也要唤醒等待者，否则它们永久阻塞在 <-c.done 上。
+	// close 必须在"从表里删除"之前完成：先删后 close 会开出一个窗口，期间的
+	// 到达者看不到在飞的调用，于是再发一次刷新 —— 而 cline 的 refresh token
+	// 是轮换型的，第二次刷新必然用旧 token 失败，把活着的账号误标 expired。
+	func() {
+		defer close(c.done)
+		c.err = doRefreshAccountToken(acc)
+	}()
 
 	refreshFlightMu.Lock()
 	delete(refreshFlight, acc)

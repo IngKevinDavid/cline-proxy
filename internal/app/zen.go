@@ -20,6 +20,13 @@ import (
 )
 
 // ZenModel opencode zen 免费模型定义
+// ZenModel zen 模型条目。
+//
+// 并发约定（重要）：写者（initZenModels / applyZenCatalog / learnZenEndpoint /
+// loadZenEndpoints）一律在 zenModelsMu 下"改副本再挂回"，绝不就地改写已发布的
+// 结构体。因此 resolveZenModel 返回的指针在锁外可安全读取任意字段——请求路径
+// 正是在锁外读 Upstream/Source/Context。新增写者必须遵守 copy-on-write，否则
+// 就是与请求路径的数据竞争。
 type ZenModel struct {
 	ID        string   `json:"id"`
 	Aliases   []string `json:"aliases,omitempty"`
@@ -154,19 +161,6 @@ func routeModel(id string) string {
 				return "zen"
 			}
 		} else {
-			return "reject"
-		}
-	}
-	if strings.HasPrefix(id, "opencode/") {
-		short := strings.TrimPrefix(id, "opencode/")
-		if zm, ok := resolveZenModel(short); ok {
-			if isZenFreeModel(zm) {
-				if cfg.Failover && zenFailedNow() {
-					log.Printf("  failover: zen degraded, %q routed to cline pool", id)
-					return "cline"
-				}
-				return "zen"
-			}
 			return "reject"
 		}
 	}
@@ -408,6 +402,10 @@ func setZenConfig(c *zenConfigData) {
 	}
 	zenKeyIdx = 0
 	zenKeyMu.Unlock()
+	// 会话粘性与收割计数同样按 key 存储，移除的 key 必须一并清掉：否则长跑容器
+	// 上轮换 key 会让 .zen-sessions.json 与两个收割表单调增长，被删掉的旧 key
+	// 的粘性身份还留在盘上。
+	pruneZenKeyState(valid)
 	// 代理列表变化时: 索引会位移,按索引记录的冷却整体失效,直接清空;
 	// 同时驱逐已移除代理的钉定客户端,释放其空闲连接
 	if proxiesChanged(old.Proxies, c.Proxies) {
@@ -800,7 +798,8 @@ func zenEmptySchema() map[string]any {
 // include=[reasoning.encrypted_content]、tool_choice 缺省 auto、
 // prompt_cache_key=会话 ID 均为 CLI 常发字段，缺省会与原生形态不一致。
 // promptKey 为本次上游会话 ID（调用方传入本次请求的 sess_ 值）。
-func buildZenResponsesBody(params map[string]any, stream bool, modelID string, promptKey string) map[string]any {
+// 无 stream 形参：上游恒为 stream=true（见函数内注释）。
+func buildZenResponsesBody(params map[string]any, modelID string, promptKey string) map[string]any {
 	body := map[string]any{
 		"model":  modelID,
 		"stream": true, // FreeTier gate 硬要求：responses 端点只接受 stream=true，
@@ -1495,7 +1494,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		} else {
 			sess, user, ua = kit.FreshZenIdentity()
 		}
-		body := buildZenResponsesBody(params, stream, zm.ID, sess)
+		body := buildZenResponsesBody(params, zm.ID, sess)
 		bodyJSON, err := json.Marshal(body)
 		if err != nil {
 			return nil, rateLimited, fmt.Errorf("marshal zen responses body: %w", err)
@@ -1528,7 +1527,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				if !sleepCtx(ctx, kit.WithRetryJitter(delay)) {
 					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
 				}
-				delay *= 2
+				delay = zenRetryDelay(delay)
 				continue
 			}
 			return nil, rateLimited, fmt.Errorf("zen responses request: %w", err)
@@ -1559,7 +1558,9 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 
 		bodyBytes := kit.ReadBody(resp)
 		resp.Body.Close()
-		reason := fmt.Sprintf("zen API %d: %s", resp.StatusCode, kit.Truncate(bodyBytes, 500))
+		// 类型化错误携带状态码：端点学习只认"上游按 HTTP 拒绝了"，
+		// 不认错误文本（网络错误串里也有 "no such host" 之类的词）
+		apiErr := &zenHTTPError{Status: resp.StatusCode, Body: kit.Truncate(bodyBytes, 500)}
 
 		if isRateLimited(resp.StatusCode, bodyBytes) {
 			rateLimited++
@@ -1585,11 +1586,11 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				if !sleepCtx(ctx, kit.WithRetryJitter(wait)) {
 					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
 				}
-				delay *= 2
+				delay = zenRetryDelay(delay)
 				continue
 			}
 			markZenFail()
-			return nil, rateLimited, fmt.Errorf("%s", reason)
+			return nil, rateLimited, apiErr
 		}
 
 		if resp.StatusCode >= 500 {
@@ -1609,7 +1610,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				}
 			}
 		}
-		return nil, rateLimited, fmt.Errorf("%s", reason)
+		return nil, rateLimited, apiErr
 	}
 }
 
@@ -1698,7 +1699,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 				if !sleepCtx(ctx, kit.WithRetryJitter(delay)) {
 					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
 				}
-				delay *= 2
+				delay = zenRetryDelay(delay)
 				continue
 			}
 			return nil, rateLimited, fmt.Errorf("zen request: %w", err)
@@ -1712,7 +1713,8 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 
 		bodyBytes := kit.ReadBody(resp)
 		resp.Body.Close()
-		reason := fmt.Sprintf("zen API %d: %s", resp.StatusCode, kit.Truncate(bodyBytes, 500))
+		// 类型化错误携带状态码（同 callZenResponsesAPI）：端点学习只看状态码
+		apiErr := &zenHTTPError{Status: resp.StatusCode, Body: kit.Truncate(bodyBytes, 500)}
 
 		if isRateLimited(resp.StatusCode, bodyBytes) {
 			rateLimited++
@@ -1740,11 +1742,11 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 				if !sleepCtx(ctx, kit.WithRetryJitter(wait)) {
 					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
 				}
-				delay *= 2
+				delay = zenRetryDelay(delay)
 				continue
 			}
 			markZenFail()
-			return nil, rateLimited, fmt.Errorf("%s", reason)
+			return nil, rateLimited, apiErr
 		}
 
 		// 非 2xx：只有限流信号或服务端错误才推进全局故障转移，
@@ -1761,7 +1763,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 				continue
 			}
 		}
-		return nil, rateLimited, fmt.Errorf("%s", reason)
+		return nil, rateLimited, apiErr
 	}
 }
 
@@ -1785,6 +1787,20 @@ func keyIndex(key string) int {
 		}
 	}
 	return 0
+}
+
+// zenRetryDelay 指数退避的下一步延迟，封顶 30s。
+//
+// 必须封顶：Retries 来自面板配置（.zen-config.json 亦可手改），裸翻倍到约 63 次
+// 就会让 int64 纳秒溢出为负数，而 time.NewTimer(负值) 立即触发 —— 重试退化成
+// 无退避热循环，把并发槽位全部耗在空转上。封顶同时也限住了网络错误重试的等待
+// 时长（该路径不做 Retry-After 修正，直接用 delay）。
+func zenRetryDelay(d time.Duration) time.Duration {
+	d *= 2
+	if d > 30*time.Second {
+		return 30 * time.Second
+	}
+	return d
 }
 
 func zenModelList() []map[string]any {
@@ -1945,6 +1961,9 @@ func syncZenModels() (int, error) {
 	}
 	added := applyZenCatalog(desired, overlay)
 	pruned := pruneZenModelsTo(desired)
+	// 重新敷用已学习的端点覆盖：新出现的模型（以及被 prune 后重建的条目）不在
+	// 启动时 loadZenEndpoints 的视野里，不敷用就会每次重启重新探测一遍。
+	reapplyLearnedEndpoints()
 	if added > 0 {
 		log.Printf("zen model sync: %d new free model(s) from live catalog", added)
 	}
@@ -1964,17 +1983,21 @@ func applyZenCatalog(desired map[string]bool, overlay map[string]zenModelOverlay
 		ov := overlay[id]
 		if cur, ok := zenModels[id]; ok {
 			// 存量条目：overlay 限额覆盖种子/上次估算；别名与 Upstream 提示
-			// （如 muse-spark 的原生 responses）沿用，Source 升级为 live
+			// （如 muse-spark 的原生 responses）沿用，Source 升级为 live。
+			// 改副本再挂回（copy-on-write）：resolveZenModel 返回的指针在释放
+			// RLock 后仍被请求路径读取，就地改写会与其裸读竞争。
+			next := *cur
 			if ov.Context > 0 {
-				cur.Context = ov.Context
+				next.Context = ov.Context
 			}
 			if ov.Output > 0 {
-				cur.Output = ov.Output
+				next.Output = ov.Output
 			}
 			if ov != (zenModelOverlay{}) {
-				cur.ToolCall, cur.Reasoning, cur.Attach = ov.ToolCall, ov.Reasoning, ov.Attachment
+				next.ToolCall, next.Reasoning, next.Attach = ov.ToolCall, ov.Reasoning, ov.Attachment
 			}
-			cur.Source = "live"
+			next.Source = "live"
+			zenModels[id] = &next
 			continue
 		}
 		// 跳过与免费别名冲突的 ID（如付费 id 撞别名），保证别名解析不被覆盖

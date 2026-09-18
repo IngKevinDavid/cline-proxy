@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"cline-go-proxy/internal/kit"
 )
 
 // ============================================================================
@@ -347,10 +349,34 @@ func chatStreamToResponses(w http.ResponseWriter, upstream *http.Response, onUsa
 	}
 
 	reader := bufio.NewReader(upstream.Body)
+	// 首个非空行若不是 SSE 语法，说明上游以 200 回了 JSON（错误体最常见）。
+	// 不判会一路读到底、一个事件都不发，最后发出 response.completed + 空 output，
+	// 客户端把上游故障读成"模型回了空内容"。与 collectStreamResponse 同一判据。
+	firstNonEmpty := true
 	for {
 		line, err := reader.ReadString('\n')
 		if line != "" {
 			line = strings.TrimRight(line, "\r\n")
+			if t := strings.TrimSpace(line); firstNonEmpty && t != "" {
+				firstNonEmpty = false
+				if !isSSELine(t) {
+					rest, _ := io.ReadAll(io.LimitReader(reader, 64<<10))
+					body := kit.Truncate(strings.TrimSpace(t+"\n"+string(rest)), 300)
+					s.event("response.failed", map[string]any{
+						"type": "response.failed",
+						"response": map[string]any{
+							"id":         s.respID,
+							"object":     "response",
+							"created_at": time.Now().Unix(),
+							"status":     "failed",
+							"model":      model,
+							"output":     []any{},
+							"error":      map[string]any{"code": "upstream_error", "message": "upstream returned non-SSE body: " + body},
+						},
+					})
+					return
+				}
+			}
 			if strings.HasPrefix(line, "data:") {
 				payload := strings.TrimSpace(line[5:])
 				if payload == "" || payload == "[DONE]" {
@@ -614,6 +640,14 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if route == "zen" {
+		// 与管理面板的 zen 开关一致：关掉后 /v1/responses 也不得继续往 zen 打
+		//（chat 与 messages 两个入口都查了，这里漏查会让开关形同虚设）
+		if !getZenConfig().Enabled {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error": map[string]string{"message": "zen upstream disabled in /admin/ settings", "type": "api_error"},
+			})
+			return
+		}
 		zm, ok := resolveZenFreeModel(chatModel)
 		if !ok {
 			writeJSON(w, http.StatusBadRequest, map[string]any{

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // defaultModel 默认模型偏好：空 = 未设置，由 getDefaultModel 从 live 免费列表
@@ -38,19 +39,6 @@ var passThroughKeys = []string{
 	"temperature", "top_p", "top_k", "stop", "presence_penalty", "frequency_penalty",
 	"response_format", "user", "n", "logit_bias", "seed", "logprobs", "top_logprobs",
 	"stream_options", "metadata",
-}
-
-type chatRequest struct {
-	Model               string          `json:"model"`
-	Messages            json.RawMessage `json:"messages"`
-	Stream              bool            `json:"stream,omitempty"`
-	MaxTokens           int             `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int             `json:"max_completion_tokens,omitempty"`
-	Tools               json.RawMessage `json:"tools,omitempty"`
-	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
-	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
-	ReasoningEffortAlt  string          `json:"reasoningEffort,omitempty"`
-	Extra               map[string]any  `json:"-"`
 }
 
 func StartProxy(host string, port int) error {
@@ -160,8 +148,7 @@ func StartProxy(host string, port int) error {
 			valid := false
 			for _, k := range keys {
 				if subtle.ConstantTimeCompare([]byte(key), []byte(k)) == 1 {
-					valid = true
-					break
+							break
 				}
 			}
 
@@ -519,16 +506,25 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 	// （trade-off 记录：曾考虑按目录 provider.npm 推断端点，但 29 个免费模型
 	// 中 23 个无 npm 字段、无规律可循——运行时探测是唯一可靠信号。）
 	if zm.Upstream == "responses" {
-		handleZenResponsesNative(w, r, params, zm, tracker)
+		_ = handleZenResponsesNative(w, r, params, zm, tracker)
 		return
 	}
 
 	resp, rateLimited, err := callZenAPI(r.Context(), params, true)
 	if err != nil && isWrongEndpoint(err) {
-		learnZenEndpoint(zm.ID, "responses")
-		log.Printf("  zen endpoint auto-learn: model=%s chat/completions rejected (%v), retrying responses",
+		// 只在另一个端点真的成功后才持久化"该模型走 responses"。
+		//
+		// 裸 500 既是"走错端点"的信号，也是上游瞬时故障的形态（实测 muse-spark
+		// 在正确端点上也会偶发 {"error":"Internal server error"}）。未经验证就落盘
+		// 会把 chat 原生模型永久翻到 responses —— 目录同步不会改写既有条目的
+		// Upstream，只能靠人工删文件恢复。先重试、成功才学。
+		log.Printf("  zen endpoint probe: model=%s chat/completions rejected (%v), retrying responses",
 			zm.ID, kit.Truncate(err.Error(), 120))
-		handleZenResponsesNative(w, r, params, zm, tracker)
+		if handleZenResponsesNative(w, r, params, zm, tracker) {
+			learnZenEndpoint(zm.ID, "responses")
+		} else {
+			log.Printf("  zen endpoint probe: model=%s responses retry also failed, NOT learning", zm.ID)
+		}
 		return
 	}
 	if err != nil {
@@ -599,7 +595,10 @@ func handleZenChatDirect(w http.ResponseWriter, r *http.Request, params map[stri
 // handleZenResponsesNative 原生 responses 端点模型（Upstream=="responses"）的
 // chat 入口：上游走 callZenResponsesAPI，流式时把原生 SSE 转成 chat SSE
 // 即时下发，非流式时把聚合好的 chat 直接呈现。统计/日志语义与 chat 路径一致。
-func handleZenResponsesNative(w http.ResponseWriter, r *http.Request, params map[string]any, zm *ZenModel, tracker *zenStatsTracker) {
+// handleZenResponsesNative 走 zen 原生 responses 端点。返回 true 表示本次请求
+// 已被成功应答（2xx 已写出）—— 端点学习的调用方据此判断"该模型真的该走 responses"，
+// 避免把上游瞬时 500 当成端点信号持久化。
+func handleZenResponsesNative(w http.ResponseWriter, r *http.Request, params map[string]any, zm *ZenModel, tracker *zenStatsTracker) bool {
 	usageFn := func(u map[string]any) {
 		if pt, ok := u["prompt_tokens"].(float64); ok {
 			tracker.rec.CompletionTokens += int(pt) - tracker.rec.PromptTokens
@@ -625,7 +624,7 @@ func handleZenResponsesNative(w http.ResponseWriter, r *http.Request, params map
 			log.Printf("  zen endpoint auto-learn: model=%s responses rejected (%v), retrying chat",
 				zm.ID, kit.Truncate(err.Error(), 120))
 			handleZenChatDirect(w, r, params, zm, tracker)
-			return
+			return true
 		}
 		log.Printf("  zen responses api error: %v", err)
 		tracker.rec.RateLimited = rateLimited
@@ -633,7 +632,7 @@ func handleZenResponsesNative(w http.ResponseWriter, r *http.Request, params map
 			"error": map[string]string{"message": err.Error(), "type": "api_error"},
 		})
 		tracker.finish(false, http.StatusBadGateway)
-		return
+		return false
 	}
 	tracker.rec.RateLimited = rateLimited
 	defer resp.Body.Close()
@@ -649,12 +648,12 @@ func handleZenResponsesNative(w http.ResponseWriter, r *http.Request, params map
 				"error": map[string]string{"message": aerr.Error(), "type": "api_error"},
 			})
 			tracker.finish(false, http.StatusBadGateway)
-			return
+			return false
 		}
 		chat["model"] = zm.ID
 		emitChatAsSSE(w, chat, usageFn)
 		tracker.finish(true, resp.StatusCode)
-		return
+		return true
 	}
 	// 非流式客户端：上游已强制 stream=true，resp.Body 是原生 responses SSE，
 	// 先聚合成 chat 再按非流式呈现。
@@ -664,7 +663,7 @@ func handleZenResponsesNative(w http.ResponseWriter, r *http.Request, params map
 			"error": map[string]string{"message": aerr.Error(), "type": "api_error"},
 		})
 		tracker.finish(false, http.StatusBadGateway)
-		return
+		return false
 	}
 	chat["model"] = zm.ID
 	data, merr := json.Marshal(chat)
@@ -673,7 +672,7 @@ func handleZenResponsesNative(w http.ResponseWriter, r *http.Request, params map
 			"error": map[string]string{"message": merr.Error(), "type": "api_error"},
 		})
 		tracker.finish(false, http.StatusBadGateway)
-		return
+		return false
 	}
 	handleNonStreamResponseWithUsage(w, &http.Response{
 		StatusCode: http.StatusOK,
@@ -681,6 +680,7 @@ func handleZenResponsesNative(w http.ResponseWriter, r *http.Request, params map
 		Body:       io.NopCloser(bytes.NewReader(data)),
 	}, usageFn, nil)
 	tracker.finish(true, http.StatusOK)
+	return true
 }
 
 // emitChatAsSSE 把聚合好的 chat completions 按标准 chat SSE chunk 下发：
@@ -727,6 +727,16 @@ func emitChatAsSSE(w http.ResponseWriter, chat map[string]any, usageFn func(map[
 		n := 2048
 		if len(content) < n {
 			n = len(content)
+		} else {
+			// 不能在多字节字符中间切断：SSE 消费端逐块做 UTF-8 解码，半个字符会被
+			// 替换成 U+FFFD 永久污染正文（中文/emoji 尤甚）。退到完整 rune 边界。
+			for n > 0 && !utf8.RuneStart(content[n]) {
+				n--
+			}
+			if n == 0 {
+				// UTF-8 单字符最多 4 字节，正常不会走到；兜底避免死循环
+				n = 2048
+			}
 		}
 		chunk(map[string]any{"content": content[:n]}, nil)
 		content = content[n:]
@@ -780,19 +790,6 @@ func emitChatAsSSE(w http.ResponseWriter, chat map[string]any, usageFn func(map[
 	flush()
 }
 
-func cleanMessages(messages []any) []any {
-	cleaned := make([]any, 0, len(messages))
-	for _, m := range messages {
-		msg, ok := m.(map[string]any)
-		if !ok {
-			cleaned = append(cleaned, m)
-			continue
-		}
-		cleaned = append(cleaned, msg)
-	}
-	return cleaned
-}
-
 // asInt 把数值型 any 转为 int（客户端 JSON 解码得到 float64，
 // anthropic/responses 内部转换路径写入 int/int64）。
 func asInt(v any) int {
@@ -839,11 +836,7 @@ func buildUpstreamBody(params map[string]any, stream bool) map[string]any {
 	}
 
 	if msgsRaw, ok := params["messages"]; ok {
-		if msgsArr, ok := msgsRaw.([]any); ok {
-			body["messages"] = cleanMessages(msgsArr)
-		} else {
-			body["messages"] = msgsRaw
-		}
+		body["messages"] = msgsRaw
 	}
 
 	if stream {
@@ -894,6 +887,10 @@ func clineHeaders(token, sessionID string) http.Header {
 
 	return h
 }
+
+// clineAPIBase cline 上游基址。包级变量便于测试把真实调用链指向本地假上游
+// （cline.ClineAPIBase 是常量、不可注入）；生产恒为 cline.ClineAPIBase。
+var clineAPIBase = cline.ClineAPIBase
 
 // callClineAPI 调用 cline 上游。
 // ctx 来自客户端请求: IDE abort/取消时立即终止,不冷却账号。
@@ -946,7 +943,7 @@ func callClineAPI(ctx context.Context, params map[string]any, stream bool, usePr
 		}
 		// 每次尝试重建请求: bytes.Reader 只能读一次,
 		// 复用已发送的 req 会以 "ContentLength=N with Body length 0" 失败
-		req, rerr := http.NewRequestWithContext(ctx, "POST", cline.ClineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
+		req, rerr := http.NewRequestWithContext(ctx, "POST", clineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
 		if rerr != nil {
 			return nil, acc, fmt.Errorf("create request: %w", rerr)
 		}
@@ -979,7 +976,7 @@ func callClineAPI(ctx context.Context, params map[string]any, stream bool, usePr
 		// Refresh token and retry（重建请求: 上一次 Do 已消费请求体）
 		if rerr := refreshAccountToken(acc); rerr == nil {
 			token = acc.AccessToken
-			req2, cerr := http.NewRequestWithContext(ctx, "POST", cline.ClineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
+			req2, cerr := http.NewRequestWithContext(ctx, "POST", clineAPIBase+"/chat/completions", bytes.NewReader(bodyJSON))
 			if cerr != nil {
 				return nil, acc, fmt.Errorf("create request: %w", cerr)
 			}
@@ -1021,7 +1018,9 @@ func callClineAPI(ctx context.Context, params map[string]any, stream bool, usePr
 			markAccountCooldown(acc, "429: "+reason, duration)
 			log.Printf("  account %s cooldown %v (reason: %s)", truncateEmail(acc.Email), duration, reason)
 		}
-		return nil, acc, fmt.Errorf("API %d: %s", resp.StatusCode, kit.Truncate(string(bodyBytes), 500))
+		// 非 200 一律返回 error（body 已读尽并关闭），但状态码 + 错误体本身有价值：
+		// 类型化错误把它带出来，供 callClineAutoStream 识别"该模型必须流式"的指纹。
+		return nil, acc, &clineAPIError{Status: resp.StatusCode, Body: kit.Truncate(string(bodyBytes), 500)}
 	}
 
 	bumpUsage(acc)
@@ -1289,10 +1288,6 @@ func stopSequencesFrom(params map[string]any) []string {
 				addString(s)
 			}
 		}
-	case []string:
-		for _, s := range v {
-			addString(s)
-		}
 	}
 	return stops
 }
@@ -1353,6 +1348,10 @@ func isSSELine(line string) bool {
 }
 
 func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
+	// 自己关掉响应体：本函数把 body 整个读完，所有权理应在此结束。兄弟函数
+	// responsesSSEToChat 一直这么做；这里不关会让连接既不回收也不复用，在长跑
+	// 容器里按请求数泄漏（压缩路径每次摘要都走这条）。
+	defer upstream.Body.Close()
 	var (
 		model        string
 		content      strings.Builder
@@ -1437,6 +1436,21 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 			}
 			if u, ok := obj["usage"].(map[string]any); ok && len(u) > 0 {
 				usage = u
+			}
+			// SSE 帧里的 error 事件必须上抛：只凭"没有 choices"就 continue 会把
+			// 上游故障静默成空成功（客户端收到 200 + 空内容）。无 choices 本身是
+			// 合法的（纯 usage 收尾帧），所以判定条件是 error 键存在且渲染后非空。
+			if e, ok := obj["error"]; ok && e != nil {
+				msg := ""
+				if em, ok := e.(map[string]any); ok {
+					msg, _ = em["message"].(string)
+				}
+				if msg == "" {
+					msg = strings.TrimSpace(fmt.Sprint(e))
+				}
+				if msg != "" && msg != "<nil>" {
+					return nil, fmt.Errorf("upstream stream error after %d bytes: %s", content.Len(), msg)
+				}
 			}
 			choices, _ := getNested(obj, "choices").([]any)
 			if len(choices) == 0 {
@@ -2257,7 +2271,7 @@ func handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
 	usageFn := accountUsageFn(acc, openAIReq)
 
 	if req.Stream {
-		handleAnthropicStreamWithUsage(w, resp, normalizeRequestModel(req.Model), toolSchemas, usageFn)
+		handleAnthropicStreamWithUsage(w, resp, normalizeRequestModel(req.Model), toolSchemas, stopSequencesFrom(openAIReq), usageFn)
 		return
 	}
 
@@ -2395,7 +2409,8 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 			// responses 原生流已聚合为 chat：对 Anthropic 流式客户端按
 			// Anthropic SSE 事件序列重发（message_start → 文本/工具块 →
 			// message_delta → message_stop），不能回非流式 JSON。
-			emitAnthropicSSEFromChat(w, normalizeOpenAIResponse(chat), nil)
+			// 传 usage 回调：此前传 nil，这条路径的 completion_tokens 从不入统计
+			emitAnthropicSSEFromChat(w, normalizeOpenAIResponse(chat), zenUsageFn(tracker))
 			tracker.finish(true, http.StatusOK)
 			return
 		}
@@ -2433,7 +2448,7 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 		if isStream {
 			// 流式客户端：与原生分支一致地重发 Anthropic SSE 事件序列
 			//（回非流式 JSON 会让 SDK 的流解析器直接报错）
-			emitAnthropicSSEFromChat(w, normalizeOpenAIResponse(chat), nil)
+			emitAnthropicSSEFromChat(w, normalizeOpenAIResponse(chat), zenUsageFn(tracker))
 			tracker.finish(true, http.StatusOK)
 			return
 		}
@@ -2460,7 +2475,7 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 	}
 
 	if isStream {
-		handleAnthropicStreamWithUsage(w, resp, zm.ID, toolSchemas, usageFn)
+		handleAnthropicStreamWithUsage(w, resp, zm.ID, toolSchemas, stopSequencesFrom(openAIReq), usageFn)
 		tracker.finish(true, resp.StatusCode)
 		return
 	}
@@ -2480,6 +2495,9 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 	}
 	chatOut["model"] = zm.ID
 	chatOut = normalizeOpenAIResponse(chatOut)
+	// 与 finishZenAnthropicNonStream 保持一致：上游对 stop 的执行不可靠，
+	// 非流式应答统一在网关侧兜底截断（漏掉这里会让 stop_sequences 静默失效）
+	truncateAtStopSequences(chatOut, stopSequencesFrom(openAIReq))
 	anthropicResp := openAIToAnthropic(chatOut)
 	if tc, ok := getNested(chatOut, "choices", 0, "message", "tool_calls").([]any); ok && len(tc) > 0 {
 		anthropicResp["stop_reason"] = "tool_use"
@@ -2488,7 +2506,7 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 	tracker.finish(true, resp.StatusCode)
 }
 
-func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Response, modelName string, toolSchemas map[string]map[string]bool, onUsage func(map[string]any)) {
+func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Response, modelName string, toolSchemas map[string]map[string]bool, stops []string, onUsage func(map[string]any)) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		log.Printf("  anthropic stream: streaming not supported for client, falling back to non-stream aggregation")
@@ -2503,6 +2521,8 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 			onUsage(u)
 		}
 		out = normalizeOpenAIResponse(out)
+		// 非流式回退仍需网关侧 stop 兜底（与其余非流式出口一致）
+		truncateAtStopSequences(out, stops)
 		anthropicResp := openAIToAnthropic(out)
 		writeJSON(w, http.StatusOK, anthropicResp)
 		return
@@ -3069,7 +3089,9 @@ func getNested(obj map[string]any, keys ...any) any {
 				return nil
 			}
 		case int:
-			if arr, ok := current.([]any); ok && k < len(arr) {
+			// k 必须同时满足上下界：只判 k < len(arr) 时，负数下标会直接 panic
+			//（数组越界），而本函数是"取不到就 nil"的宽容语义
+			if arr, ok := current.([]any); ok && k >= 0 && k < len(arr) {
 				current = arr[k]
 			} else {
 				return nil
@@ -3136,40 +3158,37 @@ func parseHumanDuration(s string) time.Duration {
 	}
 	var total time.Duration
 	num := 0
-	valid := false
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
 		case c >= '0' && c <= '9':
 			num = num*10 + int(c-'0')
-			valid = true
 		case c == 'd':
 			total += time.Duration(num) * 24 * time.Hour
-			num, valid = 0, false
+			num = 0
 		case c == 'h':
 			total += time.Duration(num) * time.Hour
-			num, valid = 0, false
+			num = 0
 		case c == 'm' && i+1 < len(s) && s[i+1] == 's':
 			total += time.Duration(num) * time.Millisecond
-			num, valid = 0, false
+			num = 0
 			i++
 		case c == 'm':
 			total += time.Duration(num) * time.Minute
-			num, valid = 0, false
+			num = 0
 		case c == 's':
 			total += time.Duration(num) * time.Second
-			num, valid = 0, false
+			num = 0
 		case c == ' ':
 			// 分隔符
 		default:
 			// 未知字符，重置
-			num, valid = 0, false
+			num = 0
 		}
 	}
 	if total <= 0 {
 		return 0
 	}
-	_ = valid
 	return total
 }
 

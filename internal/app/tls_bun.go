@@ -14,32 +14,34 @@ import (
 // per DialTLS keeps the wire bytes identical (verified byte-for-byte against
 // the official CLI capture modulo random/session/keyshare) and is race-free.
 //
-// Captured live from opencode CLI 1.18.31 (Bun/BoringSSL) via a transparent
-// CONNECT relay 2026-09-17. Wire order matters: extensions are NOT shuffled
-// (Bun sends a fixed order, no GREASE).
+// Captured live from opencode CLI 1.18.31 (Bun/BoringSSL) via a CONNECT
+// relay 2026-09-18 (SNI opencode.ai, true zen hello — not the registry fetch
+// that an earlier capture had mistaken for zen traffic). Byte-verified
+// against the CLI capture: cipher list, extension order, and every extension
+// body identical modulo random/session/keyshare/padding-length.
 //
-// JA3: 771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49161-49171-49162-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-21,29-23-24,0
+// JA3: 771,4865-4866-4919-49243-49247-49244-49248-52394-52392-49209-49211-49192-49214-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-21,29-23-24,0
 func bunSpecForConn() *utls.ClientHelloSpec {
 	spec := utls.ClientHelloSpec{
 		CipherSuites: []uint16{
-		0x1301, // TLS_AES_128_GCM_SHA256 (BoringSSL order: AES128 first)
-		0x1302, // TLS_AES_256_GCM_SHA384
-		0x1304, // TLS_AES_128_CCM_SHA256 (BoringSSL-only, no stdlib const)
-		utls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, // 49195
-		utls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,   // 49199
-		utls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, // 49196
-		utls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,   // 49200
-		utls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,    // 52393
-		utls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,  // 52392
-		0xC0A8, // TLS_ECDHE_RSA_WITH_AES_128_CCM8 (BoringSSL-only, no stdlib const)
-		0xC0A9, // TLS_ECDHE_RSA_WITH_AES_256_CCM8
-		0xC0AC, // TLS_ECDHE_ECDSA_WITH_AES_128_CCM8
-		0xC0AD, // TLS_ECDHE_ECDSA_WITH_AES_256_CCM8
-		utls.TLS_RSA_WITH_AES_128_GCM_SHA256,         // 156
-		utls.TLS_RSA_WITH_AES_256_GCM_SHA384,         // 157
-		utls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,      // 47
-		utls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,      // 53
-	},
+			0x1301, // TLS_AES_128_GCM_SHA256
+			0x1302, // TLS_AES_256_GCM_SHA384
+			0x1303, // TLS_CHACHA20_POLY1305_SHA256 (CLI sends 1303, NOT 1304/CCM8)
+			0xC02B, // TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+			0xC02F, // TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+			0xC02C, // TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+			0xC030, // TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+			0xCCA9, // TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+			0xCCA8, // TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+			0xC009, // TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA
+			0xC013, // TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
+			0xC00A, // TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA
+			0xC014, // TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA
+			0x009C, // TLS_RSA_WITH_AES_128_GCM_SHA256
+			0x009D, // TLS_RSA_WITH_AES_256_GCM_SHA384
+			0x002F, // TLS_RSA_WITH_AES_128_CBC_SHA
+			0x0035, // TLS_RSA_WITH_AES_256_CBC_SHA
+		},
 	CompressionMethods: []uint8{0x00},
 	Extensions: []utls.TLSExtension{
 		&utls.SNIExtension{},

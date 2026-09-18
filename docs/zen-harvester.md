@@ -18,8 +18,12 @@ FreeTier 检查。本地随机生成的 `sess_` 必 403。网关自身无法凭�
    2-4 分钟完成；启动日志会打印 `minting N key(s) at startup (concurrency N)`。
 2. **运行时**：某 key 连续 FreeTier 403 ≥ 2 次 → 后台收割新会话替换
    （同 key 10 分钟内最多一次）；
-3. **定时**：每 10 分钟检查，最久未收割超过 `ZEN_HARVEST_INTERVAL_HOURS`
-   （默认 **4h**，见下方"为什么是 4h"）的 key 补一个；
+3. **定时**：每 10 分钟检查，最久未 mint 超过 `ZEN_HARVEST_INTERVAL_HOURS`
+   （默认 **4h**，见下方"为什么是 4h"）的 key 补一个；**从未 mint 成功**
+   （会话表里没有 `harvestedAt`，含本地随机占位）的 key 同样算待补收——
+   新鲜度只看收割时间，不看每次都刷新的 `Updated`，否则一个持续被请求的
+   占位 key 会永远躲过定时补收。这类 key 按 `interval` 节流，不会每 10 分钟
+   重试一次。
 4. **手动**：管理面板「opencode free models → Live session IDs」→
    **Mint missing sessions**（只补未 mint 的）/ **Force mint / refresh all**
    （全部重 mint），后台执行并显示每个 key 的进度与耗时。
@@ -136,3 +140,18 @@ zen 免费层按**出口 IP** 记账（实测约 200 请求 / 5 小时 / IP）�
   每个 key 的 `live/minted/harvested`、最近一次 mint 任务的逐 key 结果）。
 - 大量 key 时把 `ZEN_HARVEST_CONCURRENCY` 调到 5-8 可显著缩短首启；只受
   容器内存限制。
+
+## 会话文件（`DATA_DIR/.zen-sessions.json`）
+
+每个 key 的 `session`/`ua`/`minted`/`harvestedAt` 持久化在这里（0600，写盘走
+临时文件 + rename，全部写入都在 `zenSessMu` 下串行）：
+
+- **升级兼容**：旧版本文件只有 `session`/`ua`/`updated`。加载时按会话 ID 前缀
+  回认 `minted`（CLI mint 的是 `ses_*`，本地占位是 `sess_*`），并把收割时间认到
+  `updated`——否则升级后首启会把整池 key 判成"未 mint"全量重 mint，白烧额度。
+  日志会打印 `zen sessions migrated: N key(s) ...`。
+- **文件损坏**：`json` 解析失败时先改名成 `.corrupt` 留证，再以空表启动
+  （与 `zen-config.json` 同做法）；非 ENOENT 的读失败也会打日志，因为紧随其后
+  的 save 会覆盖原文件。
+- **会话不是凭据**：这里存的是服务端会话 ID，泄漏不等于泄漏 key。但它是
+  "服务端见过"的证明，删除文件等于全池重新 mint 一遍。

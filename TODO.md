@@ -568,3 +568,70 @@ so failure rate and first-byte latency spike every cycle.
   would spread mint traffic across exits, but the mint is the CLI's own
   registration handshake and going direct is what has been verified to work;
   mint volume is small enough that the quota sharing is not worth the risk.
+
+## Session-mint / session audit over the 3 unpushed commits (2026-09-18)
+
+Scope: `ea41b6a` + `4c9d367` + `e77b432` (session minting, sticky sessions, the
+panel button, the refresh interval). Three independent review passes (concurrency
+& resources, session lifecycle, API/panel/security) over the same diff; every
+finding below was re-verified against the code before fixing, and the fixes are
+in the tree after those 3 commits.
+
+### Fixed
+- **Data race on the mint-job snapshot (P1).** `startZenMintJob` returned
+  `zenMintJobSnapshotLocked(job)` *after* unlocking, while the job goroutine
+  writes `job.outcomes[idx]` under the same mutex — reading that slice unlocked
+  is a race. Confirmed with the race detector: reverting the fix makes
+  `go test -race -run TestMintJobStatusHasNoSnapshotRace` report
+  `WARNING: DATA RACE` (write in the worker vs read in the start path); with the
+  fix the whole suite is race-clean. Snapshot is now taken inside the critical
+  section.
+- **Per-key mint locks were pruned while possibly held (P1).**
+  `pruneZenKeyState` deleted `harvestKeyLocks[key]` for removed keys; an in-flight
+  mint holding that mutex would then let `lockHarvestKey` hand a *second*
+  goroutine a fresh mutex for the same key — two concurrent mints sharing one
+  per-key HOME (auth.json and CLI logs overwrite each other, sessions cross-read).
+  Locks are no longer pruned (entry count is bounded by distinct keys ever
+  configured); the counters still are.
+- **Never-minted keys could never be swept (P2).** The periodic scan used
+  `HarvestedAt` with a fallback to `Updated`, and `Updated` is refreshed on every
+  request — so an actively requested key with only a local placeholder was
+  "fresh" forever and could only be repaired by the 403 path. Freshness is now
+  `HarvestedAt` only (0 ⇒ stale), with a per-key `harvestLastSweep` throttle so a
+  key that keeps failing to mint is retried once per interval rather than every
+  10-minute tick (the old 1h ticker made that retry rate 6× cheaper). Extracted
+  as `periodicSweepCandidates` so the rule is unit-testable.
+- **Legacy session files re-minted the whole pool on upgrade (P2).** Files
+  written before `minted` existed have no such field, so every key looked
+  unminted and first boot of the new version re-minted all of them. Loading now
+  back-fills `minted` from the session-ID prefix (`ses_*` = CLI-minted,
+  `sess_*` = local placeholder; `sess_` does not start with `ses_`) and dates
+  `harvestedAt` from `updated`, so an upgrade boots with zero mint traffic.
+  Verified live: legacy-shaped file → `zen sessions migrated: 4 key(s)`, no
+  startup mint, first request 200.
+- **Corrupt session file was silently discarded.** Parse failure now renames the
+  file to `.corrupt` before starting empty (same as `zen-config.json`); a
+  non-ENOENT read error is logged, since the next save would otherwise overwrite
+  an intact file. Verified live in the container.
+- **Panel poll could stop permanently.** A second mint click / early return left
+  a cleared-but-non-null `ocSessPoll`, and the visible-tab poll (`!ocSessPoll`)
+  then never restarted. Handle is now nulled on every exit path.
+- **Mint buttons are disabled when the CLI is absent** (`harvestEnabled=false`)
+  instead of only failing with a 400 after the click.
+- **Key masks no longer leak short keys.** `kit.Truncate(k,8)+"…"` returns the
+  whole string for keys ≤8 chars and double-ellipsised longer ones; replaced by
+  `maskZenKey` at all four display sites (also renders the `public` sentinel).
+- Empty `ua` on a loaded entry is back-filled with the current CLI UA, and the
+  swallowed body-read error in the mint handler now returns 400.
+
+### Accepted (verified, deliberately not changed)
+- `saveZenSessionsLocked` holds `zenSessMu` across a small file write: that
+  serialisation is exactly what makes concurrent harvest saves safe. All writers
+  hold the lock, so the `.tmp`+rename cannot interleave.
+- A mint that succeeds in memory but fails to persist is still reported OK: the
+  session is live for this process and only a restart loses it (then re-minted).
+- An in-flight mint can re-insert a key that config just removed; the entry is
+  inert (never picked, not in `cfg.Keys`) and is pruned on the next config change.
+- Session-ID length differs between logs (24) and panel (12) — cosmetic.
+- gofmt has pre-existing comment-format drift in untouched lines (CI only runs
+  `go vet`); not reformatted to keep the audit diff reviewable.

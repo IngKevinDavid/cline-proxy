@@ -621,8 +621,8 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
   <div class="section-body">
     <p class="hint" style="margin-top:0" id="ocSessHint">The free tier only accepts session IDs the upstream has actually seen, minted by the opencode CLI. A key without a live session <b>always</b> fails with 403 — normally the harvester mints one on startup, on repeated 403s, and every few hours; use the buttons below to mint immediately (e.g. right after a fresh deploy with many keys).</p>
     <div class="flex" style="gap:10px;margin-bottom:10px;flex-wrap:wrap">
-      <button class="btn btn-primary" onclick="mintZenSessions(false)">Mint missing sessions</button>
-      <button class="btn" onclick="mintZenSessions(true)">Force mint / refresh all</button>
+      <button class="btn btn-primary" id="ocSessBtnMissing" onclick="mintZenSessions(false)">Mint missing sessions</button>
+      <button class="btn" id="ocSessBtnForce" onclick="mintZenSessions(true)">Force mint / refresh all</button>
       <span class="hint" style="margin:0" id="ocSessTimer"></span>
     </div>
     <div class="table-wrap">
@@ -1426,6 +1426,12 @@ function renderOcSessions(s) {
       ? ' Auto-refresh every <b>' + (s.intervalHours || 4) + 'h</b> (kept below the 5h quota window), concurrency <b>' + (s.concurrency || 3) + '</b>.'
       : ' <b>Harvester unavailable</b> — no opencode CLI in this container (ZEN_HARVEST_BIN).');
   }
+  // CLI 不在时后端会以 400 拒绝 mint，按钮先禁用，避免点了才发现。
+  const usable = !!s.harvestEnabled;
+  ['ocSessBtnMissing', 'ocSessBtnForce'].forEach(id => {
+    const b = _(id);
+    if (b) { b.disabled = !usable; b.title = usable ? '' : 'opencode CLI not available in this container'; }
+  });
   _('ocSessBody').innerHTML = rows.length
     ? rows.map(k => {
         const state = k.noKey
@@ -1474,10 +1480,12 @@ async function mintZenSessions(force) {
     toast(force ? 'Force minting all sessions…' : 'Minting missing sessions…', 'success');
     // 任务在后端跑（全量重 mint 要几十秒），按 2s 轮询进度；上限 450 次
     // （15 分钟）与后端任务超时对齐，避免任务异常时轮询永不停。
-    if (ocSessPoll) clearInterval(ocSessPoll);
+    if (ocSessPoll) { clearInterval(ocSessPoll); ocSessPoll = null; }
     let ticks = 0;
     const s0 = await loadOcSessions();
-    if (!s0 || !s0.job || !s0.job.running) return;
+    // 提前返回前必须把 ocSessPoll 置空：可见标签页的 20s 轮询用 !ocSessPoll
+    // 判断"是否已有轮询在跑"，留一个已 clear 的非空句柄会让它永久停摆。
+    if (!s0 || !s0.job || !s0.job.running) { ocSessPoll = null; return; }
     ocSessPoll = setInterval(async () => {
       const s = await loadOcSessions();
       if (!s || !s.job || !s.job.running || ++ticks >= 450) {

@@ -470,6 +470,21 @@ func validateProxyList(proxies []string) error {
 
 // ============ zen 多 key 轮转（round_robin 默认策略） ============
 
+// maskZenKey 管理面板与 mint 结果里展示 key 的掩码形式。
+// 不复用 kit.Truncate：它对短于上限的串原样返回，短 key 会被整只打印出来。
+func maskZenKey(k string) string {
+	switch {
+	case k == "":
+		return "-"
+	case k == "public":
+		return "public (no key)"
+	case len(k) <= 6:
+		return "…" // 太短，连前缀都不给
+	default:
+		return k[:6] + "…"
+	}
+}
+
 var (
 	zenKeyMu    sync.Mutex
 	zenKeyIdx   int
@@ -585,7 +600,7 @@ func zenKeyStatus() []map[string]any {
 	for i, k := range keys {
 		st := map[string]any{
 			"index":   i,
-			"keyMask": kit.Truncate(k, 8) + "…",
+			"keyMask": maskZenKey(k),
 			"usage":   zenKeyUsage[k],
 			"current": i == zenKeyIdx%maxInt(len(keys), 1),
 			// live 会话状态：未 mint 的 key 必 403，面板必须能看出来，

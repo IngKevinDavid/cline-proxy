@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"cline-go-proxy/internal/kit"
 )
 
 // ============ Zen 免费模型管理 API ============
@@ -231,7 +229,7 @@ func handleZenSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		entry := map[string]any{
 			"index":     i,
-			"keyMask":   kit.Truncate(k, 8) + "…",
+			"keyMask":   maskZenKey(k),
 			"noKey":     k == "" || k == "public",
 			"live":      s.Live,
 			"minted":    s.Minted,
@@ -273,7 +271,12 @@ func handleZenSessionsMint(w http.ResponseWriter, r *http.Request) {
 		Force *bool `json:"force"`
 	}
 	if r.Body != nil {
-		if raw, err := io.ReadAll(io.LimitReader(r.Body, 4096)); err == nil && len(raw) > 0 {
+		raw, err := io.ReadAll(io.LimitReader(r.Body, 4096))
+		if err != nil {
+			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "read body: " + err.Error()})
+			return
+		}
+		if len(raw) > 0 {
 			if err := json.Unmarshal(raw, &body); err != nil {
 				writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON: " + err.Error()})
 				return

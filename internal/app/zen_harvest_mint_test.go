@@ -64,6 +64,17 @@ func setupHarvestTest(t *testing.T) string {
 	zenSessLoaded = true
 	zenSessPath = ""
 	zenSessMu.Unlock()
+	// 收割相关的进程级计数同样要清：否则上一个用例残留的 harvestLastSweep
+	// 会把本用例的 key 判成"刚试过"，周期补收用例随机失败。
+	harvestMu.Lock()
+	harvestFails = map[string]int{}
+	harvestLastTry = map[string]time.Time{}
+	harvestLastSweep = map[string]time.Time{}
+	harvestMu.Unlock()
+	mintModelsMu.Lock()
+	mintModelsCache = nil
+	mintModelsAt = time.Time{}
+	mintModelsMu.Unlock()
 	harvestSemOnce = sync.Once{}
 	harvestKeyMu.Lock()
 	harvestKeyLocks = map[string]*sync.Mutex{}
@@ -457,5 +468,228 @@ func TestPeriodicTickFinerThanInterval(t *testing.T) {
 	}
 	if def < 2*time.Hour {
 		t.Fatalf("default %v is needlessly aggressive for the shared IP quota", def)
+	}
+}
+
+// ============ 审计回归用例（2026-09-18 会话 mint 审计） ============
+
+// 从未 mint 成功的 key（本地随机占位）即使用户请求一直在刷新 Updated，
+// 也必须留在周期补收名单里——否则"被请求过的 key 永不周期收割"，而这类 key
+// 恰恰是一直 403 的那一类，只能等 403 阈值兜底。
+func TestPeriodicSweepIncludesNeverMintedActiveKey(t *testing.T) {
+	setupHarvestTest(t)
+	interval := 4 * time.Hour
+	active := "sk-active-placeholder"
+	zenSessMu.Lock()
+	zenSessions[active] = &zenSessionEntry{
+		Session: "sess_placeholderplaceholder00",
+		Updated: time.Now().Unix(), // 每次请求都刷新，正是旧基准踩的坑
+	}
+	zenSessMu.Unlock()
+
+	got := periodicSweepCandidates([]string{active}, interval)
+	if len(got) != 1 || got[0] != active {
+		t.Fatalf("placeholder key with fresh Updated must still be swept, got %v", got)
+	}
+}
+
+// 新鲜度只看 HarvestedAt：刚 mint 的跳过，超过 interval 的补收。
+func TestPeriodicSweepUsesHarvestedAtNotUpdated(t *testing.T) {
+	setupHarvestTest(t)
+	interval := 4 * time.Hour
+	fresh, stale := "sk-fresh", "sk-stale"
+	zenSessMu.Lock()
+	zenSessions[fresh] = &zenSessionEntry{Session: "ses_fresh", Minted: true, HarvestedAt: time.Now().Unix()}
+	zenSessions[stale] = &zenSessionEntry{Session: "ses_stale", Minted: true, HarvestedAt: time.Now().Add(-5 * time.Hour).Unix()}
+	zenSessMu.Unlock()
+
+	got := periodicSweepCandidates([]string{fresh, stale}, interval)
+	if len(got) != 1 || got[0] != stale {
+		t.Fatalf("want only the over-interval key swept, got %v", got)
+	}
+}
+
+// 从未 mint 成功的 key 按 interval 节流：刚试过就不该在下个 tick 再试，
+// 否则持续失败的 key 会变成每 10 分钟一次的无限重试。
+func TestPeriodicSweepThrottlesRepeatAttempts(t *testing.T) {
+	setupHarvestTest(t)
+	interval := 4 * time.Hour
+	k := "sk-never-mints"
+	if got := periodicSweepCandidates([]string{k}, interval); len(got) != 1 {
+		t.Fatalf("first sweep should include %s, got %v", k, got)
+	}
+	markSweepTried([]string{k})
+	if got := periodicSweepCandidates([]string{k}, interval); len(got) != 0 {
+		t.Fatalf("sweep throttled by interval, got %v", got)
+	}
+	// 过了 interval 之后重新入选（把上次尝试时间往前挪，等价于等待）
+	harvestMu.Lock()
+	harvestLastSweep[k] = time.Now().Add(-interval - time.Minute)
+	harvestMu.Unlock()
+	if got := periodicSweepCandidates([]string{k}, interval); len(got) != 1 {
+		t.Fatalf("sweep should retry after interval, got %v", got)
+	}
+}
+
+// 配置里删掉的 key 不能顺带删掉它的 per-key 锁：在途 mint 正持有那把锁，
+// 删了条目再 lockHarvestKey 会新建一把，同 key 就能并发 mint（共用 HOME，
+// auth.json 与 CLI 日志互相覆盖）。
+func TestPruneKeepsPerKeyMintLocks(t *testing.T) {
+	setupHarvestTest(t)
+	k := "sk-removed-while-minting"
+	harvestMu.Lock()
+	harvestFails[k] = 0
+	harvestLastTry[k] = time.Now()
+	harvestLastSweep[k] = time.Now()
+	harvestMu.Unlock()
+
+	unlock := lockHarvestKey(k) // 模拟在途 mint 持有该 key 的锁
+	defer unlock()
+	pruneZenKeyState(map[string]bool{}) // 该 key 已从配置移除
+
+	harvestKeyMu.Lock()
+	_, still := harvestKeyLocks[k]
+	harvestKeyMu.Unlock()
+	if !still {
+		t.Fatal("prune removed a per-key mint lock that may be held in flight")
+	}
+	// 计数类状态照旧清理（这些没有"被持有"语义）
+	harvestMu.Lock()
+	_, fails := harvestFails[k]
+	_, lastTry := harvestLastTry[k]
+	_, lastSweep := harvestLastSweep[k]
+	harvestMu.Unlock()
+	if fails || lastTry || lastSweep {
+		t.Fatalf("harvest counters not pruned: fails=%v lastTry=%v lastSweep=%v", fails, lastTry, lastSweep)
+	}
+}
+
+// 旧版本会话文件没有 minted 字段：用会话 ID 前缀回认（CLI mint 的是 ses_*，
+// 本地占位是 sess_*），避免升级后首启把整池 key 全量重 mint、白烧额度。
+func TestLegacySessionFileMigration(t *testing.T) {
+	dir := setupHarvestTest(t)
+	now := time.Now().Unix()
+	legacy := fmt.Sprintf(`{
+  "sk-legacy-live": {"session": "ses_legacyminted000000000000", "ua": "opencode/1.18.31", "updated": %d},
+  "sk-legacy-old": {"session": "ses_legacyancient00000000000", "ua": "opencode/1.18.31", "updated": %d},
+  "sk-legacy-placeholder": {"session": "sess_placeholder000000000000", "ua": "opencode/1.18.31", "updated": %d}
+}`, now, now-30*24*3600, now)
+	if err := os.WriteFile(filepath.Join(dir, ".zen-sessions.json"), []byte(legacy), 0600); err != nil {
+		t.Fatalf("write legacy file: %v", err)
+	}
+	zenSessMu.Lock()
+	zenSessions = map[string]*zenSessionEntry{}
+	zenSessLoaded = false
+	zenSessPath = ""
+	zenSessMu.Unlock()
+	loadZenSessions()
+
+	if !zenSessionLive("sk-legacy-live") {
+		t.Fatal("legacy ses_* session must be recognised as CLI-minted (no re-mint on upgrade)")
+	}
+	if zenSessionLive("sk-legacy-placeholder") {
+		t.Fatal("legacy sess_* placeholder must NOT be treated as live")
+	}
+	if !zenSessionLive("sk-legacy-old") {
+		t.Fatal("aged legacy ses_* session is still CLI-minted (live), just old")
+	}
+	// 迁移时把收割时间认到 Updated：否则升级后第一次周期扫描会把整池重 mint
+	zenSessMu.Lock()
+	mig := zenSessions["sk-legacy-live"].HarvestedAt
+	zenSessMu.Unlock()
+	if mig != now {
+		t.Fatalf("migrated entry should inherit Updated as HarvestedAt, got %d want %d", mig, now)
+	}
+	// 近期 mint 的迁移条目不该立刻被周期扫描重 mint；而 Updated 很旧的
+	// （会话大概率已过期）和仍是占位的都必须入选。
+	got := periodicSweepCandidates([]string{"sk-legacy-live", "sk-legacy-old", "sk-legacy-placeholder"}, 4*time.Hour)
+	want := []string{"sk-legacy-old", "sk-legacy-placeholder"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sweep candidates = %v, want %v", got, want)
+	}
+	// 空 UA 回填：旧文件缺 ua 时请求会带空 UA，破坏指纹伪装
+	zenSessMu.Lock()
+	zenSessions["sk-legacy-live"].UA = ""
+	zenSessMu.Unlock()
+	_, _, ua := StickyZenIdentity("sk-legacy-live")
+	if ua != zenNativeUA {
+		t.Fatalf("empty UA must be backfilled, got %q", ua)
+	}
+}
+
+// 坏文件先备份再空跑：否则紧随其后的 save 会直接覆盖，出问题时无从追查。
+func TestCorruptSessionFileIsBackedUp(t *testing.T) {
+	dir := setupHarvestTest(t)
+	path := filepath.Join(dir, ".zen-sessions.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0600); err != nil {
+		t.Fatalf("write corrupt file: %v", err)
+	}
+	zenSessMu.Lock()
+	zenSessions = map[string]*zenSessionEntry{}
+	zenSessLoaded = false
+	zenSessPath = ""
+	zenSessMu.Unlock()
+	loadZenSessions()
+
+	if _, err := os.Stat(path + ".corrupt"); err != nil {
+		t.Fatalf("corrupt session file must be kept as .corrupt: %v", err)
+	}
+	zenSessMu.Lock()
+	n := len(zenSessions)
+	zenSessMu.Unlock()
+	if n != 0 {
+		t.Fatalf("corrupt file must start with an empty table, got %d entries", n)
+	}
+}
+
+// 掩码不得泄露短 key（kit.Truncate 对短串原样返回）。
+func TestMaskZenKeyNeverLeaksShortKey(t *testing.T) {
+	if m := maskZenKey("sk-1"); contains(m, "sk-1") {
+		t.Fatalf("short key leaked in mask: %q", m)
+	}
+	if m := maskZenKey("sk-abcdefghijklmn"); m != "sk-abc…" {
+		t.Fatalf("long key mask: got %q", m)
+	}
+	if m := maskZenKey(""); m != "-" {
+		t.Fatalf("empty key mask: got %q", m)
+	}
+	if m := maskZenKey("public"); !contains(m, "public") {
+		t.Fatalf("public sentinel mask: got %q", m)
+	}
+}
+
+// 任务快照不得在锁外读取：worker goroutine 会在锁内写 job.outcomes，
+// 锁外读同一份切片是数据竞争（go test -race 会命中）。
+func TestMintJobStatusHasNoSnapshotRace(t *testing.T) {
+	setupHarvestTest(t)
+	fakeHarvestCLI(t, nil)
+	keys := []string{"sk-race-1", "sk-race-2", "sk-race-3", "public"}
+
+	if started, _ := startZenMintJob(keys, false); !started {
+		t.Fatal("job did not start")
+	}
+	// 与任务并发地读状态 / 重复点击（后者会走"已有任务在跑"的快照分支）
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			zenMintJobStatus()
+			startZenMintJob(keys, false)
+		}
+	}()
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		st := zenMintJobStatus()
+		if st != nil && st["running"] == false {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	<-done
+	zenMintJobMu.Lock()
+	finished := zenMintJobCur != nil && zenMintJobCur.finished
+	zenMintJobMu.Unlock()
+	if !finished {
+		t.Fatal("mint job did not finish")
 	}
 }

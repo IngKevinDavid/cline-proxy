@@ -50,9 +50,10 @@ import (
 // key 以单 key 形态写入该 key 专属 HOME 的 auth.json，跑完删除（不落盘留存）。
 
 var (
-	harvestMu      sync.Mutex
-	harvestFails   = map[string]int{} // key -> 连续收割失败次数
-	harvestLastTry = map[string]time.Time{}
+	harvestMu        sync.Mutex
+	harvestFails     = map[string]int{} // key -> 连续收割失败次数
+	harvestLastTry   = map[string]time.Time{}
+	harvestLastSweep = map[string]time.Time{} // key -> 最近一次周期补收尝试
 )
 
 // per-key 串行锁：同 key 的两次收割不能并发（会互相踩会话表与日志判读）。
@@ -460,7 +461,7 @@ func mintZenSessions(ctx context.Context, keys []string, force bool, progress fu
 	out := make([]zenMintOutcome, len(keys))
 	todo := make([]int, 0, len(keys))
 	for i, k := range keys {
-		out[i] = zenMintOutcome{Index: i, Key: k, KeyMask: kit.Truncate(k, 8) + "…", Done: true}
+		out[i] = zenMintOutcome{Index: i, Key: k, KeyMask: maskZenKey(k), Done: true}
 		if k == "" || k == "public" {
 			out[i].Skipped = true
 			out[i].Err = "no usable key"
@@ -563,7 +564,7 @@ func startZenMintJob(keys []string, force bool) (started bool, state map[string]
 	// 否则未完成的槽位是零值（index 0、无 keyMask），表格里会全渲染成 #1。
 	outcomes := make([]zenMintOutcome, len(keys))
 	for i, k := range keys {
-		outcomes[i] = zenMintOutcome{Index: i, Key: k, KeyMask: kit.Truncate(k, 8) + "…"}
+		outcomes[i] = zenMintOutcome{Index: i, Key: k, KeyMask: maskZenKey(k)}
 	}
 	job := &zenMintJob{
 		Force:     force,
@@ -572,6 +573,9 @@ func startZenMintJob(keys []string, force bool) (started bool, state map[string]
 		outcomes:  outcomes,
 	}
 	zenMintJobCur = job
+	// 快照必须在临界区内取：goroutine 一起来就会在锁内写 job.outcomes，
+	// 在锁外调用 zenMintJobSnapshotLocked 读同一份切片就是数据竞争。
+	snap := zenMintJobSnapshotLocked(job)
 	zenMintJobMu.Unlock()
 
 	go func() {
@@ -606,7 +610,7 @@ func startZenMintJob(keys []string, force bool) (started bool, state map[string]
 		}
 		log.Printf("zen mint job: %d ok, %d failed, %d skipped (force=%v)", ok, fail, skip, force)
 	}()
-	return true, zenMintJobSnapshotLocked(job)
+	return true, snap
 }
 
 // zenMintJobSnapshotLocked 组装进度快照（调用方持 zenMintJobMu）。
@@ -653,8 +657,9 @@ func zenMintJobStatus() map[string]any {
 // 于是同一批 key 被重复收割（白烧出口 IP 的额度）。
 var periodicBatchMu sync.Mutex
 
-// startZenHarvester 启动定时收割循环：每 10 分钟检查一次，为"从未收割成功"的 key
-// 或"最久未收割超过间隔"的 key 补收（并行，受 harvestConcurrency 约束）。
+// startZenHarvester 启动定时收割循环：每 10 分钟检查一次，为"从未 mint 成功"
+// 或"最久未 mint 超过间隔"的 key 补收（并行，受 harvestConcurrency 约束）。
+// 从未 mint 成功的 key 按 interval 节流，不会每个 tick 重试。
 //
 // 检查频率必须明显高于 harvestInterval：间隔到与真正执行之间会差一个 tick，
 // 4h 目标配 1h ticker 实际落在 4h-5h——正好顶到 5h 额度窗口的边。10 分钟
@@ -678,37 +683,16 @@ func startZenHarvester() {
 			if interval < time.Hour {
 				interval = time.Hour
 			}
-			var stale []string
-			for _, k := range cfg.Keys {
-				if k == "" || k == "public" {
-					continue
-				}
-				loadZenSessions()
-				zenSessMu.Lock()
-				e := zenSessions[k]
-				// 新鲜度基准：CLI 收割时间（HarvestedAt）。旧版本文件只有
-				// Updated（每次请求刷新）——回退用 Updated 但该值对活跃 key
-				// 恒新，等于"活跃 key 永不周期收割"，容忍为历史行为。
-				var fresh int64
-				if e != nil {
-					if e.HarvestedAt > 0 {
-						fresh = e.HarvestedAt
-					} else {
-						fresh = e.Updated
-					}
-				}
-				zenSessMu.Unlock()
-				if fresh > 0 && time.Since(time.Unix(fresh, 0)) < interval {
-					continue
-				}
-				stale = append(stale, k)
-			}
+			stale := periodicSweepCandidates(cfg.Keys, interval)
 			if len(stale) == 0 {
 				continue
 			}
 			if !periodicBatchMu.TryLock() {
 				continue // 上一批还没跑完，不必排队（下一 tick 会重算 stale）
 			}
+			// 盖章必须在拿到批次之后：TryLock 失败时这些 key 根本没被试过，
+			// 提前盖上会让它们平白推迟一个 interval 才再入选。
+			markSweepTried(stale)
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 			// force=true：这些 key 是"按新鲜度挑出来的"，正是要重 mint。
 			mintZenSessions(ctx, stale, true, nil)
@@ -716,6 +700,39 @@ func startZenHarvester() {
 			periodicBatchMu.Unlock()
 		}
 	}()
+}
+
+// periodicSweepCandidates 周期补收名单：从未 mint 成功或最久未 mint 超过
+// interval 的 key。
+//
+// 新鲜度只看 HarvestedAt（CLI 实际 mint 成功的时间），不能回退用 Updated：
+// 后者每次请求都刷新，对活跃 key 恒新，等于"被请求过的 key 永不周期收割"；
+// 而从未 mint 的本地随机占位恰恰是一直 403 的那一类，必须留在名单里。
+// HarvestedAt==0 的 key 用 sweepDue 按 interval 节流，避免持续失败的 key
+// 被 10 分钟一个的 ticker 变成无限重试、反复烧出口 IP 的额度。
+func periodicSweepCandidates(keys []string, interval time.Duration) []string {
+	var stale []string
+	for _, k := range keys {
+		if k == "" || k == "public" {
+			continue
+		}
+		loadZenSessions()
+		zenSessMu.Lock()
+		e := zenSessions[k]
+		var fresh int64
+		if e != nil {
+			fresh = e.HarvestedAt
+		}
+		zenSessMu.Unlock()
+		if fresh > 0 && time.Since(time.Unix(fresh, 0)) < interval {
+			continue
+		}
+		if !sweepDue(k, interval) {
+			continue
+		}
+		stale = append(stale, k)
+	}
+	return stale
 }
 
 // harvestMissingSessions 启动时为无 live 会话的 key 收割（并行）。
@@ -796,6 +813,27 @@ func harvestMarkSuccess(key string) {
 	harvestMu.Unlock()
 }
 
+// sweepDue 周期补收的按 key 节流：距离上次补收尝试不足 interval 就不重复试。
+// 只用于 HarvestedAt==0 的 key（从未 mint 成功），否则每 10 分钟一个 ticker
+// 会把"这个 key 一直 mint 不上"变成每 10 分钟一次的无限重试。
+func sweepDue(key string, interval time.Duration) bool {
+	harvestMu.Lock()
+	defer harvestMu.Unlock()
+	last, ok := harvestLastSweep[key]
+	return !ok || time.Since(last) >= interval
+}
+
+// markSweepTried 记录本批补收的尝试时间（在 mint 之前调用：这批可能跑十几分钟，
+// 期间不该再从下一个 tick 挑出同一批 key）。
+func markSweepTried(keys []string) {
+	now := time.Now()
+	harvestMu.Lock()
+	defer harvestMu.Unlock()
+	for _, k := range keys {
+		harvestLastSweep[k] = now
+	}
+}
+
 // pruneZenKeyState 配置变更后清理已移除 key 的运行时状态（会话粘性 + 收割计数）。
 // valid 为当前有效 key 集合。
 func pruneZenKeyState(valid map[string]bool) {
@@ -810,15 +848,17 @@ func pruneZenKeyState(valid map[string]bool) {
 			delete(harvestLastTry, k)
 		}
 	}
-	harvestMu.Unlock()
-
-	harvestKeyMu.Lock()
-	for k := range harvestKeyLocks {
+	for k := range harvestLastSweep {
 		if !valid[k] {
-			delete(harvestKeyLocks, k)
+			delete(harvestLastSweep, k)
 		}
 	}
-	harvestKeyMu.Unlock()
+	harvestMu.Unlock()
+
+	// harvestKeyLocks 刻意不清理：这里的 per-key 锁可能正被在途 mint 持有，
+	// 删掉条目后 lockHarvestKey 会为同一 key 新建一把锁——两个 goroutine
+	// 就能同时 mint 同一 key（共用 per-key HOME，auth.json 与 CLI 日志互相
+	// 覆盖，mint 结果串味）。条目数等于历史配置过的 key 数，量级可忽略。
 
 	zenSessMu.Lock()
 	removed := 0

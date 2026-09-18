@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,19 +70,45 @@ func loadZenSessions() {
 	zenSessLoaded = true
 	data, err := os.ReadFile(zenSessionFile())
 	if err != nil {
+		// ENOENT 是首启正常路径（还没有会话文件）；其他错误要让运维看见，
+		// 否则会静默以空表运行，并在下次 save 时把原文件覆盖掉。
+		if !os.IsNotExist(err) {
+			log.Printf("zen sessions read failed (%s): %v", zenSessionFile(), err)
+		}
 		return
 	}
 	var m map[string]*zenSessionEntry
 	if err := json.Unmarshal(data, &m); err != nil {
-		log.Printf("zen sessions parse failed, starting fresh: %v", err)
+		// 解析失败先把坏文件改名留证，再以空表启动——与 loadZenConfig 同做法。
+		// 不备份的话，紧随其后的 save 会直接覆盖，出问题时无从追查。
+		_ = os.Rename(zenSessionFile(), zenSessionFile()+".corrupt")
+		log.Printf("zen sessions parse failed, starting fresh (backup: %s.corrupt): %v", zenSessionFile(), err)
 		return
 	}
+	migrated := 0
 	for k, e := range m {
 		if e != nil && e.Session != "" {
+			// 旧版本文件没有 minted 字段（随并行收割引入）。用前缀回认已有会话：
+			// 收割 CLI mint 的是 ses_*，本地占位是 sess_*（"sess_" 不以 "ses_"
+			// 开头，两类不会混淆）。缺这一步，升级后首启会把整池 key 判成
+			// "未 mint" 全量重 mint，白烧一遍本就紧张的额度。
+			if !e.Minted && strings.HasPrefix(e.Session, "ses_") {
+				e.Minted = true
+				// 同时把收割时间认到 Updated：这些会话大概率还能用，不该在
+				// 升级后的第一次周期扫描就把整池重 mint 一遍。真失效了还有
+				// 403 路径（连续 2 次）立刻补收，不必预防性烧额度。
+				if e.HarvestedAt == 0 && e.Updated > 0 {
+					e.HarvestedAt = e.Updated
+				}
+				migrated++
+			}
 			zenSessions[k] = e
 		}
 	}
 	log.Printf("zen sessions loaded: %d key(s) with sticky identity", len(zenSessions))
+	if migrated > 0 {
+		log.Printf("zen sessions migrated: %d key(s) marked CLI-minted from session id prefix", migrated)
+	}
 }
 
 // saveZenSessionsLocked 持久化当前会话表（调用方持有 zenSessMu）。
@@ -194,6 +221,11 @@ func StickyZenIdentity(key string) (sess, req, ua string) {
 		log.Printf("zen sticky session created for key#%d: %s (unminted placeholder, harvester will mint)", keyIndex(key), kit.Truncate(e.Session, 24))
 	}
 	e.Updated = time.Now().Unix()
+	// 补 UA：旧版本文件或外部改写的条目可能缺这一项，空 UA 发出会被上游
+	// 按非 CLI 流量处理。会话 ID 是服务端绑定的一部分，UA 必须与 mint 时一致。
+	if e.UA == "" {
+		e.UA = zenNativeUA
+	}
 	return e.Session, "msg_" + kit.RandAlphaNum(26), e.UA
 }
 

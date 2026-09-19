@@ -107,6 +107,7 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/zen/models", adminCORS(auth(handleZenModels)))
 	mux.HandleFunc("/admin/api/zen/models/refresh", adminCORS(auth(handleZenModelsRefresh)))
 	mux.HandleFunc("/admin/api/zen/stats", adminCORS(auth(handleZenStats)))
+	mux.HandleFunc("/admin/api/zen/keys/test", adminCORS(auth(handleZenKeyTest)))
 	mux.HandleFunc("/admin/api/zen/sessions", adminCORS(auth(handleZenSessions)))
 	mux.HandleFunc("/admin/api/zen/sessions/mint", adminCORS(auth(handleZenSessionsMint)))
 	mux.HandleFunc("/admin/zen/", func(w http.ResponseWriter, r *http.Request) {

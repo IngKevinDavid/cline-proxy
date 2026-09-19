@@ -1,12 +1,17 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
+
+	"cline-go-proxy/internal/kit"
 )
 
 // ============ Zen 免费模型管理 API ============
@@ -252,6 +257,136 @@ func handleZenSessions(w http.ResponseWriter, r *http.Request) {
 		"job":               zenMintJobStatus(),
 	}
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: data})
+}
+
+// POST /admin/api/zen/keys/test   body: {"index": 0}
+// 对单个 zen key 发一个极小探测请求（与 cline 账号的 Test 按钮同语义）。
+// 整个探测固定在该 key 上（zenCallOpts.pinKey），绝不影响正常轮转；成功即
+// 清除该 key 的冷却——真实 2xx 是"该 key 现在可用"的最强证据，比干等上游的
+// Retry-After 更可信。429 原样上报冷却与预计恢复时间（探测本身会让 key 重新
+// 进入冷却，时长来自上游 Retry-After，上限 24h）；403 = 会话已死，探测已顺带
+// 触发收割机，提示去 mint。返回的 status: active / cooldown / error。
+func handleZenKeyTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+	var req struct {
+		Index int `json:"index"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		return
+	}
+	cfg := getZenConfig()
+	if req.Index < 0 || req.Index >= len(cfg.Keys) {
+		writeAPI(w, http.StatusNotFound, apiResponse{Error: "key index out of range"})
+		return
+	}
+	key := cfg.Keys[req.Index]
+	if key == "" || key == "public" {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "nothing to test: the anonymous public key has no credential"})
+		return
+	}
+
+	result, status := testZenKey(key, req.Index)
+	log.Printf("Test zen key #%d (%s): status=%s model=%s reason=%v",
+		req.Index+1, maskZenKey(key), status, result["model"], result["reason"])
+
+	writeAPI(w, http.StatusOK, apiResponse{
+		Success: status == "active",
+		Message: status,
+		Data:    result,
+	})
+}
+
+// testZenKey 执行单 key 探测：默认 zen 模型 + 一条 "Reply with exactly: OK"，
+// 按模型的 Upstream 字段走 chat 或原生 responses 上游（与正常请求同一条路，
+// 含 FreeTier gate、会话粘性与冷却副作用）。返回 (结果, 状态)。
+func testZenKey(key string, index int) (map[string]any, string) {
+	result := map[string]any{
+		"index":   index,
+		"keyMask": maskZenKey(key),
+	}
+	zm := zenProbeModel()
+	if zm == nil {
+		result["reason"] = "no zen model available to probe (model catalog empty)"
+		return result, "error"
+	}
+	result["model"] = zm.ID
+
+	params := map[string]any{
+		"model":    zm.ID,
+		"messages": []any{map[string]any{"role": "user", "content": "Reply with exactly: OK"}},
+		// 上游 2xx 即探测成功；不追求可读内容，但太小会撞上推理模型的
+		// 隐性预算（_finish_reason=length），64 足够容纳一个词。
+		"max_tokens": 64,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	var (
+		resp *http.Response
+		err  error
+	)
+	opts := []zenCallOpts{{pinKey: key}}
+	if zm.Upstream == "responses" {
+		resp, _, err = callZenResponsesAPI(ctx, params, true, opts...)
+	} else {
+		resp, _, err = callZenAPI(ctx, params, true, opts...)
+	}
+	result["latencyMs"] = time.Since(start).Milliseconds()
+
+	he := (*zenHTTPError)(nil)
+	if err != nil && errors.As(err, &he) {
+		switch he.Status {
+		case http.StatusTooManyRequests:
+			// 调用链已对该 key 执行 cooldownZenKey(Retry-After 或 1min 默认)
+			result["httpStatus"] = he.Status
+			result["reason"] = "429 rate limited: " + kit.Truncate(he.Body, 300)
+			if until, ok := zenKeyCooldownUntil(key); ok {
+				result["cooldownUntil"] = until.UTC().Format(time.RFC3339)
+				result["remaining"] = formatDuration(time.Until(until))
+			}
+			return result, "cooldown"
+		case http.StatusForbidden:
+			result["httpStatus"] = he.Status
+			result["reason"] = "session rejected (403) — this key's session is no longer live; the harvester was just triggered, use the mint buttons below to retry now"
+			return result, "error"
+		default:
+			result["httpStatus"] = he.Status
+			result["reason"] = fmt.Sprintf("API %d: %s", he.Status, kit.Truncate(he.Body, 300))
+			return result, "error"
+		}
+	}
+	if err != nil {
+		// 网络/超时：不冷却、不改状态（与 cline 的网络错误分支语义一致地保守）
+		result["reason"] = "upstream call failed: " + err.Error()
+		return result, "error"
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		result["httpStatus"] = resp.StatusCode
+		result["reason"] = fmt.Sprintf("API %d: %s", resp.StatusCode, kit.Truncate(string(bodyBytes), 300))
+		return result, "error"
+	}
+
+	// 成功：清除冷却 + 复位 403 连败计数（与 cline "测试成功即复位"一致），
+	// 并计入该 key 的用量。
+	uncoolZenKey(key)
+	harvestMarkSuccess(key)
+	markZenKeySuccess(key)
+	result["reason"] = "ok"
+	return result, "active"
 }
 
 // POST /admin/api/zen/sessions/mint

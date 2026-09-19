@@ -560,7 +560,12 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
       </div>
       <div class="field" style="flex:2"><label>API keys (one per line, round-robin rotation, auto-cooldown on 429)</label><textarea id="ocKeys" rows="3" placeholder="public"></textarea></div>
     </div>
-    <div class="hint" id="ocKeyStates" style="margin-bottom:8px"></div>
+    <div class="table-wrap" style="margin-bottom:10px">
+      <table>
+        <thead><tr><th style="width:50px">#</th><th style="width:110px">Key</th><th style="width:70px">Usage</th><th style="width:110px">Session</th><th>Cooldown</th><th style="width:90px"></th></tr></thead>
+        <tbody id="ocKeysBody"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody>
+      </table>
+    </div>
     <div class="form-row">
       <div class="field"><label>Base URL</label><input type="text" id="ocBaseURL" placeholder="https://opencode.ai/zen/v1"></div>
       <div class="field">
@@ -1293,9 +1298,7 @@ async function loadOcConfig() {
     _('ocEnabled').value = String(c.enabled);
     _('ocKeys').value = (c.keys && c.keys.length ? c.keys : [c.key || 'public']).join('\n');
     const ks = c.keyStates || [];
-    _('ocKeyStates').textContent = ks.length
-      ? ks.map(k => '#' + (k.index + 1) + ' ' + k.keyMask + ' · ' + (k.usage || 0) + ' calls' + (k.sessionLive ? '' : ' · NO SESSION') + (k.cooling ? ' · cooling' : '') + (k.current ? ' · next' : '')).join('  |  ')
-      : '';
+    renderOcKeyStates(ks);
     _('ocBaseURL').value = c.baseURL || '';
     _('ocProxyState').textContent = (c.proxies && c.proxies.length)
       ? c.proxies.length + ' prox' + (c.proxies.length === 1 ? 'y' : 'ies') + ' configured (' + (c.proxyStrategy || 'round_robin') + ')'
@@ -1344,6 +1347,56 @@ async function saveOcConfig() {
     toast('opencode config saved', 'success');
     loadOcConfig();
   } catch (e) { toast('Save failed: ' + e.message, 'error'); }
+}
+
+// per-key 状态表：key 掩码 / 用量 / 会话 / 冷却（含预计恢复时刻）/ Test 按钮。
+// Test 与 cline 账号的同语义：真实探测，成功即复位该 key 的冷却。
+function renderOcKeyStates(ks) {
+  const tb = _('ocKeysBody');
+  if (!tb) return;
+  tb.innerHTML = ks.length
+    ? ks.map(k => {
+        const st = k.sessionLive
+          ? '<span style="color:var(--accent2)">live</span>'
+          : (k.sessionMinted ? '<span style="color:var(--danger)">stale</span>' : '<span style="color:var(--danger)">not minted</span>');
+        const cool = k.cooling
+          ? '<span style="color:var(--danger)">cooling' + (k.cooldownUntil ? ' · until ' + esc(fmtWhen(k.cooldownUntil)) : '') + '</span>'
+          : '<span style="color:var(--text2)">-</span>';
+        return '<tr><td>#' + (k.index + 1) + (k.current ? ' <span style="color:var(--accent)" title="next in rotation">●</span>' : '') + '</td>' +
+          '<td style="font-family:monospace;font-size:11px">' + esc(k.keyMask) + '</td>' +
+          '<td>' + (k.usage || 0) + '</td>' +
+          '<td>' + st + '</td>' +
+          '<td>' + cool + '</td>' +
+          '<td>' + (k.keyMask === 'public (no key)' ? '' : '<button class="btn btn-sm" data-zk="' + k.index + '">Test</button>') + '</td></tr>';
+      }).join('')
+    : '<tr><td colspan="6" class="empty">No zen keys configured</td></tr>';
+  tb.onclick = e => {
+    const b = e.target.closest('button[data-zk]');
+    if (b) testZenKey(parseInt(b.dataset.zk, 10), b);
+  };
+}
+
+async function testZenKey(index, btn) {
+  const original = btn ? btn.innerHTML : '';
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loading"></span>Testing'; }
+  try {
+    const d = await api('POST', '/zen/keys/test', { index: index });
+    const r = d.data || {};
+    const label = { active: 'OK', cooldown: 'Cooldown', error: 'Error' }[r.status] || r.status;
+    let msg = 'Key #' + (index + 1) + ' (' + (r.keyMask || '') + ') — ' + label;
+    if (r.model) msg += ' via ' + r.model;
+    if (r.latencyMs != null) msg += ' (' + r.latencyMs + 'ms)';
+    if (r.status === 'active') msg += ' — cooldown cleared';
+    if (r.cooldownUntil) msg += '\nEstimated recovery: ' + fmtWhen(r.cooldownUntil) + (r.remaining ? ' (remaining ' + r.remaining + ')' : '');
+    if (r.reason && r.reason !== 'ok') msg += '\n' + r.reason;
+    const type = r.status === 'active' ? 'success' : (r.status === 'cooldown' ? 'warning' : 'error');
+    toast(msg, type, 6000);
+  } catch (e) {
+    toast('Test failed: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = original; }
+    loadOcConfig();  // 冷却被清除/新设置，立即刷新状态表
+  }
 }
 
 // ========== Proxy pool ==========

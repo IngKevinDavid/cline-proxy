@@ -781,3 +781,44 @@ retries), and the field failure is reproduced and fixed. Four defects found:
   throttle, then covered by the periodic sweep. Accepted cost of not letting
   the CLI saturate a 1-core box.
 
+## Zen per-key "Test" button (2026-09-19)
+
+Parity with the cline accounts tab: the opencode zen keys used to be a single
+comma/line box plus a one-line status summary, and a cooling key had no
+recovery action — the cooldown came from the upstream `Retry-After` (measured:
+zen's `FreeUsageLimitError` returns a Retry-After that runs until 00:00 UTC,
+i.e. up to ~24h) and all you could do was wait.
+
+### What was built
+- `POST /admin/api/zen/keys/test` (`{"index": n}`): one real probe request
+  ("Reply with exactly: OK", smallest free zen model, routed by the model's
+  `Upstream` field like any normal request). The whole call is pinned to the
+  probed key via a new variadic `zenCallOpts{pinKey}` on `callZenAPI` /
+  `callZenResponsesAPI` — pinned calls never switch keys on 429/403 and return
+  immediately with the typed error, so the verdict belongs to that key alone
+  and rotation is untouched (unlike `ZEN_PIN_KEY`, which is process-wide).
+- 2xx → `active` and the key's cooldown is cleared (`uncoolZenKey`) plus its
+  403 fail counter reset and usage bumped — same "test success resets state"
+  semantics as the cline Test button. 429 → `cooldown` with `cooldownUntil` /
+  `remaining` read back from the cooldown the call itself just set. 403 →
+  `error` "session no longer live" (the call already triggered the harvester).
+- Panel: the one-line key summary is now a per-key table (mask / usage /
+  session state / cooldown incl. expected recovery time in the browser's
+  timezone / Test button); the result toast carries model + latency + reason.
+- Verified in-container against the real upstream: 3 keys → active (~700ms,
+  cooldown cleared, usage bumped), 1 key → cooldown with the real upstream
+  body (`FreeUsageLimitError`, recovery at 00:00 UTC). Full suite + `-race`
+  green; 6 new unit tests cover pin semantics, uncool, and the handler.
+
+### Settled trade-offs (do not re-propose)
+- **A successful probe spends one request of that key's quota.** Same trade-off
+  as the cline Test button; a probe that reports cooldown spends nothing (the
+  429 is free). Do not "fix" this by faking the probe with a lighter call —
+  anything that doesn't pass the FreeTier gate proves nothing.
+- **The probe uses the smallest free model, not the client's model.** The
+  button tests key+session+quota, not model quality; pinning per-model would
+  duplicate endpoint learning for no diagnostic gain.
+- **Pin returns on first 429/403 instead of retrying.** A retried probe would
+  either test a different key (switch) or re-enter a cooldown the operator was
+  asking about. One call, one verdict.
+

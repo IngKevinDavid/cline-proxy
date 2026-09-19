@@ -125,6 +125,25 @@ func isZenFreeModel(m *ZenModel) bool {
 	return strings.HasSuffix(m.ID, "-free")
 }
 
+// zenProbeModel 管理面板 per-key "Test" 探测用的模型：确定性挑 ID 最小的
+// free zen 模型（与 getDefaultModel 的"最小 active id"规则同形）。native-
+// responses 模型也可能被选中——testZenKey 按其 Upstream 字段走对应上游调用，
+// 无需特判。目录为空（冷启动且 registry 不可达）时返回 nil，探测直接报错。
+func zenProbeModel() *ZenModel {
+	zenModelsMu.RLock()
+	defer zenModelsMu.RUnlock()
+	var best *ZenModel
+	for _, m := range zenModels {
+		if !isZenFreeModel(m) {
+			continue
+		}
+		if best == nil || m.ID < best.ID {
+			best = m
+		}
+	}
+	return best
+}
+
 // resolveZenFreeModel 只解析免费 zen 模型
 func resolveZenFreeModel(id string) (*ZenModel, bool) {
 	m, ok := resolveZenModel(id)
@@ -583,6 +602,36 @@ func zenKeyCooling(key string) bool {
 		return false
 	}
 	return true
+}
+
+// zenKeyCooldownUntil 只读查询冷却截止时刻（不清理过期项）。
+// 管理面板"Test"命中 429 后用它回报预计恢复时间——上游的 Retry-After 决定
+// 冷却时长（上限 24h），不写进日志的话面板是唯一能看到的观测点。
+func zenKeyCooldownUntil(key string) (time.Time, bool) {
+	zenKeyMu.Lock()
+	defer zenKeyMu.Unlock()
+	until, ok := zenKeyCool[key]
+	return until, ok
+}
+
+// uncoolZenKey 清除 key 的冷却。管理面板"Test"探测成功后调用，语义与 cline
+// 账号的"测试成功即复位"一致：一次真实的 2xx 是"该 key 现在能用"的最强证据，
+// 比干等 Retry-After 更可信。对未冷却/无关 key 是无害 no-op。
+func uncoolZenKey(key string) {
+	if key == "" {
+		return
+	}
+	zenKeyMu.Lock()
+	delete(zenKeyCool, key)
+	zenKeyMu.Unlock()
+}
+
+// zenCallOpts 单次上游调用的可选参数（变参：既有 callZenAPI/callZenResponsesAPI
+// 调用点零改动）。目前只有 pinKey：把本次调用的**所有**尝试固定在一个 key 上。
+// 与 ZEN_PIN_KEY 环境变量的区别：那是进程级排障开关，会影响所有并发请求；
+// pinKey 只作用于这一次调用（管理面板的 per-key "Test" 按钮），绝不影响正常轮转。
+type zenCallOpts struct {
+	pinKey string
 }
 
 // zenKeyStatus 每个 key 的运行时状态（管理面板展示用，key 值打码）。
@@ -1485,7 +1534,11 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 // prompt_cache_key 绑定本次上游会话：官方 CLI 发 prompt_cache_key=<会话 ID>
 // 且与 x-opencode-session 同值。网关此前每 attempt 换新 sess_ 导致同一请求
 // 的 header 与 body 会话不一致；现 body 在请求体构造时绑定当次 sess_。
-func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool) (*http.Response, int, error) {
+func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool, opts ...zenCallOpts) (*http.Response, int, error) {
+	var o zenCallOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	cfg := getZenConfig()
 	model, _ := params["model"].(string)
 	zm, ok := resolveZenModel(model)
@@ -1522,8 +1575,13 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		// retryKey（会话绑定要求 key 与 sess_ 一致；换 key 由下方
 		// 限流/403 分支显式改写 retryKey 后 continue 实现）。
 		// ZEN_PIN_KEY=n 时固定用第 n 个 key（排障直测），默认轮转。
+		// pinKey（面板 Test）：整条调用链固定该 key，优先级最高——探测的
+		// 结论只对被探测的 key 成立，中途换 key 会把别的 key 的成败算到它头上。
 		var key string
-		if pk := pinnedZenKey(); pk != "" {
+		if o.pinKey != "" {
+			key = o.pinKey
+			retryKey = o.pinKey
+		} else if pk := pinnedZenKey(); pk != "" {
 			key = pk
 			retryKey = pk
 		} else if retryKey == "" {
@@ -1610,6 +1668,11 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 			rateLimited++
 			rl := parseRetryAfter(resp.Header.Get("Retry-After"))
 			cooldownZenKey(key, rl)
+			// pinKey（面板 Test）：探测结论必须是被探测 key 自己的——立即原样
+			// 上报 429（冷却已在上一行生效），不换 key 重试、不吃重试睡眠。
+			if o.pinKey != "" {
+				return nil, rateLimited, apiErr
+			}
 			if next := pickZenKey(); next != "" && next != key && !zenKeyCooling(next) {
 				// 必须同步改写 retryKey：循环头 key=retryKey，只改 key 不改
 				// retryKey 会让下一次迭代继续用刚冷却的旧 key，无限 429 空转。
@@ -1645,6 +1708,11 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		// 收割机（连续 403 达阈值）mint 真会话补上。本次按轮转换 key 重试。
 		if resp.StatusCode == http.StatusForbidden {
 			go harvestOnForbidden(key)
+			// pinKey（面板 Test）：会话已死的结论立刻上报（收割机已在后台
+			// 触发），同 key 重试只会再 403，换 key 则测的不是它。
+			if o.pinKey != "" {
+				return nil, rateLimited, apiErr
+			}
 			if attempt < retries {
 				if next := pickZenKey(); next != "" && !zenKeyCooling(next) {
 					key = next
@@ -1662,7 +1730,11 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 // 返回 (响应, 命中限流次数, 错误)。
 // ctx 来自客户端请求: 客户端取消（IDE abort）时立即终止上游调用,不重试、
 // 不计数、不冷却任何 key/代理 —— 客户端行为不会污染限流状态。
-func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.Response, int, error) {
+func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ...zenCallOpts) (*http.Response, int, error) {
+	var o zenCallOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	cfg := getZenConfig()
 	body := buildZenBody(params, stream)
 
@@ -1708,8 +1780,11 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 		// 客户端身份：会话粘性——同一 key 复用稳定的 sess_/UA（服务端
 		// 会话绑定要求，随机 sess_ 会 403），msg_ 请求 ID 每次随机。
 		// ZEN_PIN_KEY=n 时固定用第 n 个 key（单 key 直测/排障），默认轮转。
+		// pinKey（面板 Test）优先：整条调用链固定该 key，见 zenCallOpts 注释。
 		key := pickZenKey()
-		if pk := pinnedZenKey(); pk != "" {
+		if o.pinKey != "" {
+			key = o.pinKey
+		} else if pk := pinnedZenKey(); pk != "" {
 			key = pk
 		}
 		sess, user, ua := StickyZenIdentity(key)
@@ -1769,6 +1844,10 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 			// 冷却当前 key；若还有其他未冷却 key 则立即切换重试（不睡眠）
 			rl := parseRetryAfter(resp.Header.Get("Retry-After"))
 			cooldownZenKey(key, rl)
+			// pinKey（面板 Test）：立即原样上报 429（冷却已生效），不换 key。
+			if o.pinKey != "" {
+				return nil, rateLimited, apiErr
+			}
 			if next := pickZenKey(); next != "" && next != key && !zenKeyCooling(next) {
 				log.Printf("  zen rate limited (%d), switching to next zen key (%d configured)", resp.StatusCode, len(cfg.Keys))
 				continue
@@ -1807,6 +1886,10 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool) (*http.
 			// 403 才是额度窗口/寿命到期的证据。
 			log.Printf("  zen chat session rejected (403) [%s], key#%d", zenSessionDesc(key), keyIndex(key))
 			go harvestOnForbidden(key)
+			// pinKey（面板 Test）：立即上报（收割机已触发），见 responses 路径同处。
+			if o.pinKey != "" {
+				return nil, rateLimited, apiErr
+			}
 			if attempt < retries {
 				continue
 			}

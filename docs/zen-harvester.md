@@ -88,6 +88,18 @@ per-key HOME 有两个作用：**(a) 可并行**（不同 key 无共享 auth.jso
 | `ZEN_HARVEST_CONCURRENCY` | `1` | 同时收割的 key 数（1..8）。**默认串行**：CLI 每次启动会 burst 一大块 CPU/内存，小实例上并发会把单次 mint 拖到慢于每 key 预算，表现为"全池 no session minted"。只在实例确有富余（4 核以上、内存充足）时才调高 |
 | `ZEN_HARVEST_KEY_TIMEOUT_SECONDS` | `150` | 单个 key 的收割总预算（最小 30s）。失败路径最多 3 模型 × 3 次尝试，不封顶会占住 worker 9 分钟 |
 
+## 冷却（429）与面板 Test 按钮
+
+某 key 命中 429（含按错误体关键词识别的"限流型 403"）即进入冷却，时长取上游
+`Retry-After`（缺省 1 分钟，上限 24h）。实测 zen 的 `FreeUsageLimitError` 给的
+`Retry-After` 是**到当日 00:00 UTC 的剩余时间**——所以一个 key 冷却"半小时还在
+冷却"是正常的，它要等的是每日额度窗口复位。冷却只存在内存里，重启即清。
+
+管理面板的 opencode 标签页有每 key 状态表（掩码 / 用量 / 会话 / 冷却与预计恢复
+时刻）和 **Test** 按钮：向该 key 发一次固定 key 的真实探测，2xx 即立即清除冷却
+（比干等 Retry-After 更可信）；429 则原样回报冷却与恢复时间；403 表示会话已死，
+探测会顺带触发收割机。成功的探测会消耗该 key 的一次额度。
+
 ## 降级语义
 
 - CLI 二进制不存在（未 pin 平台包的架构，如 arm/v7）→ 自动降级为纯网关

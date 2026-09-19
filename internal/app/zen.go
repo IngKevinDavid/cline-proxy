@@ -1666,8 +1666,15 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 
 		if isRateLimited(resp.StatusCode, bodyBytes) {
 			rateLimited++
-			rl := parseRetryAfter(resp.Header.Get("Retry-After"))
+			// 原样记录上游的 Retry-After（HTTP 日期还是秒数、值是多少）：
+			// 冷却时长完全由它决定，而面板只能看到换算后的截止时刻。没有这行，
+			// "这个 key 为什么冷却这么久"只能靠猜（实测 FreeUsageLimitError
+			// 的 Retry-After 落在每日窗口复位点，见 TODO.md）。
+			rawRetry := resp.Header.Get("Retry-After")
+			rl := parseRetryAfter(rawRetry)
 			cooldownZenKey(key, rl)
+			log.Printf("  zen rate limited (%d) key#%d: Retry-After=%q -> cooldown %v",
+				resp.StatusCode, keyIndex(key), rawRetry, rl)
 			// pinKey（面板 Test）：探测结论必须是被探测 key 自己的——立即原样
 			// 上报 429（冷却已在上一行生效），不换 key 重试、不吃重试睡眠。
 			if o.pinKey != "" {
@@ -1841,9 +1848,13 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 			// 对 key/身份/IP 组合的判定,把出口毒化 10 分钟只会让上游繁忙期
 			// (慢模型 503/429)把整个池打瘫;下一次尝试的轮转自然换到下一出口,
 			// key 冷却 + 轮转已足够分摊负载。
-			// 冷却当前 key；若还有其他未冷却 key 则立即切换重试（不睡眠）
-			rl := parseRetryAfter(resp.Header.Get("Retry-After"))
+			// 冷却当前 key；若还有其他未冷却 key 则立即切换重试（不睡眠）。
+			// Retry-After 原样入日志（同 responses 路径）。
+			rawRetry := resp.Header.Get("Retry-After")
+			rl := parseRetryAfter(rawRetry)
 			cooldownZenKey(key, rl)
+			log.Printf("  zen rate limited (%d) key#%d: Retry-After=%q -> cooldown %v",
+				resp.StatusCode, keyIndex(key), rawRetry, rl)
 			// pinKey（面板 Test）：立即原样上报 429（冷却已生效），不换 key。
 			if o.pinKey != "" {
 				return nil, rateLimited, apiErr

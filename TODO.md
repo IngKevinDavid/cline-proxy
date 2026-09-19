@@ -785,9 +785,10 @@ retries), and the field failure is reproduced and fixed. Four defects found:
 
 Parity with the cline accounts tab: the opencode zen keys used to be a single
 comma/line box plus a one-line status summary, and a cooling key had no
-recovery action — the cooldown came from the upstream `Retry-After` (measured:
-zen's `FreeUsageLimitError` returns a Retry-After that runs until 00:00 UTC,
-i.e. up to ~24h) and all you could do was wait.
+recovery action — the cooldown came from the upstream `Retry-After` (measured
+twice: zen's `FreeUsageLimitError` returns a Retry-After that runs until 00:00
+UTC — an integer seconds count (`Retry-After: 35609` at 14:06:31 UTC = exactly
+midnight), not an HTTP date; up to ~24h) and all you could do was wait.
 
 ### What was built
 - `POST /admin/api/zen/keys/test` (`{"index": n}`): one real probe request

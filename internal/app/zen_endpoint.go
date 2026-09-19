@@ -47,6 +47,11 @@ func zenEndpointFile() string {
 type zenHTTPError struct {
 	Status int
 	Body   string
+	// RateLimited 该错误出自 isRateLimited 分支（429，或关键词命中的 403/502/
+	// 503）。同一状态码可能走完全不同的分支：FreeTier 的"干净" 403 意味着会话
+	// 已死、收割机已触发；带限流关键词的 403 则意味着 key 刚被冷却、收割机
+	// 根本没跑。消费者（如面板 Test）必须据此区分，不能只看 Status。
+	RateLimited bool
 }
 
 func (e *zenHTTPError) Error() string {

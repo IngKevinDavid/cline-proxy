@@ -296,6 +296,10 @@ func handleZenKeyTest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, status := testZenKey(key, req.Index)
+	// status 必须进 Data：面板的 testZenKey JS 读的是 r.status（与 cline 的
+	// testAccount 相同的契约）。只放在 Message 里的话，每个 toast 都会渲染成
+	// "— undefined" 并套上错误样式。
+	result["status"] = status
 	log.Printf("Test zen key #%d (%s): status=%s model=%s reason=%v",
 		req.Index+1, maskZenKey(key), status, result["model"], result["reason"])
 
@@ -346,16 +350,19 @@ func testZenKey(key string, index int) (map[string]any, string) {
 
 	he := (*zenHTTPError)(nil)
 	if err != nil && errors.As(err, &he) {
-		switch he.Status {
-		case http.StatusTooManyRequests:
-			// 调用链已对该 key 执行 cooldownZenKey(Retry-After 或 1min 默认)
+		// 先看分支再看状态码：isRateLimited 判定的 403/502/503（错误体带限流
+		// 关键词）走的是限流分支——key 刚被冷却、收割机根本没跑，绝不能说
+		// "会话已死/收割机已触发"。只有"干净"的 FreeTier 403 才是会话死亡。
+		if he.RateLimited {
 			result["httpStatus"] = he.Status
-			result["reason"] = "429 rate limited: " + kit.Truncate(he.Body, 300)
+			result["reason"] = fmt.Sprintf("rate limited (HTTP %d): %s", he.Status, kit.Truncate(he.Body, 300))
 			if until, ok := zenKeyCooldownUntil(key); ok {
 				result["cooldownUntil"] = until.UTC().Format(time.RFC3339)
 				result["remaining"] = formatDuration(time.Until(until))
 			}
 			return result, "cooldown"
+		}
+		switch he.Status {
 		case http.StatusForbidden:
 			result["httpStatus"] = he.Status
 			result["reason"] = "session rejected (403) — this key's session is no longer live; the harvester was just triggered, use the mint buttons below to retry now"
@@ -380,11 +387,11 @@ func testZenKey(key string, index int) (map[string]any, string) {
 		return result, "error"
 	}
 
-	// 成功：清除冷却 + 复位 403 连败计数（与 cline "测试成功即复位"一致），
-	// 并计入该 key 的用量。
+	// 成功：清除冷却。用量与 403 连败计数**不要**在这里重复复位——上游 200
+	// 路径已经做过（markZenKeySuccess/markZenSuccess/harvestMarkSuccess，
+	// zen.go 两条调用路径各一处）；这里再调一次会把面板的 usage 多加 1。
+	// "成功即复位冷却"本身与 cline 的 Test 按钮同语义。
 	uncoolZenKey(key)
-	harvestMarkSuccess(key)
-	markZenKeySuccess(key)
 	result["reason"] = "ok"
 	return result, "active"
 }

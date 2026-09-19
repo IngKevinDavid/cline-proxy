@@ -823,3 +823,61 @@ midnight), not an HTTP date; up to ~24h) and all you could do was wait.
   either test a different key (switch) or re-enter a cooldown the operator was
   asking about. One call, one verdict.
 
+## Audit of 624bec2 + 6e9bb5e (2026-09-19, fixed in the follow-up commit)
+
+Three parallel reviewers over the Test-button feature and the Retry-After
+logging; every finding re-verified against the code before fixing.
+
+### Fixed
+- **(P1) The panel toast was wrong for every outcome.** The JS reads
+  `r.status`, but the handler only put the verdict in `apiResponse.Message`,
+  never in `Data` — so every click rendered "Key #N — undefined" in the red
+  error style, and the headline "cooldown cleared" line never appeared. The
+  cline counterpart works because `testAccount` embeds `status` in every
+  result map; zen now does the same (`result["status"] = status` in the
+  handler), with a handler-level test guarding the wire shape.
+- **(P2) A "rate-limit-shaped 403" was misreported as "session dead".**
+  `isRateLimited` sends keyword-bearing 403/502s (and all 503s) down the
+  rate-limit branch — key cooled, harvester NOT triggered — but `testZenKey`
+  switched on status alone, so such a 403 got the "session no longer live;
+  the harvester was just triggered" message plus hidden cooldown state.
+  `zenHTTPError` now carries `RateLimited bool` (set at the top of the branch
+  so every exit path has it) and the handler classifies branch-first: any
+  rate-limited error → cooldown verdict with recovery time; only a "clean"
+  FreeTier 403 → session-dead verdict. Docs updated to the same distinction.
+- **(P2) A pinned probe's upstream 5xx polluted global failover.** The 5xx
+  `markZenFail()` ran before the pinned early-return, so three Test clicks on
+  a 500-ing key would route ALL free-zen traffic to the cline pool for 5
+  minutes. Both loops now skip `markZenFail` when pinned — consistent with
+  the 429 path, which already did.
+- **(P3) Successful probes double-counted usage.** The upstream 200 paths
+  already run `markZenKeySuccess` + `harvestMarkSuccess`; `testZenKey` called
+  both again (+2 per probe in the panel's usage column). Only `uncoolZenKey`
+  remains in the handler; the call path owns the rest.
+- **(P3) The 429 log line could misreport the applied cooldown.** It printed
+  the raw parsed value, but `cooldownZenKey` applies the 1-minute default,
+  the 24h cap, and the public-sentinel no-op. `cooldownZenKey` now returns
+  the applied duration and the log prints that.
+- **(P3) `zenProbeModel` wasn't self-sufficient.** The model table is filled
+  lazily; probing on a fresh process before any model page/sync could report
+  "no zen model available". It now calls `initZenModels()` first.
+- **(nit) A pinned probe advanced the round-robin cursor** (chat path called
+  `pickZenKey()` before overriding). Pinned calls no longer touch the cursor.
+
+### Tests added
+Status-in-Data (wire shape), rate-limit-shaped-403 → cooldown (and harvester
+NOT triggered), the responses-upstream probe path (previously zero coverage),
+failover-untouched-by-probe, public-key rejection; probe-test setup now clears
+the package-level cooldown/harvest maps so state can't leak between tests.
+Full suite + `-race` green.
+
+### Accepted (verified, deliberately not changed)
+- The 60s probe timeout uses `context.Background()`, not the request context —
+  closing the tab leaves the probe running ≤60s. Matches the cline
+  `testAccount` precedent and is strictly bounded.
+- `resp != nil && err == nil && StatusCode != 200` is unreachable (every
+  non-200 returns a typed error); the defensive branch in `testZenKey` stays.
+- Endpoint learning is untouched by probes: it lives in the proxy handlers,
+  none of which pass `zenCallOpts`, and `testZenKey` performs no learning
+  retry.
+

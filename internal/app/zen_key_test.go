@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,15 @@ func setupZenProbeTest(t *testing.T, handler http.HandlerFunc) {
 	if exe, err := os.Executable(); err == nil {
 		t.Setenv("ZEN_HARVEST_BIN", exe)
 	}
+	// 清掉其他测试留下的冷却/连败状态：这些是包级 map，串行测试间会渗漏
+	//（sk-pin333 的 60s 冷却曾渗进后续用例）。
+	zenKeyMu.Lock()
+	zenKeyCool = map[string]time.Time{}
+	zenKeyMu.Unlock()
+	harvestMu.Lock()
+	harvestFails = map[string]int{}
+	harvestLastTry = map[string]time.Time{}
+	harvestMu.Unlock()
 	upstream := httptest.NewServer(handler)
 	t.Cleanup(upstream.Close)
 
@@ -209,5 +219,138 @@ func TestZenKeyTestHandlerRejectsBadIndex(t *testing.T) {
 	handleZenKeyTest(rec2, req2)
 	if rec2.Code != http.StatusBadRequest {
 		t.Fatalf("invalid JSON -> %d, want 400", rec2.Code)
+	}
+}
+
+// ===== 审计修复的回归守卫（2026-09-19 审计 624bec2/6e9bb5e）=====
+
+// P1 回归守卫：面板 JS 读 r.status（与 cline testAccount 同契约）——Data 里
+// 必须有 status 字段，否则每个 toast 都渲染成 "— undefined" 并套错误样式。
+func TestZenKeyTestHandlerPutsStatusInData(t *testing.T) {
+	setupZenProbeTest(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/admin/api/zen/keys/test", strings.NewReader(`{"index":0}`))
+	handleZenKeyTest(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handler -> %d, want 200", rec.Code)
+	}
+	var body struct {
+		Success bool           `json:"success"`
+		Message string         `json:"message"`
+		Data    map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if !body.Success || body.Message != "active" {
+		t.Fatalf("success=%v message=%q, want true/active", body.Success, body.Message)
+	}
+	if body.Data["status"] != "active" {
+		t.Fatalf("data.status = %v, want \"active\" (the panel reads r.status)", body.Data["status"])
+	}
+}
+
+// P2：限流型 403（错误体带限流关键词 → isRateLimited 命中）必须按"冷却"回报，
+// 绝不能说"会话已死/收割机已触发"——那个分支根本没有触发收割机。
+func TestZenKeyTestRateLimitShaped403ReportsCooldown(t *testing.T) {
+	setupZenProbeTest(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":{"message":"slow down: rate limit exceeded"}}`))
+	})
+	key := "sk-aaa111"
+	result, status := testZenKey(key, 0)
+	if status != "cooldown" {
+		t.Fatalf("status = %q (%v), want cooldown — keyword-403 must take the rate-limit branch", status, result["reason"])
+	}
+	if !zenKeyCooling(key) {
+		t.Fatal("keyword-403 probe did not cool the key")
+	}
+	harvestMu.Lock()
+	fails := harvestFails[key]
+	harvestMu.Unlock()
+	if fails != 0 {
+		t.Fatalf("harvest fail counter = %d, want 0 (rate-limited 403 must not trigger the harvester)", fails)
+	}
+	if result["cooldownUntil"] == nil || result["remaining"] == nil {
+		t.Fatalf("cooldown fields missing: %v", result)
+	}
+	if strings.Contains(result["reason"].(string), "session") {
+		t.Fatalf("reason claims a session problem: %v", result["reason"])
+	}
+}
+
+// 覆盖 responses 上游的探测路径：Upstream=="responses" 的模型走
+// callZenResponsesAPI（此前该分支零测试覆盖）。
+func TestZenKeyTestResponsesUpstreamPath(t *testing.T) {
+	setupZenProbeTest(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/responses" {
+			t.Errorf("upstream path = %q, want /responses", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\n"))
+	})
+	// 把模型表整体换成 responses 上游模型（setup 的 cleanup 会恢复原表）
+	setZenModelForTest("aaa-probe-model", "responses")
+
+	result, status := testZenKey("sk-bbb222", 1)
+	if status != "active" {
+		t.Fatalf("status = %q (%v), want active", status, result["reason"])
+	}
+	if result["model"] != "aaa-probe-model" {
+		t.Fatalf("model = %v", result["model"])
+	}
+}
+
+// P2 修复守卫：pinned 探测的上游 5xx 不得推进全局故障转移——否则连点几次
+// Test 撞上上游 500，会把全部正常 free-zen 流量切去 cline 池 5 分钟。
+func TestZenProbeDoesNotPolluteFailover(t *testing.T) {
+	setupZenProbeTest(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"Internal server error"}`))
+	})
+	zenStateMu.Lock()
+	savedCount, savedUntil := zenFailCount, zenFailUntil
+	zenFailCount, zenFailUntil = 0, time.Time{}
+	zenStateMu.Unlock()
+	defer func() {
+		zenStateMu.Lock()
+		zenFailCount, zenFailUntil = savedCount, savedUntil
+		zenStateMu.Unlock()
+	}()
+
+	_, status := testZenKey("sk-aaa111", 0)
+	if status != "error" {
+		t.Fatalf("status = %q, want error", status)
+	}
+	zenStateMu.Lock()
+	cnt, until := zenFailCount, zenFailUntil
+	zenStateMu.Unlock()
+	if cnt != 0 || !until.IsZero() {
+		t.Fatalf("pinned probe polluted failover state: count=%d until=%v", cnt, until)
+	}
+}
+
+// public 哨兵没有可探测的凭据。
+func TestZenKeyTestHandlerRejectsPublicKey(t *testing.T) {
+	setupZenProbeTest(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Error("upstream must not be called for the public sentinel")
+	})
+	saved := getZenConfig()
+	cfg := *saved
+	cfg.Keys = []string{"public"}
+	setZenConfig(&cfg)
+	t.Cleanup(func() { setZenConfig(saved) })
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/admin/api/zen/keys/test", strings.NewReader(`{"index":0}`))
+	handleZenKeyTest(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("public key probe -> %d, want 400", rec.Code)
 	}
 }

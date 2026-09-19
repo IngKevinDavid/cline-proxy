@@ -130,6 +130,9 @@ func isZenFreeModel(m *ZenModel) bool {
 // responses 模型也可能被选中——testZenKey 按其 Upstream 字段走对应上游调用，
 // 无需特判。目录为空（冷启动且 registry 不可达）时返回 nil，探测直接报错。
 func zenProbeModel() *ZenModel {
+	// 目录表是惰性填充的（面板打开模型页 / 定时同步 / 首个请求才会触发）：
+	// 探测必须自给自足，进程刚启动、谁都没碰过模型页时也要能测。
+	initZenModels()
 	zenModelsMu.RLock()
 	defer zenModelsMu.RUnlock()
 	var best *ZenModel
@@ -571,12 +574,15 @@ func markZenKeySuccess(key string) {
 // cooldownZenKey 将 key 置为冷却，冷却期内 round-robin 跳过它。
 // 默认的 "public" key 仅在它是池中唯一 key 时跳过冷却（无其他 key 可轮转）；
 // 多 key 池中 "public" 也参与冷却轮转。
-func cooldownZenKey(key string, d time.Duration) {
+// 返回实际生效的冷却时长（0 = 未冷却：空 key，或单 key 池的 public 哨兵）——
+// 调用点的日志必须打印这个值而不是原始解析值，否则"缺头默认 1 分钟 / 24h 上限"
+// 的换算不会体现在日志里。
+func cooldownZenKey(key string, d time.Duration) time.Duration {
 	if key == "" {
-		return
+		return 0
 	}
 	if key == "public" && len(getZenConfig().Keys) <= 1 {
-		return
+		return 0
 	}
 	if d <= 0 {
 		d = time.Minute
@@ -587,6 +593,7 @@ func cooldownZenKey(key string, d time.Duration) {
 	zenKeyMu.Lock()
 	zenKeyCool[key] = time.Now().Add(d)
 	zenKeyMu.Unlock()
+	return d
 }
 
 // zenKeyCooling 查询 key 是否处于冷却期。
@@ -1666,15 +1673,18 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 
 		if isRateLimited(resp.StatusCode, bodyBytes) {
 			rateLimited++
+			// 上游按限流处理（429，或关键词命中的 403/502/503）：标记随错误
+			// 返回，消费者据此区分"限流型 403"（key 已冷却、收割机未触发）与
+			// "会话死亡型 403"（FreeTier，触发收割机）。
+			apiErr.RateLimited = true
 			// 原样记录上游的 Retry-After（HTTP 日期还是秒数、值是多少）：
 			// 冷却时长完全由它决定，而面板只能看到换算后的截止时刻。没有这行，
 			// "这个 key 为什么冷却这么久"只能靠猜（实测 FreeUsageLimitError
 			// 的 Retry-After 落在每日窗口复位点，见 TODO.md）。
 			rawRetry := resp.Header.Get("Retry-After")
-			rl := parseRetryAfter(rawRetry)
-			cooldownZenKey(key, rl)
+			applied := cooldownZenKey(key, parseRetryAfter(rawRetry))
 			log.Printf("  zen rate limited (%d) key#%d: Retry-After=%q -> cooldown %v",
-				resp.StatusCode, keyIndex(key), rawRetry, rl)
+				resp.StatusCode, keyIndex(key), rawRetry, applied)
 			// pinKey（面板 Test）：探测结论必须是被探测 key 自己的——立即原样
 			// 上报 429（冷却已在上一行生效），不换 key 重试、不吃重试睡眠。
 			if o.pinKey != "" {
@@ -1707,7 +1717,9 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 			return nil, rateLimited, apiErr
 		}
 
-		if resp.StatusCode >= 500 {
+		// 5xx 推进故障转移；pinned 探测除外（同 chat 路径：探测结论只属于
+		// 这次点击，不能改写全池的路由状态）。
+		if resp.StatusCode >= 500 && o.pinKey == "" {
 			markZenFail()
 		}
 		// 会话失效（FreeTier 403 且非限流）：该 key 的 sess_ 已被服务端
@@ -1787,12 +1799,16 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		// 客户端身份：会话粘性——同一 key 复用稳定的 sess_/UA（服务端
 		// 会话绑定要求，随机 sess_ 会 403），msg_ 请求 ID 每次随机。
 		// ZEN_PIN_KEY=n 时固定用第 n 个 key（单 key 直测/排障），默认轮转。
-		// pinKey（面板 Test）优先：整条调用链固定该 key，见 zenCallOpts 注释。
-		key := pickZenKey()
+		// pinKey（面板 Test）优先且不碰轮转指针：一次探测不该挪动 round-robin
+		// 的游标，否则每点一次 Test 都会让下一次正常请求换 key。
+		var key string
 		if o.pinKey != "" {
 			key = o.pinKey
-		} else if pk := pinnedZenKey(); pk != "" {
-			key = pk
+		} else {
+			key = pickZenKey()
+			if pk := pinnedZenKey(); pk != "" {
+				key = pk
+			}
 		}
 		sess, user, ua := StickyZenIdentity(key)
 		req.Header.Set("Authorization", "Bearer "+key)
@@ -1844,6 +1860,8 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 
 		if isRateLimited(resp.StatusCode, bodyBytes) {
 			rateLimited++
+			// 上游按限流处理（标记随错误返回，同 responses 路径）。
+			apiErr.RateLimited = true
 			// 不冷却出口代理: 代理成功送达了 HTTP 响应,它没有故障。限流是 zen
 			// 对 key/身份/IP 组合的判定,把出口毒化 10 分钟只会让上游繁忙期
 			// (慢模型 503/429)把整个池打瘫;下一次尝试的轮转自然换到下一出口,
@@ -1851,10 +1869,9 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 			// 冷却当前 key；若还有其他未冷却 key 则立即切换重试（不睡眠）。
 			// Retry-After 原样入日志（同 responses 路径）。
 			rawRetry := resp.Header.Get("Retry-After")
-			rl := parseRetryAfter(rawRetry)
-			cooldownZenKey(key, rl)
+			applied := cooldownZenKey(key, parseRetryAfter(rawRetry))
 			log.Printf("  zen rate limited (%d) key#%d: Retry-After=%q -> cooldown %v",
-				resp.StatusCode, keyIndex(key), rawRetry, rl)
+				resp.StatusCode, keyIndex(key), rawRetry, applied)
 			// pinKey（面板 Test）：立即原样上报 429（冷却已生效），不换 key。
 			if o.pinKey != "" {
 				return nil, rateLimited, apiErr
@@ -1884,8 +1901,11 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		}
 
 		// 非 2xx：只有限流信号或服务端错误才推进全局故障转移，
-		// 客户端侧 400/401（提示词超限、key 配错）不应污染 failover 状态
-		if resp.StatusCode >= 500 {
+		// 客户端侧 400/401（提示词超限、key 配错）不应污染 failover 状态。
+		// pinned 探测除外：它是管理员对单个 key 的主动探测，其结论（包括上游
+		// 5xx）只属于这次点击——连点几次 Test 撞上上游 500，绝不能把全部正常
+		// 流量切去 cline 池。
+		if resp.StatusCode >= 500 && o.pinKey == "" {
 			markZenFail()
 		}
 		// 会话失效（FreeTier 403 且非限流）：该 key 的 sess_ 已被服务端遗忘，

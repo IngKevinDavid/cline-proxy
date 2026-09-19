@@ -821,7 +821,10 @@ midnight), not an HTTP date; up to ~24h) and all you could do was wait.
   path) → smallest-ID `Source=="live"` model (upstream is provably serving
   it) → smallest-ID free model (cold-boot seed fallback).** The button tests
   key+session+quota, not model quality; pinning per-model would duplicate
-  endpoint learning for no diagnostic gain. The "smallest free model" rule
+  endpoint learning for no diagnostic gain. Same day, superseded in part: the
+  panel has a probe-model dropdown, and an explicit pick overrides the auto
+  order (validated as a resolvable free zen model; unknown names error out
+  instead of silently falling back). The "smallest free model" rule
   alone was replaced 2026-09-19: it only landed on big-pickle by alphabet
   luck and would drift as the live catalog grows.
 - **Pin returns on first 429/403 instead of retrying.** A retried probe would

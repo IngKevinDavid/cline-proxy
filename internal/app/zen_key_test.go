@@ -87,7 +87,7 @@ func TestZenKeyTestProbeSuccessClearsCooldown(t *testing.T) {
 		t.Fatal("precondition: key should be cooling")
 	}
 
-	result, status := testZenKey(key, 0)
+	result, status := testZenKey(key, 0, "")
 	if status != "active" {
 		t.Fatalf("status = %q (reason=%v), want active", status, result["reason"])
 	}
@@ -112,7 +112,7 @@ func TestZenKeyTestProbe429ReportsCooldown(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"quota exceeded"}`))
 	})
 	key := "sk-bbb222"
-	result, status := testZenKey(key, 1)
+	result, status := testZenKey(key, 1, "")
 	if status != "cooldown" {
 		t.Fatalf("status = %q, want cooldown", status)
 	}
@@ -139,7 +139,7 @@ func TestZenKeyTestProbe403ReportsSessionDeadAndTriggersHarvest(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":{"type":"free_tier_error","message":"session check failed"}}`))
 	})
 	key := "sk-aaa111"
-	result, status := testZenKey(key, 0)
+	result, status := testZenKey(key, 0, "")
 	if status != "error" {
 		t.Fatalf("status = %q, want error", status)
 	}
@@ -261,7 +261,7 @@ func TestZenKeyTestRateLimitShaped403ReportsCooldown(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":{"message":"slow down: rate limit exceeded"}}`))
 	})
 	key := "sk-aaa111"
-	result, status := testZenKey(key, 0)
+	result, status := testZenKey(key, 0, "")
 	if status != "cooldown" {
 		t.Fatalf("status = %q (%v), want cooldown — keyword-403 must take the rate-limit branch", status, result["reason"])
 	}
@@ -298,7 +298,7 @@ func TestZenKeyTestResponsesUpstreamPath(t *testing.T) {
 	// 把模型表整体换成 responses 上游模型（setup 的 cleanup 会恢复原表）
 	setZenModelForTest("aaa-probe-model", "responses")
 
-	result, status := testZenKey("sk-bbb222", 1)
+	result, status := testZenKey("sk-bbb222", 1, "")
 	if status != "active" {
 		t.Fatalf("status = %q (%v), want active", status, result["reason"])
 	}
@@ -324,7 +324,7 @@ func TestZenProbeDoesNotPolluteFailover(t *testing.T) {
 		zenStateMu.Unlock()
 	}()
 
-	_, status := testZenKey("sk-aaa111", 0)
+	_, status := testZenKey("sk-aaa111", 0, "")
 	if status != "error" {
 		t.Fatalf("status = %q, want error", status)
 	}
@@ -407,5 +407,44 @@ func TestZenProbeModelPreferenceOrder(t *testing.T) {
 	set()
 	if got := zenProbeModel(); got == nil || got.ID != "big-pickle" {
 		t.Fatalf("got %v, want big-pickle re-seeded on an empty table", got)
+	}
+}
+
+// 显式指定探测模型（面板下拉）：指定的模型必须生效，优先于自动选择。
+func TestZenKeyTestHonorsExplicitModel(t *testing.T) {
+	setupZenProbeTest(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	})
+	// 两模型表：自动选择会挑 live 的 zzz-…，显式指定必须仍用 aaa-…。
+	zenModelsMu.Lock()
+	savedModels, savedAliases := zenModels, zenAliases
+	zenModels = map[string]*ZenModel{
+		"aaa-probe-model": {ID: "aaa-probe-model", Source: "seed"},
+		"zzz-probe-model": {ID: "zzz-probe-model", Source: "live"},
+	}
+	zenAliases = map[string]*ZenModel{}
+	zenModelsMu.Unlock()
+	t.Cleanup(func() {
+		zenModelsMu.Lock()
+		zenModels, zenAliases = savedModels, savedAliases
+		zenModelsMu.Unlock()
+	})
+
+	result, status := testZenKey("sk-aaa111", 0, "aaa-probe-model")
+	if status != "active" {
+		t.Fatalf("status = %q (%v), want active", status, result["reason"])
+	}
+	if result["model"] != "aaa-probe-model" {
+		t.Fatalf("model = %v, want aaa-probe-model (explicit pick beats auto)", result["model"])
+	}
+
+	// 未指定的模型：解析失败必须报错，绝不悄悄退回自动选择。
+	result, status = testZenKey("sk-aaa111", 0, "no-such-model")
+	if status != "error" {
+		t.Fatalf("status = %q, want error for an unknown model", status)
+	}
+	if !strings.Contains(result["reason"].(string), "no-such-model") {
+		t.Fatalf("reason = %v, want it to name the bad model", result["reason"])
 	}
 }

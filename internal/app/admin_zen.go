@@ -278,7 +278,8 @@ func handleZenKeyTest(w http.ResponseWriter, r *http.Request) {
 	}
 	defer r.Body.Close()
 	var req struct {
-		Index int `json:"index"`
+		Index int    `json:"index"`
+		Model string `json:"model"` // 可选：指定探测模型；空 = 自动（big-pickle → live → 种子）
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
@@ -295,7 +296,7 @@ func handleZenKeyTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, status := testZenKey(key, req.Index)
+	result, status := testZenKey(key, req.Index, req.Model)
 	// status 必须进 Data：面板的 testZenKey JS 读的是 r.status（与 cline 的
 	// testAccount 相同的契约）。只放在 Message 里的话，每个 toast 都会渲染成
 	// "— undefined" 并套上错误样式。
@@ -310,15 +311,29 @@ func handleZenKeyTest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// testZenKey 执行单 key 探测：默认 zen 模型 + 一条 "Reply with exactly: OK"，
-// 按模型的 Upstream 字段走 chat 或原生 responses 上游（与正常请求同一条路，
-// 含 FreeTier gate、会话粘性与冷却副作用）。返回 (结果, 状态)。
-func testZenKey(key string, index int) (map[string]any, string) {
+// testZenKey 执行单 key 探测："Reply with exactly: OK"，按模型的 Upstream
+// 字段走 chat 或原生 responses 上游（与正常请求同一条路，含 FreeTier gate、
+// 会话粘性与冷却副作用）。modelID 为空时用 zenProbeModel() 自动选择
+// （big-pickle → live 最小 id → 种子兜底）；非空时必须能解析为一个 free
+// zen 模型，否则报错——探测不允许拿付费/不存在的模型当探针。
+// 返回 (结果, 状态)。
+func testZenKey(key string, index int, modelID string) (map[string]any, string) {
 	result := map[string]any{
 		"index":   index,
 		"keyMask": maskZenKey(key),
 	}
-	zm := zenProbeModel()
+	var zm *ZenModel
+	if strings.TrimSpace(modelID) != "" {
+		// 支持别名与 opencode/ 前缀（与正常请求的解析规则一致）。
+		m, ok := resolveZenFreeModel(modelID)
+		if !ok {
+			result["reason"] = fmt.Sprintf("unknown or non-free zen model: %s", modelID)
+			return result, "error"
+		}
+		zm = m
+	} else {
+		zm = zenProbeModel()
+	}
 	if zm == nil {
 		result["reason"] = "no zen model available to probe (model catalog empty)"
 		return result, "error"

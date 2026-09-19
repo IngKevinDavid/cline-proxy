@@ -560,6 +560,10 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
       </div>
       <div class="field" style="flex:2"><label>API keys (one per line, round-robin rotation, auto-cooldown on 429)</label><textarea id="ocKeys" rows="3" placeholder="public"></textarea></div>
     </div>
+    <div class="flex" style="gap:10px;margin-bottom:8px;align-items:center;flex-wrap:wrap">
+      <label class="hint" style="margin:0">Probe model (used by the Test buttons):</label>
+      <select id="ocProbeModel" style="max-width:360px"><option value="">auto — big-pickle first, then live models</option></select>
+    </div>
     <div class="table-wrap" style="margin-bottom:10px">
       <table>
         <thead><tr><th style="width:50px">#</th><th style="width:110px">Key</th><th style="width:70px">Usage</th><th style="width:110px">Session</th><th>Cooldown</th><th style="width:90px"></th></tr></thead>
@@ -1380,7 +1384,11 @@ async function testZenKey(index, btn) {
   const original = btn ? btn.innerHTML : '';
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loading"></span>Testing'; }
   try {
-    const d = await api('POST', '/zen/keys/test', { index: index });
+    const d = await api('POST', '/zen/keys/test', {
+      index: index,
+      // 下拉里的探测模型；空串 = 后端自动选（big-pickle → live → 种子）
+      model: (_('ocProbeModel') ? _('ocProbeModel').value : '')
+    });
     const r = d.data || {};
     const label = { active: 'OK', cooldown: 'Cooldown', error: 'Error' }[r.status] || r.status;
     let msg = 'Key #' + (index + 1) + ' (' + (r.keyMask || '') + ') — ' + label;
@@ -1449,6 +1457,14 @@ async function loadOcModels() {
     _('ocModelsList').innerHTML = '<div class="table-wrap"><table><thead><tr><th style="text-align:left">Model ID</th><th>Context</th><th>Output</th><th>Tools</th><th>Reason</th><th>Attach</th><th>Endpoint</th><th>Source</th></tr></thead><tbody>' +
       models.map(m => '<tr><td style="text-align:left;font-family:monospace">' + esc(m.id) + '</td><td>' + esc(m.context) + '</td><td>' + esc(m.output) + '</td><td>' + (m.toolCall ? '✓' : '-') + '</td><td>' + (m.reasoning ? '✓' : '-') + '</td><td>' + (m.attach ? '✓' : '-') + '</td><td style="font-family:monospace;font-size:11px">' + esc(m.upstream === 'responses' ? 'responses' : 'chat') + '</td><td>' + esc(m.source) + '</td></tr>').join('') +
       '</tbody></table></div><div class="hint">' + models.length + ' free models total (auto-synced every 10 minutes from public registry)</div>';
+    // 探测模型下拉：与模型表同一份数据；重渲染时保留用户当前的选择。
+    const sel = _('ocProbeModel');
+    if (sel) {
+      const prev = sel.value;
+      sel.innerHTML = '<option value="">auto — big-pickle first, then live models</option>' +
+        models.map(m => '<option value="' + esc(m.id) + '">' + esc(m.id) + (m.source === 'live' ? '' : ' (seed)') + '</option>').join('');
+      if (Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+    }
   } catch (e) { _('ocModelsList').textContent = 'Failed to load'; }
 }
 

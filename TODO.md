@@ -816,9 +816,14 @@ midnight), not an HTTP date; up to ~24h) and all you could do was wait.
   as the cline Test button; a probe that reports cooldown spends nothing (the
   429 is free). Do not "fix" this by faking the probe with a lighter call —
   anything that doesn't pass the FreeTier gate proves nothing.
-- **The probe uses the smallest free model, not the client's model.** The
-  button tests key+session+quota, not model quality; pinning per-model would
-  duplicate endpoint learning for no diagnostic gain.
+- **The probe model is chosen, not the client's model, in priority order:
+  big-pickle (the free-tier default alias, same first choice as the mint
+  path) → smallest-ID `Source=="live"` model (upstream is provably serving
+  it) → smallest-ID free model (cold-boot seed fallback).** The button tests
+  key+session+quota, not model quality; pinning per-model would duplicate
+  endpoint learning for no diagnostic gain. The "smallest free model" rule
+  alone was replaced 2026-09-19: it only landed on big-pickle by alphabet
+  luck and would drift as the live catalog grows.
 - **Pin returns on first 429/403 instead of retrying.** A retried probe would
   either test a different key (switch) or re-enter a cooldown the operator was
   asking about. One call, one verdict.

@@ -125,17 +125,34 @@ func isZenFreeModel(m *ZenModel) bool {
 	return strings.HasSuffix(m.ID, "-free")
 }
 
-// zenProbeModel 管理面板 per-key "Test" 探测用的模型：确定性挑 ID 最小的
-// free zen 模型（与 getDefaultModel 的"最小 active id"规则同形）。native-
-// responses 模型也可能被选中——testZenKey 按其 Upstream 字段走对应上游调用，
-// 无需特判。目录为空（冷启动且 registry 不可达）时返回 nil，探测直接报错。
+// zenProbeModel 管理面板 per-key "Test" 探测用的模型，按优先级：
+//  1. big-pickle —— zen 免费层的默认别名（mint 收割的首选同款），最稳；
+//  2. Source=="live" 的最小 id 模型 —— live 条目来自官方目录同步，
+//     是"上游当前确实在供"的证明，种子条目可能早已下架；
+//  3. 任意 free 模型的最小 id —— 冷启动且同步不可达时的纯种子兜底。
+// native-responses 模型也可能被选中——testZenKey 按其 Upstream 字段走对应
+// 上游调用，无需特判。目录为空时返回 nil，探测直接报错。
 func zenProbeModel() *ZenModel {
 	// 目录表是惰性填充的（面板打开模型页 / 定时同步 / 首个请求才会触发）：
 	// 探测必须自给自足，进程刚启动、谁都没碰过模型页时也要能测。
 	initZenModels()
 	zenModelsMu.RLock()
 	defer zenModelsMu.RUnlock()
+	if m, ok := zenModels["big-pickle"]; ok && isZenFreeModel(m) {
+		return m
+	}
 	var best *ZenModel
+	for _, m := range zenModels {
+		if !isZenFreeModel(m) || m.Source != "live" {
+			continue
+		}
+		if best == nil || m.ID < best.ID {
+			best = m
+		}
+	}
+	if best != nil {
+		return best
+	}
 	for _, m := range zenModels {
 		if !isZenFreeModel(m) {
 			continue

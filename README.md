@@ -60,6 +60,10 @@ services:
       - ZEN_KEYS=${ZEN_KEYS:-}
       - CLINE_ACCOUNTS_SEED_FILE=/app/data/cline-seed.json
       - STRICT_MODEL_MATCH=true
+      # optional — session-remint interval in hours (default 4; must stay under the 5h quota window)
+      - ZEN_HARVEST_INTERVAL_HOURS=${ZEN_HARVEST_INTERVAL_HOURS:-4}
+      # optional — keep at 1 unless the box has spare cores (the CLI bursts CPU per run)
+      - ZEN_HARVEST_CONCURRENCY=${ZEN_HARVEST_CONCURRENCY:-1}
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${PROXY_PORT:-3457}/health"]
       interval: 30s
@@ -79,6 +83,8 @@ Environment variables to define in the Portainer stack UI:
 | `ADMIN_PASSWORD` | yes | admin panel login password |
 | `PROXY_PORT` | no | defaults to `3457`; changes both the container listen port and the host mapping |
 | `ZEN_KEYS` | no | comma-separated opencode zen keys; leave empty to use the anonymous `public` key or configure in the admin panel |
+| `ZEN_HARVEST_INTERVAL_HOURS` | no | how often zen sessions are re-minted, in hours; defaults to `4`. Keep it **below 5** (see [session harvester](#opencode-zen-session-harvester)) |
+| `ZEN_HARVEST_CONCURRENCY` | no | how many keys mint at once; defaults to `1` (serial), which is what small instances want |
 
 To seed Cline accounts on first boot, drop a `cline-seed.json` file into the volume (see [Seeding accounts](#seeding-accounts)).
 
@@ -109,6 +115,44 @@ All state lives in the `/app/data` volume (`cline-accounts.json`, `zen-config.js
 | `CLIENT_IP_HEADER` | empty | Trust this header for client IP behind a reverse proxy (e.g. `X-Real-IP`); by default only `RemoteAddr` is used |
 
 Fail-closed startup: binding a non-loopback address without `API_KEY` and `ADMIN_PASSWORD` refuses to start.
+
+### opencode zen session harvester
+
+The zen free tier only accepts session IDs the upstream has actually seen, minted by the bundled `opencode` CLI. The gateway mints them for you at boot, on repeated `403`s, and on a timer — all of it configurable:
+
+| Variable | Default | Description |
+|---|---|---|
+| `ZEN_HARVEST` | `1` | `0` disables the harvester entirely (gateway-only mode). It also self-disables when the CLI binary is absent |
+| `ZEN_HARVEST_INTERVAL_HOURS` | `4` | **How old a session may get before the periodic pass re-mints it.** Integer ≥ 1. The pass runs every 10 minutes and mints any key whose session is older than this |
+| `ZEN_HARVEST_CONCURRENCY` | `1` | How many keys may mint at the same time (1–8). Keep at `1` on small instances: the CLI is a Bun binary that bursts CPU and memory per run, and concurrent runs starve each other past the budget — the symptom is *every* key logging `no session minted`. Raise to `2`–`3` only with spare cores |
+| `ZEN_HARVEST_KEY_TIMEOUT_SECONDS` | `150` | Total budget for one key (minimum 30s). Bounds the failure path, and feeds the batch-timeout calculation |
+| `ZEN_HARVEST_BIN` | `/app/bin/opencode` | CLI binary path (point it at your own install if you don't use the bundled one) |
+| `ZEN_HARVEST_HOME` | `/app/.opencode-home` | CLI `HOME`; each key gets its own hashed subdirectory under it |
+| `ZEN_PIN_KEY` | empty | Troubleshooting: pin all upstream attempts to key number *n* (1-based) instead of rotating, so one key can be tested in isolation |
+
+**Setting your own remint interval.** The default is 4 hours, chosen to stay inside zen's ~5-hour quota window. To remint every 2 hours:
+
+```yaml
+    environment:
+      - ZEN_HARVEST_INTERVAL_HOURS=2      # any integer >= 1
+```
+
+or on the command line:
+
+```bash
+docker run -d --name cline-proxy -p 3457:3457\
+  -v cline-proxy-data:/app/data\
+  -e API_KEY=... -e ADMIN_PASSWORD=... -e ZEN_KEYS=...\
+  -e ZEN_HARVEST_INTERVAL_HOURS=2\
+  ghcr.io/foxy1402/cline-proxy:latest
+```
+
+Two things to know before you change it:
+
+- **Keep it under 5 hours.** zen's free quota (~200 requests / 5h) is accounted per **egress IP**, and re-minting does **not** refill it. A longer interval buys no capacity; it only risks a stretch where every session has expired — the refresh interval must stay below the quota window, not above it.
+- **Anything invalid falls back to 4** — empty, non-numeric, `0`, or negative. The effective floor is 1 hour, and the parser is lenient about trailing text: `2h` is read as `2`, not rejected.
+
+The admin panel's opencode tab shows the current interval, per-key session age and liveness, and has *Mint missing sessions* / *Force mint / refresh all* buttons. Full mechanics — quota model, per-key CLI isolation, batch timeouts — are in [docs/zen-harvester.md](docs/zen-harvester.md).
 
 ## Connecting your IDE
 
@@ -162,6 +206,8 @@ go build ./... && go vet ./...
 ./start.sh                                  # build-or-docker wrapper
 docker compose up -d --build                # build from source (PROXY_PORT to change the port)
 ```
+
+One more env var is dev-only and deliberately off by default: `KILL_PORT_ON_START=true` makes the gateway force-kill whatever holds the listen port before binding (a Windows convenience, implemented with `Stop-Process`). Leave it unset in production — it kills a process it did not start, and that may be a legitimate service.
 
 CI: every push to `main` runs `go build` + `go vet`, then publishes the multi-arch image to GHCR via Buildx (amd64 compiled natively, arm64 cross-compiled via `TARGETARCH`; only the embedded opencode CLI stage runs under QEMU for arm64, at build time — the images themselves are native on both arches). Tag a release with `v*` to publish `:vX.Y.Z` alongside `:latest`.
 

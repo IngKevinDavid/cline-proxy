@@ -537,9 +537,9 @@ var (
 	zenKeyCool  = map[string]time.Time{}
 )
 
-// resolveZenKeyIdentity 解析 key 凭据：
-// 支持 Console OAuth 令牌（st_...）、带组织后缀格式（token#org_id）或普通 Zen key。
-// 当 key 为空或 "public" 时，回退到本地 CLI 登录会话（GetConsoleAuth）。
+// resolveZenKeyIdentity parses key credentials:
+// supports Console OAuth tokens (st_...), tokens with organization suffix (token#org_id),
+// or legacy Zen static keys. Falls back to local CLI login session (GetConsoleAuth) when key is empty or "public".
 func resolveZenKeyIdentity(rawKey string) (token string, orgID string, isConsole bool) {
 	k := strings.TrimSpace(rawKey)
 	if k == "" || k == "public" {
@@ -2244,7 +2244,7 @@ func syncZenModels() (int, error) {
 	if added > 0 {
 		log.Printf("zen model sync: %d new free model(s) from live catalog", added)
 	}
-	// 针对新发现或尚未验证端点的免费模型，在后台自动执行双端点探测与持久化
+	// Automatically verify and persist endpoints for unverified free models in background
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()

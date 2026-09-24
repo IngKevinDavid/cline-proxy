@@ -1,10 +1,16 @@
 package app
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -272,3 +278,157 @@ func StickyZenIdentity(key string) (sess, req, ua string) {
 // MarkZenSessionDead 曾把失效会话轮换成随机 ID。已移除：随机 ID 必 403
 //（zen_session.go 顶部注释），403 恢复直接走收割机 harvestOnForbidden
 //（2 次连续 403 触发，10 分钟冷却），旧 CLI 会话保留为"最后已知"标记。
+
+// ============ OpenCode Console OAuth 认证与会话 ============
+
+// ConsoleAuth represents an OpenCode Console OAuth session.
+type ConsoleAuth struct {
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token"`
+	TokenExpiry  int64     `json:"token_expiry"` // milliseconds
+	ActiveOrgID  string    `json:"active_org_id"`
+	Email        string    `json:"email"`
+	LastUpdated  time.Time `json:"last_updated"`
+}
+
+var (
+	consoleAuthMu sync.RWMutex
+	cachedConsole *ConsoleAuth
+)
+
+func consoleCacheFile() string {
+	return kit.ResolveDataPath(".opencode-console.json")
+}
+
+// GetConsoleAuth retrieves active Console credentials, refreshing from opencode db if expired or missing.
+func GetConsoleAuth() (*ConsoleAuth, error) {
+	consoleAuthMu.RLock()
+	if cachedConsole != nil && isConsoleAuthValid(cachedConsole) {
+		auth := *cachedConsole
+		consoleAuthMu.RUnlock()
+		return &auth, nil
+	}
+	consoleAuthMu.RUnlock()
+
+	consoleAuthMu.Lock()
+	defer consoleAuthMu.Unlock()
+
+	if cachedConsole != nil && isConsoleAuthValid(cachedConsole) {
+		auth := *cachedConsole
+		return &auth, nil
+	}
+
+	auth, err := loadConsoleAuth()
+	if err != nil {
+		if diskAuth := readConsoleAuthDisk(); diskAuth != nil && diskAuth.AccessToken != "" {
+			cachedConsole = diskAuth
+			res := *diskAuth
+			return &res, nil
+		}
+		return nil, err
+	}
+
+	cachedConsole = auth
+	saveConsoleAuthDisk(auth)
+	res := *auth
+	return &res, nil
+}
+
+func isConsoleAuthValid(a *ConsoleAuth) bool {
+	if a == nil || a.AccessToken == "" {
+		return false
+	}
+	if a.TokenExpiry <= 0 {
+		return true
+	}
+	nowMs := time.Now().UnixMilli()
+	return a.TokenExpiry > (nowMs + 120_000)
+}
+
+func readConsoleAuthDisk() *ConsoleAuth {
+	data, err := os.ReadFile(consoleCacheFile())
+	if err != nil || len(data) == 0 {
+		return nil
+	}
+	var a ConsoleAuth
+	if err := json.Unmarshal(data, &a); err != nil {
+		return nil
+	}
+	return &a
+}
+
+func saveConsoleAuthDisk(a *ConsoleAuth) {
+	if a == nil {
+		return
+	}
+	data, err := json.MarshalIndent(a, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := consoleCacheFile() + ".tmp"
+	_ = os.WriteFile(tmp, data, 0600)
+	_ = os.Rename(tmp, consoleCacheFile())
+}
+
+func loadConsoleAuth() (*ConsoleAuth, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	defer cancel()
+
+	query := "SELECT a.access_token, a.refresh_token, a.token_expiry, s.active_org_id, a.email FROM account a JOIN account_state s ON a.id = s.active_account_id LIMIT 1;"
+	cmd := exec.CommandContext(ctx, "opencode", "db", query)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("opencode db failed (%w): %s", err, strings.TrimSpace(string(out)))
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) < 2 {
+		return nil, errors.New("opencode db returned no active account rows")
+	}
+
+	row := strings.Split(strings.TrimRight(lines[1], "\r"), "\t")
+	if len(row) < 4 {
+		return nil, fmt.Errorf("opencode db returned unexpected row format: %q", lines[1])
+	}
+
+	accessToken := strings.TrimSpace(row[0])
+	refreshToken := strings.TrimSpace(row[1])
+	tokenExpiry, _ := strconv.ParseInt(strings.TrimSpace(row[2]), 10, 64)
+	activeOrgID := strings.TrimSpace(row[3])
+	email := ""
+	if len(row) > 4 {
+		email = strings.TrimSpace(row[4])
+	}
+
+	if accessToken == "" {
+		return nil, errors.New("opencode db active account has empty access_token")
+	}
+
+	auth := &ConsoleAuth{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		TokenExpiry:  tokenExpiry,
+		ActiveOrgID:  activeOrgID,
+		Email:        email,
+		LastUpdated:  time.Now(),
+	}
+	return auth, nil
+}
+
+// CanonicalSessionID generates a session ID conforming to OpenCode's regex:
+// ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$
+func CanonicalSessionID() string {
+	hexPart := make([]byte, 6)
+	_, _ = rand.Read(hexPart)
+	h := hex.EncodeToString(hexPart)
+
+	const alnum = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	alnumBytes := make([]byte, 14)
+	randBytes := make([]byte, 14)
+	_, _ = rand.Read(randBytes)
+	for i := 0; i < 14; i++ {
+		alnumBytes[i] = alnum[int(randBytes[i])%len(alnum)]
+	}
+
+	return fmt.Sprintf("ses_%s%s", h, string(alnumBytes))
+}

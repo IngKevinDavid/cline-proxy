@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"cline-go-proxy/internal/kit"
 )
@@ -231,5 +233,114 @@ func saveZenEndpoints() {
 	}
 	if err := os.Rename(tmp, zenEndpointFile()); err != nil {
 		log.Printf("zen endpoints save failed (rename): %v", err)
+	}
+}
+
+// AutoVerifyZenModels probes any active free models that haven't been verified yet.
+func AutoVerifyZenModels(ctx context.Context) (int, int) {
+	initZenModels()
+	zenModelsMu.RLock()
+	var toProbe []string
+	for id, m := range zenModels {
+		if isZenFreeModel(m) && (m.Upstream == "" || m.Upstream == "unknown") {
+			toProbe = append(toProbe, id)
+		}
+	}
+	zenModelsMu.RUnlock()
+
+	verified := 0
+	failed := 0
+
+	for _, id := range toProbe {
+		select {
+		case <-ctx.Done():
+			return verified, failed
+		default:
+		}
+		endpoint, err := probeZenModelEndpoint(ctx, id)
+		if err == nil && endpoint != "" {
+			verified++
+		} else {
+			failed++
+		}
+	}
+
+	if verified > 0 || failed > 0 {
+		log.Printf("zen probe auto-verification complete: %d verified, %d failed", verified, failed)
+	}
+	return verified, failed
+}
+
+func probeZenModelEndpoint(ctx context.Context, modelID string) (string, error) {
+	params := map[string]any{
+		"model": modelID,
+		"messages": []any{
+			map[string]any{"role": "user", "content": "ping"},
+		},
+		"max_tokens": 5,
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	// Step 1: Probe chat/completions first
+	resp1, _, err1 := callZenAPI(probeCtx, params, false)
+	if err1 == nil && resp1 != nil && resp1.StatusCode == http.StatusOK {
+		resp1.Body.Close()
+		learnZenEndpoint(modelID, "chat")
+		log.Printf("zen probe: model %s verified on chat/completions (HTTP 200)", modelID)
+		return "chat", nil
+	}
+	if resp1 != nil {
+		resp1.Body.Close()
+	}
+
+	// Step 2: Fall back to responses
+	resp2, _, err2 := callZenResponsesAPI(probeCtx, params, false)
+	if err2 == nil && resp2 != nil && resp2.StatusCode == http.StatusOK {
+		resp2.Body.Close()
+		learnZenEndpoint(modelID, "responses")
+		log.Printf("zen probe: model %s fallback verified on responses (HTTP 200)", modelID)
+		return "responses", nil
+	}
+	if resp2 != nil {
+		resp2.Body.Close()
+	}
+
+	return "", fmt.Errorf("model %s failed on both endpoints: chat err=%v, responses err=%v", modelID, err1, err2)
+}
+
+// PruneLearnedEndpoints removes entries for models that no longer exist in desired catalog.
+func PruneLearnedEndpoints(desired map[string]bool) {
+	if len(desired) == 0 {
+		return
+	}
+	zenEndpointSaveMu.Lock()
+	defer zenEndpointSaveMu.Unlock()
+
+	learned := loadZenEndpointsFile()
+	if len(learned) == 0 {
+		return
+	}
+
+	changed := false
+	cleaned := make(map[string]string)
+	for id, ep := range learned {
+		if desired[id] {
+			cleaned[id] = ep
+		} else {
+			log.Printf("zen probe: pruned deprecated model %s from learned endpoints", id)
+			changed = true
+		}
+	}
+
+	if changed {
+		data, err := json.MarshalIndent(cleaned, "", "  ")
+		if err != nil {
+			return
+		}
+		tmp := zenEndpointFile() + ".tmp"
+		_ = os.WriteFile(tmp, data, 0600)
+		_ = os.Rename(tmp, zenEndpointFile())
 	}
 }

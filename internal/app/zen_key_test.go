@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -535,5 +536,29 @@ func TestZenKeyMultiAccountPoolRotation(t *testing.T) {
 	}
 	if seenTokens[0] != "st_acc1" || seenTokens[1] != "st_acc2" {
 		t.Fatalf("expected round-robin rotation [st_acc1, st_acc2], got %v", seenTokens)
+	}
+}
+
+func TestCanonicalSessionIDFormat(t *testing.T) {
+	re := regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
+	for i := 0; i < 50; i++ {
+		sid := CanonicalSessionID()
+		if !re.MatchString(sid) {
+			t.Fatalf("session ID %q does not match required format", sid)
+		}
+	}
+}
+
+func TestConsoleAuthDiscovery(t *testing.T) {
+	auth, err := GetConsoleAuth()
+	if err != nil {
+		t.Logf("Console auth not available: %v", err)
+		return
+	}
+	if auth.AccessToken == "" {
+		t.Errorf("expected non-empty access token")
+	}
+	if auth.ActiveOrgID == "" {
+		t.Errorf("expected non-empty active org id")
 	}
 }

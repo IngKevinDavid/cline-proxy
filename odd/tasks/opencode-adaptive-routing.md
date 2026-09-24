@@ -24,6 +24,7 @@ OpenCode periodically enables and disables free models (`mimo-v2.6-flash-free`, 
 - [x] `task-4`: Catalog sync hook for dynamic discovery of newly added/removed free models and runtime request dispatcher (`internal/app/zen.go`).
 - [x] `task-5`: Build with `install.ps1`, restart daemon, run end-to-end empirical verification of free models through proxy, and record observations in Engram.
 - [x] `task-6`: Deep audit and alignment with Dashboard `GET /admin` & multi-account key control (`resolveZenKeyIdentity`, `pickZenKey` round-robin with multi-account format `token#org_id`, live status detection, per-key dashboard "Test" probe with canonical session headers, and automatic 401 failover).
+- [x] `task-7`: Architecture consolidation into canonical modules (`internal/app/zen_session.go`, `zen_endpoint.go`, `zen.go`, `admin_zen.go`, `zen_key_test.go`, `zen_endpoint_test.go`), removing the 6 temporary/standalone modules (`console_auth*`, `zen_fingerprint*`, `zen_probe*`) so file structure matches upstream `foxy1402/cline-proxy` 1-to-1 for a clean Pull Request.
 
 ## Verification Evidence
 1. Unit Tests: `go test -count=1 ./...` passed 100% cleanly across all packages in 8.525s (including new tests `TestResolveZenKeyIdentity`, `TestZenKeyTestConsoleTokenHeaders`, and `TestZenKeyMultiAccountPoolRotation`).

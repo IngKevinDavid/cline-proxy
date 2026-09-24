@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"os"
 	"testing"
 )
 
@@ -85,5 +86,26 @@ func TestZenHTTPErrorText(t *testing.T) {
 	var he *zenHTTPError
 	if !errors.As(fmt.Errorf("wrapped: %w", err), &he) || he.Status != 502 {
 		t.Fatal("wrapped zenHTTPError must be recoverable via errors.As")
+	}
+}
+
+func TestPruneLearnedEndpoints(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("DATA_DIR", tmpDir)
+
+	data := []byte(`{"keep-model": "chat", "prune-model": "responses"}`)
+	if err := os.WriteFile(zenEndpointFile(), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	desired := map[string]bool{"keep-model": true}
+	PruneLearnedEndpoints(desired)
+
+	learned := loadZenEndpointsFile()
+	if learned["keep-model"] != "chat" {
+		t.Errorf("expected keep-model to be preserved, got %q", learned["keep-model"])
+	}
+	if _, ok := learned["prune-model"]; ok {
+		t.Errorf("expected prune-model to be removed")
 	}
 }

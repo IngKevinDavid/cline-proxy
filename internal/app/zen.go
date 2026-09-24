@@ -1588,6 +1588,7 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 		}
 		out["usage"] = u
 	}
+	repairXMLToolCalls(out)
 	return out, nil
 }
 

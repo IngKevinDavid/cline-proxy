@@ -42,6 +42,13 @@ func handleZenConfig(w http.ResponseWriter, r *http.Request) {
 			"proxyCooldowns": zenProxyCooldownStatus(),
 		},
 	}
+	if auth, err := GetConsoleAuth(); err == nil && auth != nil && auth.AccessToken != "" {
+		data["consoleAuth"] = map[string]any{
+			"available": true,
+			"tokenMask": maskZenKey(auth.AccessToken),
+			"orgID":     auth.ActiveOrgID,
+		}
+	}
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: data})
 }
 
@@ -380,7 +387,11 @@ func testZenKey(key string, index int, modelID string) (map[string]any, string) 
 		switch he.Status {
 		case http.StatusForbidden:
 			result["httpStatus"] = he.Status
-			result["reason"] = "session rejected (403) — this key's session is no longer live; the harvester was just triggered, use the mint buttons below to retry now"
+			if isConsoleKey(key) {
+				result["reason"] = "console authentication rejected (403) — token expired or invalid; run 'opencode console login' or refresh credentials"
+			} else {
+				result["reason"] = "session rejected (403) — this key's session is no longer live; the harvester was just triggered, use the mint buttons below to retry now"
+			}
 			return result, "error"
 		default:
 			result["httpStatus"] = he.Status

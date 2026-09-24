@@ -23,9 +23,10 @@ OpenCode periodically enables and disables free models (`mimo-v2.6-flash-free`, 
 - [x] `task-3`: Dual-endpoint probe engine (test `chat/completions` first, fallback to `responses`) & persistent learning in `data/.zen-endpoints.json` (`internal/app/zen_endpoint.go` & `internal/app/zen_probe.go`).
 - [x] `task-4`: Catalog sync hook for dynamic discovery of newly added/removed free models and runtime request dispatcher (`internal/app/zen.go`).
 - [x] `task-5`: Build with `install.ps1`, restart daemon, run end-to-end empirical verification of free models through proxy, and record observations in Engram.
+- [x] `task-6`: Deep audit and alignment with Dashboard `GET /admin` & multi-account key control (`resolveZenKeyIdentity`, `pickZenKey` round-robin with multi-account format `token#org_id`, live status detection, per-key dashboard "Test" probe with canonical session headers, and automatic 401 failover).
 
 ## Verification Evidence
-1. Unit Tests: `go test ./...` passed 100% cleanly across all packages in 8.146s.
+1. Unit Tests: `go test -count=1 ./...` passed 100% cleanly across all packages in 8.525s (including new tests `TestResolveZenKeyIdentity`, `TestZenKeyTestConsoleTokenHeaders`, and `TestZenKeyMultiAccountPoolRotation`).
 2. Binary Compilation: `cline-proxy.exe` compiled cleanly (9.42 MB) via `install.ps1 -ForceRebuild`.
 3. Auto-Probe & Memorization: `data/.zen-endpoints.json` automatically generated and populated:
    - `big-pickle`: `"chat"`
@@ -39,3 +40,9 @@ OpenCode periodically enables and disables free models (`mimo-v2.6-flash-free`, 
 4. Live Proxy Dispatch (`http://127.0.0.1:3457/v1/chat/completions`):
    - Streaming (`stream: true`): 200 OK on `big-pickle`, `ling-3.0-flash-fin-free`, `nemotron-3.5-lightning-free`, `muse-spark-1.3-contributor-free`, `space-bunny-free`.
    - Non-Streaming (`stream: false`): 200 OK with valid synthesized JSON responses on `big-pickle`, `ling-3.0-flash-fin-free`, `muse-spark-1.3-contributor-free`.
+5. Dashboard `GET /admin` & Multi-Account Key Pool Verification:
+   - `GET /admin/api/zen/config` renders detected `consoleAuth` (`available: true`, `orgID`, `tokenMask`).
+   - `POST /admin/api/opencode/config/update` accepts pool of Console OAuth accounts (`st_...#org_...`) and Zen keys (`oc_sk_...`).
+   - Dashboard table renders each account with `keyMask`, `sessionLive: true`, `sessionMinted: true`, `session: "console-oauth"`, and working "Test" button.
+   - `POST /admin/api/zen/keys/test` accurately probes Console keys and returns `status: "active"`, `reason: "ok"`, latency, and uncools the key.
+   - Automatic 401 failover: invalid/expired keys in pool are cooled for 1 hour while requests transparently rotate to healthy accounts.

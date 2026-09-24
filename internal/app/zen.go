@@ -517,11 +517,17 @@ func maskZenKey(k string) string {
 		return "-"
 	case k == "public":
 		return "public (no key)"
-	case len(k) <= 6:
-		return "…" // 太短，连前缀都不给
-	default:
-		return k[:6] + "…"
 	}
+	token := k
+	orgSuffix := ""
+	if idx := strings.Index(k, "#"); idx != -1 {
+		token = k[:idx]
+		orgSuffix = " (#" + kit.Truncate(k[idx+1:], 8) + ")"
+	}
+	if len(token) <= 6 {
+		return "…" + orgSuffix
+	}
+	return token[:6] + "…" + orgSuffix
 }
 
 var (
@@ -531,12 +537,49 @@ var (
 	zenKeyCool  = map[string]time.Time{}
 )
 
+// resolveZenKeyIdentity 解析 key 凭据：
+// 支持 Console OAuth 令牌（st_...）、带组织后缀格式（token#org_id）或普通 Zen key。
+// 当 key 为空或 "public" 时，回退到本地 CLI 登录会话（GetConsoleAuth）。
+func resolveZenKeyIdentity(rawKey string) (token string, orgID string, isConsole bool) {
+	k := strings.TrimSpace(rawKey)
+	if k == "" || k == "public" {
+		if auth, err := GetConsoleAuth(); err == nil && auth != nil && auth.AccessToken != "" {
+			return auth.AccessToken, auth.ActiveOrgID, true
+		}
+		return rawKey, "", false
+	}
+
+	token = k
+	if idx := strings.Index(k, "#"); idx != -1 {
+		token = strings.TrimSpace(k[:idx])
+		orgID = strings.TrimSpace(k[idx+1:])
+	}
+
+	if strings.HasPrefix(token, "st_") {
+		isConsole = true
+	} else if auth, err := GetConsoleAuth(); err == nil && auth != nil && auth.AccessToken != "" && token == auth.AccessToken {
+		isConsole = true
+	}
+
+	if isConsole && orgID == "" {
+		if auth, err := GetConsoleAuth(); err == nil && auth != nil && (token == auth.AccessToken || rawKey == "" || rawKey == "public") {
+			orgID = auth.ActiveOrgID
+		}
+	}
+	return token, orgID, isConsole
+}
+
 // pickZenKey round-robin 选取一个未冷却的 key；全部冷却时按轮转顺序返回下一个。
 // 返回 "" 表示当前没有配置任何 key。
 func pickZenKey() string {
 	keys := getZenConfig().Keys
-	if len(keys) == 0 {
-		return ""
+	if len(keys) == 0 || (len(keys) == 1 && keys[0] == "public") {
+		if auth, err := GetConsoleAuth(); err == nil && auth != nil && auth.AccessToken != "" {
+			return auth.AccessToken
+		}
+		if len(keys) == 0 {
+			return ""
+		}
 	}
 	// 先取 live 会话集合（zenSessMu）再进 zenKeyMu：两把锁不嵌套，避免与
 	// 收割路径（持 zenSessMu 时不取 zenKeyMu，反之亦然）形成锁序反转。
@@ -1602,16 +1645,9 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		// pinKey（面板 Test）：整条调用链固定该 key，优先级最高——探测的
 		// 结论只对被探测的 key 成立，中途换 key 会把别的 key 的成败算到它头上。
 		var key string
-		var orgID string
-		isConsole := false
 		if o.pinKey != "" {
 			key = o.pinKey
 			retryKey = o.pinKey
-		} else if auth, err := GetConsoleAuth(); err == nil && auth != nil && auth.AccessToken != "" {
-			key = auth.AccessToken
-			orgID = auth.ActiveOrgID
-			retryKey = key
-			isConsole = true
 		} else if pk := pinnedZenKey(); pk != "" {
 			key = pk
 			retryKey = pk
@@ -1621,15 +1657,18 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		} else {
 			key = retryKey
 		}
+
+		token, orgID, isConsole := resolveZenKeyIdentity(key)
+
 		sess, user, ua := "", "", ""
 		if isConsole {
 			sess = CanonicalSessionID()
 			user = "msg_" + kit.RandAlphaNum(20)
-			ua = "opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14"
-		} else if key != "" {
+			ua = zenNativeUA
+		} else if token != "" {
 			// 会话粘性：同一 key 复用稳定的 sess_/UA（服务端会话绑定要求），
 			// msg_ 请求 ID 仍每次随机。
-			sess, user, ua = StickyZenIdentity(key)
+			sess, user, ua = StickyZenIdentity(token)
 		} else {
 			sess, user, ua = kit.FreshZenIdentity()
 		}
@@ -1642,7 +1681,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		if err != nil {
 			return nil, rateLimited, fmt.Errorf("create zen responses request: %w", err)
 		}
-		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", ua)
 		req.Header.Set("x-opencode-session", sess)
@@ -1755,6 +1794,21 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		if resp.StatusCode >= 500 && o.pinKey == "" {
 			markZenFail()
 		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			cooldownZenKey(key, 1*time.Hour)
+			log.Printf("  zen responses key#%d unauthorized (401), cooling for 1h", keyIndex(key))
+			if o.pinKey != "" {
+				return nil, rateLimited, apiErr
+			}
+			if attempt < retries {
+				if next := pickZenKey(); next != "" && next != key && !zenKeyCooling(next) {
+					key = next
+					retryKey = next
+					log.Printf("  zen responses 401, switching to next zen key (%d configured)", len(cfg.Keys))
+					continue
+				}
+			}
+		}
 		// 会话失效（FreeTier 403 且非限流）：该 key 的 sess_ 已被服务端
 		// 遗忘，复用只会持续 403。本地随机 sess_ 必 403，不轮换；后台
 		// 收割机（连续 403 达阈值）mint 真会话补上。本次按轮转换 key 重试。
@@ -1835,31 +1889,27 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		// pinKey（面板 Test）优先且不碰轮转指针：一次探测不该挪动 round-robin
 		// 的游标，否则每点一次 Test 都会让下一次正常请求换 key。
 		var key string
-		var orgID string
-		isConsole := false
 		if o.pinKey != "" {
 			key = o.pinKey
-		} else if auth, err := GetConsoleAuth(); err == nil && auth != nil && auth.AccessToken != "" {
-			key = auth.AccessToken
-			orgID = auth.ActiveOrgID
-			isConsole = true
+		} else if pk := pinnedZenKey(); pk != "" {
+			key = pk
 		} else {
 			key = pickZenKey()
-			if pk := pinnedZenKey(); pk != "" {
-				key = pk
-			}
 		}
+
+		token, orgID, isConsole := resolveZenKeyIdentity(key)
+
 		sess, user, ua := "", "", ""
 		if isConsole {
 			sess = CanonicalSessionID()
 			user = "msg_" + kit.RandAlphaNum(20)
-			ua = "opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14"
-		} else if key != "" {
-			sess, user, ua = StickyZenIdentity(key)
+			ua = zenNativeUA
+		} else if token != "" {
+			sess, user, ua = StickyZenIdentity(token)
 		} else {
 			sess, user, ua = kit.FreshZenIdentity()
 		}
-		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", ua)
 		req.Header.Set("x-opencode-session", sess)
@@ -1959,6 +2009,16 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		if resp.StatusCode >= 500 && o.pinKey == "" {
 			markZenFail()
 		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			cooldownZenKey(key, 1*time.Hour)
+			log.Printf("  zen chat key#%d unauthorized (401), cooling for 1h", keyIndex(key))
+			if o.pinKey != "" {
+				return nil, rateLimited, apiErr
+			}
+			if attempt < retries {
+				continue
+			}
+		}
 		// 会话失效（FreeTier 403 且非限流）：该 key 的 sess_ 已被服务端遗忘，
 		// 复用只会持续 403。后台收割机（连续 403 达阈值）mint 真会话补上；
 		// 本次直接轮转下一 key 重试（循环头每次 pickZenKey，天然换 key）。
@@ -1995,7 +2055,7 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 // keyIndex key 在池中的序号（日志用）
 func keyIndex(key string) int {
 	for i, k := range getZenConfig().Keys {
-		if k == key {
+		if k == key || strings.HasPrefix(k, key+"#") {
 			return i + 1
 		}
 	}

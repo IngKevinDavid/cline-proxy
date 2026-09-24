@@ -127,12 +127,34 @@ func saveZenSessionsLocked() {
 	}
 }
 
-// zenSessionLive 该 key 是否已有服务端认得的 live 会话（CLI mint 过）。
+// isConsoleKey 判断 key 是否属于 OpenCode Console OAuth 令牌（st_... 或本地 console auth）。
+// Console 令牌原生使用 CanonicalSessionID()，不需要 CLI session harvesting。
+func isConsoleKey(key string) bool {
+	if key == "" || key == "public" {
+		return false
+	}
+	token := key
+	if idx := strings.Index(key, "#"); idx != -1 {
+		token = key[:idx]
+	}
+	if strings.HasPrefix(token, "st_") {
+		return true
+	}
+	if auth, err := GetConsoleAuth(); err == nil && auth != nil && auth.AccessToken != "" && token == auth.AccessToken {
+		return true
+	}
+	return false
+}
+
+// zenSessionLive 该 key 是否已有服务端认得的 live 会话（CLI mint 过或 Console OAuth 令牌）。
 // false = 会话是本地随机占位，任何上游请求都必 403——请求路径据此跳过它，
 // 收割机据此决定要不要补收。
 func zenSessionLive(key string) bool {
 	if key == "" || key == "public" {
 		return false
+	}
+	if isConsoleKey(key) {
+		return true
 	}
 	loadZenSessions()
 	zenSessMu.Lock()
@@ -151,6 +173,10 @@ func zenLiveKeys(keys []string) map[string]bool {
 	defer zenSessMu.Unlock()
 	live := make(map[string]bool, len(keys))
 	for _, k := range keys {
+		if isConsoleKey(k) {
+			live[k] = true
+			continue
+		}
 		if e := zenSessions[k]; e != nil && e.Minted && e.Session != "" {
 			live[k] = true
 		}
@@ -167,6 +193,13 @@ type zenSessionSnapshot struct {
 }
 
 func zenSessionSnapshotOf(key string) zenSessionSnapshot {
+	if isConsoleKey(key) {
+		return zenSessionSnapshot{
+			Minted:  true,
+			Live:    true,
+			Session: "console-oauth",
+		}
+	}
 	loadZenSessions()
 	zenSessMu.Lock()
 	defer zenSessMu.Unlock()
@@ -187,6 +220,9 @@ func zenSessionSnapshotOf(key string) zenSessionSnapshot {
 // "mint 过但被服务端拒绝"——前者必然 403（预期内），后者才是会话寿命到期的证据。
 // 没有这个区分，403 日志无法回答"会话到底能活多久"，只能靠猜。
 func zenSessionDesc(key string) string {
+	if isConsoleKey(key) {
+		return "console-oauth"
+	}
 	s := zenSessionSnapshotOf(key)
 	switch {
 	case !s.Minted && s.Session == "":

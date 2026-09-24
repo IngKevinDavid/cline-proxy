@@ -10,10 +10,14 @@ import (
 )
 
 var (
-	// regexToolCallBlock matches <tool_call>...</tool_call> or unclosed <tool_call>... at end of text
-	regexToolCallBlock = regexp.MustCompile(`(?s)<tool_call>(.*?)(?:</tool_call>|$)`)
-	// regexXMLFunction matches <function=NAME>...</function> or unclosed <function=NAME>...
-	regexXMLFunction = regexp.MustCompile(`(?s)<function=([a-zA-Z0-9_\-\.:]+)>(.*?)(?:</function>|$)`)
+	// regexToolCallBlock matches <tool_call>...</tool_call>, <tool_call id="...">...</tool_call>, or unclosed at end of text
+	regexToolCallBlock = regexp.MustCompile(`(?s)<tool_call(?:[^>]*)>(.*?)(?:</tool_call>|$)`)
+	// regexXMLFunction matches <function=NAME>...</function>, <function name="NAME">...</function>, <function:NAME>...</function>
+	regexXMLFunction = regexp.MustCompile(`(?s)<(?:function[=:]|function\s+name=["']?|function\s+["']?)([a-zA-Z0-9_\-\.:]+)["']?>(.*?)(?:</function>|$)`)
+	// regexParamTag matches parameter opening tags: <parameter=KEY>, <parameter name="KEY">, <arg:KEY>, <argument name="KEY">
+	regexParamTag = regexp.MustCompile(`<(?:parameter[=:]|parameter\s+name=["']?|arg[=:]|arg\s+name=["']?|argument\s+name=["']?)([a-zA-Z0-9_\-\.:]+)["']?>`)
+	// regexParamCloseTag matches closing tags: </parameter>, </arg>, </argument>, </parameter:KEY>
+	regexParamCloseTag = regexp.MustCompile(`(?s)</(?:parameter|arg|argument)(?::[a-zA-Z0-9_\-\.:]+)?>\s*$`)
 )
 
 type parsedXMLToolCall struct {
@@ -74,6 +78,7 @@ func parseXMLToolCalls(text string) []parsedXMLToolCall {
 		}
 
 		// Shape B: XML <function=NAME><parameter=KEY>VAL</parameter></function>
+		// Also supports <function name="NAME"><parameter name="KEY">VAL</parameter></function>
 		fnMatches := regexXMLFunction.FindAllStringSubmatch(block, -1)
 		for _, fnM := range fnMatches {
 			if len(fnM) < 3 {
@@ -102,46 +107,27 @@ func parseXMLToolCalls(text string) []parsedXMLToolCall {
 	return results
 }
 
-// extractXMLParameters tokenizes <parameter=KEY>VAL</parameter> or <parameter=KEY>VAL
-// safely without needing regex lookaheads (which Go RE2 does not support).
+// extractXMLParameters tokenizes parameter tags across different model formats
+// (<parameter=KEY>, <parameter name="KEY">, <arg:KEY>, etc.)
 func extractXMLParameters(body string) map[string]any {
 	paramsMap := make(map[string]any)
-	const tagPrefix = "<parameter="
-	for {
-		idx := strings.Index(body, tagPrefix)
-		if idx == -1 {
-			break
+	matches := regexParamTag.FindAllStringSubmatchIndex(body, -1)
+	for i, m := range matches {
+		if len(m) < 4 {
+			continue
 		}
-		afterPrefix := body[idx+len(tagPrefix):]
-		gtIdx := strings.IndexByte(afterPrefix, '>')
-		if gtIdx == -1 {
-			break
+		key := strings.TrimSpace(body[m[2]:m[3]])
+		valStart := m[1]
+		valEnd := len(body)
+		if i+1 < len(matches) {
+			valEnd = matches[i+1][0]
 		}
-		key := strings.TrimSpace(afterPrefix[:gtIdx])
-		contentAfter := afterPrefix[gtIdx+1:]
-
-		closeTag := "</parameter>"
-		closeIdx := strings.Index(contentAfter, closeTag)
-		nextTagIdx := strings.Index(contentAfter, tagPrefix)
-
-		var valRaw string
-		var nextBody string
-
-		if closeIdx != -1 && (nextTagIdx == -1 || closeIdx < nextTagIdx) {
-			valRaw = contentAfter[:closeIdx]
-			nextBody = contentAfter[closeIdx+len(closeTag):]
-		} else if nextTagIdx != -1 {
-			valRaw = contentAfter[:nextTagIdx]
-			nextBody = contentAfter[nextTagIdx:]
-		} else {
-			valRaw = contentAfter
-			nextBody = ""
-		}
+		rawVal := strings.TrimSpace(body[valStart:valEnd])
+		rawVal = strings.TrimSpace(regexParamCloseTag.ReplaceAllString(rawVal, ""))
 
 		if key != "" {
-			paramsMap[key] = coerceXMLParamValue(strings.TrimSpace(valRaw))
+			paramsMap[key] = coerceXMLParamValue(rawVal)
 		}
-		body = nextBody
 	}
 	return paramsMap
 }

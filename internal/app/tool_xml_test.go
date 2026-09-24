@@ -61,6 +61,34 @@ func TestParseXMLToolCallsJSONVariant(t *testing.T) {
 	}
 }
 
+func TestParseXMLToolCallsMultiModelVariants(t *testing.T) {
+	// Format with attributes: <function name="..."> <parameter name="...">
+	rawAttr := `<tool_call id="call_1"><function name="qgis_buffer"><parameter name="distance">50.5</parameter><parameter name="dissolve">false</parameter></function></tool_call>`
+	calls := parseXMLToolCalls(rawAttr)
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	if calls[0].Name != "qgis_buffer" {
+		t.Errorf("expected qgis_buffer, got %s", calls[0].Name)
+	}
+	if !strings.Contains(calls[0].Arguments, "50.5") || !strings.Contains(calls[0].Arguments, "false") {
+		t.Errorf("expected parsed params, got %s", calls[0].Arguments)
+	}
+
+	// Format with colon: <function:calc> <arg:x>
+	rawColon := `<tool_call><function:calc><arg:x>100</arg:x><arg:y>200</arg:y></function></tool_call>`
+	calls2 := parseXMLToolCalls(rawColon)
+	if len(calls2) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls2))
+	}
+	if calls2[0].Name != "calc" {
+		t.Errorf("expected calc, got %s", calls2[0].Name)
+	}
+	if !strings.Contains(calls2[0].Arguments, "100") {
+		t.Errorf("expected 100 in arguments, got %s", calls2[0].Arguments)
+	}
+}
+
 func TestRepairXMLToolCallsInChat(t *testing.T) {
 	chat := map[string]any{
 		"choices": []any{

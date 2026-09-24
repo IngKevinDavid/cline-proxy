@@ -45,6 +45,7 @@ func TestIsWrongEndpointStatusDiscipline(t *testing.T) {
 		// 瞬时网关错误绝不能被当成模型属性（会持久化到错误端点）
 		{"502 transient", &zenHTTPError{Status: 502, Body: `{"error":"endpoint not found"}`}, false},
 		{"503 overload", &zenHTTPError{Status: 503, Body: `no such model`}, false},
+		{"503 endpoint unavailable", &zenHTTPError{Status: 503, Body: `{"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}}`}, true},
 		{"504 timeout", &zenHTTPError{Status: 504, Body: `unsupported endpoint`}, false},
 		// 4xx 才看特征词
 		{"404 with routing keyword", &zenHTTPError{Status: 404, Body: `{"error":"model not found"}`}, true},

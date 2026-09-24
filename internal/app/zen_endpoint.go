@@ -73,6 +73,9 @@ func isWrongEndpoint(err error) bool {
 	if he.Status == http.StatusInternalServerError {
 		return true
 	}
+	if he.Status == http.StatusServiceUnavailable && strings.Contains(strings.ToLower(he.Body), "endpoint is unavailable") {
+		return true
+	}
 	switch he.Status {
 	case http.StatusBadRequest, http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusUnprocessableEntity:
 	default:
@@ -89,11 +92,11 @@ func isWrongEndpoint(err error) bool {
 			return false
 		}
 	}
-	// 走错端点特征词（只看 4xx 的响应体，不再看任意错误文本）
+	// 走错端点特征词（4xx/502/503 响应体中的端点不可达特征）
 	for _, kw := range []string{
 		"not found", "no such", "unknown model", "unsupported",
 		"invalid endpoint", "wrong endpoint", "use /v1/responses",
-		"use /chat/completions", "endpoint",
+		"use /chat/completions", "endpoint", "endpoint is unavailable",
 	} {
 		if strings.Contains(msg, kw) {
 			return true
@@ -163,7 +166,7 @@ func applyZenEndpoints(learned map[string]string) int {
 	defer zenModelsMu.Unlock()
 	n := 0
 	for id, up := range learned {
-		if up != "responses" && up != "" {
+		if up != "responses" && up != "chat" && up != "" {
 			continue
 		}
 		m, ok := zenModels[id]
@@ -212,7 +215,7 @@ func saveZenEndpoints() {
 	zenModelsMu.RLock()
 	learned := map[string]string{}
 	for id, m := range zenModels {
-		if m != nil && m.Upstream == "responses" && m.Source != "seed" {
+		if m != nil && (m.Upstream == "responses" || m.Upstream == "chat") && m.Source != "seed" {
 			learned[id] = m.Upstream
 		}
 	}

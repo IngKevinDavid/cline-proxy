@@ -69,7 +69,7 @@ var (
 	zenAliases  = make(map[string]*ZenModel) // 别名表
 )
 
-const zenAPIBase = "https://opencode.ai/zen/v1"
+const zenAPIBase = "https://opencode.ai/inference/openai/v1"
 
 func initZenModels() {
 	zenModelsMu.Lock()
@@ -383,7 +383,7 @@ func loadZenConfig() *zenConfigData {
 		}
 	}
 	normalizeZenKeys(cfg)
-	if cfg.BaseURL == "" {
+	if cfg.BaseURL == "" || cfg.BaseURL == "https://opencode.ai/zen/v1" {
 		cfg.BaseURL = zenAPIBase
 	}
 	return cfg
@@ -1602,18 +1602,31 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		// pinKey（面板 Test）：整条调用链固定该 key，优先级最高——探测的
 		// 结论只对被探测的 key 成立，中途换 key 会把别的 key 的成败算到它头上。
 		var key string
+		var orgID string
+		isConsole := false
 		if o.pinKey != "" {
 			key = o.pinKey
 			retryKey = o.pinKey
+		} else if auth, err := GetConsoleAuth(); err == nil && auth != nil && auth.AccessToken != "" {
+			key = auth.AccessToken
+			orgID = auth.ActiveOrgID
+			retryKey = key
+			isConsole = true
 		} else if pk := pinnedZenKey(); pk != "" {
 			key = pk
 			retryKey = pk
 		} else if retryKey == "" {
 			retryKey = pickZenKey()
+			key = retryKey
+		} else {
+			key = retryKey
 		}
-		key = retryKey
 		sess, user, ua := "", "", ""
-		if key != "" {
+		if isConsole {
+			sess = CanonicalSessionID()
+			user = "msg_" + kit.RandAlphaNum(20)
+			ua = "opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14"
+		} else if key != "" {
 			// 会话粘性：同一 key 复用稳定的 sess_/UA（服务端会话绑定要求），
 			// msg_ 请求 ID 仍每次随机。
 			sess, user, ua = StickyZenIdentity(key)
@@ -1636,6 +1649,9 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		req.Header.Set("x-opencode-request", user)
 		req.Header.Set("x-opencode-client", "cli")
 		req.Header.Set("x-opencode-project", "global")
+		if isConsole && orgID != "" {
+			req.Header.Set("x-opencode-org-id", orgID)
+		}
 		log.Printf("  zen upstream: model=%s responses stream=%v via=%s key=#%d attempt=%d session=%s",
 			zm.ID, stream, viaProxy, keyIndex(key), attempt+1, kit.Truncate(sess, 24))
 
@@ -1819,15 +1835,30 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		// pinKey（面板 Test）优先且不碰轮转指针：一次探测不该挪动 round-robin
 		// 的游标，否则每点一次 Test 都会让下一次正常请求换 key。
 		var key string
+		var orgID string
+		isConsole := false
 		if o.pinKey != "" {
 			key = o.pinKey
+		} else if auth, err := GetConsoleAuth(); err == nil && auth != nil && auth.AccessToken != "" {
+			key = auth.AccessToken
+			orgID = auth.ActiveOrgID
+			isConsole = true
 		} else {
 			key = pickZenKey()
 			if pk := pinnedZenKey(); pk != "" {
 				key = pk
 			}
 		}
-		sess, user, ua := StickyZenIdentity(key)
+		sess, user, ua := "", "", ""
+		if isConsole {
+			sess = CanonicalSessionID()
+			user = "msg_" + kit.RandAlphaNum(20)
+			ua = "opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14"
+		} else if key != "" {
+			sess, user, ua = StickyZenIdentity(key)
+		} else {
+			sess, user, ua = kit.FreshZenIdentity()
+		}
 		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", ua)
@@ -1835,6 +1866,9 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		req.Header.Set("x-opencode-request", user)
 		req.Header.Set("x-opencode-client", "cli")
 		req.Header.Set("x-opencode-project", "global")
+		if isConsole && orgID != "" {
+			req.Header.Set("x-opencode-org-id", orgID)
+		}
 
 		log.Printf("  zen upstream: model=%s stream=%v msgs=%d via=%s key=#%d attempt=%d session=%s",
 			body["model"], stream, getMsgCount(params), viaProxy, keyIndex(key), attempt+1, kit.Truncate(sess, 24))
@@ -2140,15 +2174,22 @@ func syncZenModels() (int, error) {
 	}
 	added := applyZenCatalog(desired, overlay)
 	pruned := pruneZenModelsTo(desired)
+	if pruned > 0 {
+		PruneLearnedEndpoints(desired)
+		log.Printf("zen model sync: pruned %d model(s) no longer free/online", pruned)
+	}
 	// 重新敷用已学习的端点覆盖：新出现的模型（以及被 prune 后重建的条目）不在
 	// 启动时 loadZenEndpoints 的视野里，不敷用就会每次重启重新探测一遍。
 	reapplyLearnedEndpoints()
 	if added > 0 {
 		log.Printf("zen model sync: %d new free model(s) from live catalog", added)
 	}
-	if pruned > 0 {
-		log.Printf("zen model sync: pruned %d model(s) no longer free/online", pruned)
-	}
+	// 针对新发现或尚未验证端点的免费模型，在后台自动执行双端点探测与持久化
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		AutoVerifyZenModels(ctx)
+	}()
 	return added, nil
 }
 

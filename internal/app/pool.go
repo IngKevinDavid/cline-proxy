@@ -99,6 +99,11 @@ func loadPool() *AccountPool {
 	if pool.DefaultModel != "" {
 		defaultModel = pool.DefaultModel
 	}
+	if pool.Strategy != "" {
+		proxyConfigMu.Lock()
+		proxyConfig.Strategy = pool.Strategy
+		proxyConfigMu.Unlock()
+	}
 	return pool
 }
 

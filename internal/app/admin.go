@@ -941,7 +941,7 @@ type proxyConfigData struct {
 
 func defaultProxyConfig() *proxyConfigData {
 	return &proxyConfigData{
-		Strategy: "round_robin",
+		Strategy: "fill",
 		Headers: map[string]string{
 			"User-Agent":         "Cline/3.0.50",
 			"HTTP-Referer":       "https://cline.bot",
@@ -1117,6 +1117,11 @@ func handleAdminUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		switch req.Strategy {
 		case "round_robin", "fill", "random":
 			newCfg.Strategy = req.Strategy
+			p := loadPool()
+			poolMu.Lock()
+			p.Strategy = req.Strategy
+			savePoolLocked()
+			poolMu.Unlock()
 			changed = true
 		default:
 			writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid strategy, must be: round_robin, fill, random"})

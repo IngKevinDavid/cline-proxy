@@ -70,11 +70,13 @@ h2{font-size:21px;margin-bottom:18px;font-weight:700;letter-spacing:.01em}
 .card .num.red{color:var(--danger);--lab-c:var(--danger)}
 .card .num.yellow{color:var(--amber);--lab-c:var(--amber)}
 .card .num.blue{color:var(--accent);--lab-c:var(--accent)}
+.card .num.purple{color:#a78bfa;--lab-c:#a78bfa}
 .cards .card{animation:rise .45s ease both}
 .cards .card:nth-child(1){animation-delay:.02s}
 .cards .card:nth-child(2){animation-delay:.08s}
 .cards .card:nth-child(3){animation-delay:.14s}
 .cards .card:nth-child(4){animation-delay:.2s}
+.cards .card:nth-child(5){animation-delay:.26s}
 @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 
 /* ===== Sections ===== */
@@ -242,6 +244,7 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
   <div class="card"><div class="num green" id="statActive">-</div><div class="label">Active</div></div>
   <div class="card"><div class="num yellow" id="statCooldown">-</div><div class="label">Cooldown</div></div>
   <div class="card"><div class="num red" id="statExpired">-</div><div class="label">Expired</div></div>
+  <div class="card"><div class="num purple" id="statStrategy" style="font-size:24px;text-transform:uppercase">FILL</div><div class="label">Scheduling strategy</div></div>
 </div>
 <div class="section">
   <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg></span> Quick actions</div>
@@ -277,8 +280,11 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 </div>
 
 <div id="tab-accounts" class="tab-panel" style="display:none">
-  <div class="flex justify-between" style="margin-bottom:16px">
-  <h2>Accounts</h2>
+  <div class="flex justify-between" style="margin-bottom:16px;align-items:center">
+  <div style="display:flex;align-items:center;gap:12px">
+    <h2 style="margin-bottom:0">Accounts</h2>
+    <span class="badge" id="accountStrategyBadge" style="font-size:12px;font-weight:600;padding:3px 10px;border-radius:6px;border:1px solid var(--border);background:rgba(167,139,250,0.12);color:#a78bfa">Strategy: <span id="accountStrategyText">fill</span></span>
+  </div>
   <div style="display:flex;gap:8px">
     <button class="btn btn-sm" onclick="exportAccounts()">Export accounts</button>
     <button class="btn btn-primary btn-sm" onclick="switchTab('import')">Add</button>
@@ -456,8 +462,8 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
       <div class="field">
         <label>Scheduling strategy</label>
         <select id="settingStrategy" onchange="updateConfig()">
-          <option value="round_robin">Round-robin (round_robin)</option>
-          <option value="fill">Fill (fill)</option>
+          <option value="fill">Fill (fill — exhausts one account before rotating)</option>
+          <option value="round_robin">Round-robin (round_robin — rotates accounts evenly)</option>
           <option value="random">Random (random)</option>
         </select>
       </div>
@@ -789,9 +795,9 @@ async function loadStats() {
     _('statActive').textContent = s.active;
     _('statCooldown').textContent = s.cooldown;
     _('statExpired').textContent = s.expired;
+    if (_('statStrategy')) _('statStrategy').textContent = (s.strategy || 'fill').toUpperCase();
+    if (_('accountStrategyText')) _('accountStrategyText').textContent = s.strategy || 'fill';
     if (s.version) _('settingVersion').value = s.version;
-    // 策略下拉由 /config 加载填写（loadConfig），统计刷新不回写表单，
-    // 避免把用户正在编辑的选项覆盖掉
   } catch (e) { /* ignore */ }
 }
 
@@ -1159,6 +1165,8 @@ async function updateConfig() {
   const strategy = _('settingStrategy').value;
   try {
     await api('POST', '/config/update', { strategy });
+    if (_('statStrategy')) _('statStrategy').textContent = strategy.toUpperCase();
+    if (_('accountStrategyText')) _('accountStrategyText').textContent = strategy;
     toast('Strategy updated to: ' + strategy, 'success');
   } catch (e) { toast('Update failed: ' + e.message, 'error'); }
 }
@@ -1272,7 +1280,11 @@ async function loadConfig() {
     const d = await api('GET', '/config');
     const c = d.data;
     if (c.address) _('settingAddr').value = c.address;
-    if (c.strategy) _('settingStrategy').value = c.strategy;
+    if (c.strategy) {
+      _('settingStrategy').value = c.strategy;
+      if (_('statStrategy')) _('statStrategy').textContent = c.strategy.toUpperCase();
+      if (_('accountStrategyText')) _('accountStrategyText').textContent = c.strategy;
+    }
     if (c.version) _('settingVersion').value = c.version;
     if (c.poolPath) _('settingPoolPath').value = c.poolPath;
     loadModelOptions();

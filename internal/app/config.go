@@ -184,7 +184,7 @@ func ApplyEnvConfig() {
 			proxyConfig.Strategy = s
 			proxyConfigMu.Unlock()
 		default:
-			fmt.Printf("  WARNING: invalid POOL_STRATEGY %q, using round_robin\n", s)
+			fmt.Printf("  WARNING: invalid POOL_STRATEGY %q, using fill\n", s)
 		}
 	}
 }

@@ -243,3 +243,53 @@ func (f *flushRecorder) Header() http.Header       { return f.header }
 func (f *flushRecorder) WriteHeader(status int)    { f.status = status }
 func (f *flushRecorder) Write(b []byte) (int, error) { return f.body.Write(b) }
 func (f *flushRecorder) Flush()                    {}
+
+func TestPoolStrategyFillDefaultAndSelection(t *testing.T) {
+	if cfg := defaultProxyConfig(); cfg.Strategy != "fill" {
+		t.Fatalf("expected default strategy to be 'fill', got %q", cfg.Strategy)
+	}
+
+	acc1 := &Account{AccountID: "acc1", Email: "acc1@test.com", Status: "active"}
+	acc2 := &Account{AccountID: "acc2", Email: "acc2@test.com", Status: "active"}
+	acc3 := &Account{AccountID: "acc3", Email: "acc3@test.com", Status: "active"}
+
+	poolMu.Lock()
+	oldPool := pool
+	pool = &AccountPool{
+		Accounts: []*Account{acc1, acc2, acc3},
+		Strategy: "fill",
+	}
+	proxyConfigMu.Lock()
+	oldCfg := proxyConfig
+	proxyConfig = &proxyConfigData{Strategy: "fill", Headers: map[string]string{}}
+	proxyConfigMu.Unlock()
+	poolMu.Unlock()
+
+	defer func() {
+		poolMu.Lock()
+		pool = oldPool
+		poolMu.Unlock()
+		proxyConfigMu.Lock()
+		proxyConfig = oldCfg
+		proxyConfigMu.Unlock()
+	}()
+
+	// In fill strategy, consecutive picks must return the first active account (acc1)
+	for i := 0; i < 5; i++ {
+		picked := pickAccount()
+		if picked == nil || picked.AccountID != "acc1" {
+			t.Fatalf("iteration %d: expected acc1 to be picked under fill strategy, got %v", i, picked)
+		}
+	}
+
+	// When acc1 goes into cooldown, fill strategy should pick acc2
+	poolMu.Lock()
+	acc1.Status = "cooldown"
+	acc1.CooldownUntil = time.Now().Add(1 * time.Hour)
+	poolMu.Unlock()
+
+	picked := pickAccount()
+	if picked == nil || picked.AccountID != "acc2" {
+		t.Fatalf("expected acc2 when acc1 is in cooldown, got %v", picked)
+	}
+}

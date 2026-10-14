@@ -232,7 +232,7 @@ func generateSummary(modelID, prompt string, maxSummary int) (string, error) {
 	// stream=false 直接 403），非流式形态由这里聚合。此前恒发 stream=false，
 	// 每次摘要必然 403 然后退回有损截断。
 	var raw map[string]any
-	if zm, ok := resolveZenModel(modelID); ok && zm.Upstream == "responses" {
+	if zm, ok := resolveZenModel(modelID); ok && zm.Upstream == "responses" && !isLocalOpenCodeDaemonAvailable() {
 		resp, _, err := callZenResponsesAPI(ctx, body, true)
 		if err != nil {
 			return "", err

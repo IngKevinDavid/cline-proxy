@@ -1859,7 +1859,17 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 	if len(opts) > 0 {
 		o = opts[0]
 	}
+
 	cfg := getZenConfig()
+	isOfficialZen := cfg.BaseURL == "" || strings.Contains(cfg.BaseURL, "opencode.ai")
+	if o.pinKey == "" && isOfficialZen && isLocalOpenCodeDaemonAvailable() {
+		resp, rateLimited, err := callZenViaLocalDaemon(ctx, params, stream, opts...)
+		if err == nil {
+			return resp, rateLimited, nil
+		}
+		log.Printf("  zen daemon bridge failed (%v), falling back to upstream direct", err)
+	}
+
 	body := buildZenBody(params, stream)
 
 	bodyJSON, err := json.Marshal(body)

@@ -505,7 +505,7 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 	// 仍由 Upstream 字段直达，无额外探测开销。
 	// （trade-off 记录：曾考虑按目录 provider.npm 推断端点，但 29 个免费模型
 	// 中 23 个无 npm 字段、无规律可循——运行时探测是唯一可靠信号。）
-	if zm.Upstream == "responses" {
+	if zm.Upstream == "responses" && !isLocalOpenCodeDaemonAvailable() {
 		_ = handleZenResponsesNative(w, r, params, zm, tracker)
 		return
 	}
@@ -2441,7 +2441,7 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 	// 原生 responses 端点模型：先经 responses 原生调用拿到 chat 形态，
 	// 再走与 chat 路径完全相同的 anthropic 转换。上游恒 stream=true
 	//（spark 只接受 stream=true；false 会 403），客户端形态由 isStream 决定。
-	if zm.Upstream == "responses" {
+	if zm.Upstream == "responses" && !isLocalOpenCodeDaemonAvailable() {
 		resp, rateLimited, rerr := callZenResponsesAPI(r.Context(), openAIReq, true)
 		if rerr != nil {
 			log.Printf("  anthropic zen responses api error: %v", rerr)

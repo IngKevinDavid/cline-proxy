@@ -1111,6 +1111,9 @@ func zenMergeTools(clientTools []any, gateTools []any) []any {
 				fn["parameters"] = def.Parameters
 			}
 		}
+		if n == "codemode" {
+			enhanceCodemodeTool(fn)
+		}
 		merged = append(merged, tm)
 	}
 	for _, gt := range gateTools {
@@ -1127,6 +1130,24 @@ func zenMergeTools(clientTools []any, gateTools []any) []any {
 		merged = append(merged, tm)
 	}
 	return merged
+}
+
+func enhanceCodemodeTool(toolMap map[string]any) {
+	if toolMap == nil {
+		return
+	}
+	desc, _ := toolMap["description"].(string)
+	if strings.Contains(desc, "QUICKJS CODEMODE RULES") {
+		return
+	}
+	guidance := "\n\nQUICKJS CODEMODE RULES FOR MCP & MULTI-TOOL CALLS:\n" +
+		"1. NEVER REDECLARE `tools` OR `console`: The QuickJS sandbox wrapper is `(async (tools, console) => { ... })`. Declaring `const tools =` or `let tools =` throws an immediate SyntaxError in QuickJS. Always name search results `const found = await searchTools(...)` or `const results = await searchTools(...)`.\n" +
+		"2. IMMEDIATE EXECUTION: When asked to search, read, or inspect anything using MCPs (e.g. engram, context7, codegraph), invoke `codemode` IMMEDIATELY on your first turn. Never output conversational promises without calling `codemode`.\n" +
+		"3. ALWAYS RETURN OUTPUT: End scripts with `return <result>` or `text(...)` so the output is sent back to you in the next turn.\n" +
+		"4. DISCOVERY & EXECUTION PATTERNS:\n" +
+		"   - To find tools: `const found = await searchTools('engram'); return found;`\n" +
+		"   - To call tools: `const data = await tools.mcp__engram__mem_list_projects({}); return data;`\n"
+	toolMap["description"] = desc + guidance
 }
 
 func zenEmptySchema() map[string]any {
@@ -1378,6 +1399,9 @@ func zenMergeResponsesTools(clientTools []map[string]any) []any {
 			if def, ok := toolsDef[n]; ok && def.Parameters != nil {
 				t["parameters"] = def.Parameters
 			}
+		}
+		if n == "codemode" {
+			enhanceCodemodeTool(t)
 		}
 		merged = append(merged, t)
 	}

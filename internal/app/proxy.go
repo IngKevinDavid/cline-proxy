@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -3071,6 +3072,17 @@ func normalizeOpenAIResponse(obj map[string]any) map[string]any {
 						if nd["content"] == nil {
 							nd["content"] = ""
 						}
+						for _, t := range tc {
+							if tm, ok := t.(map[string]any); ok {
+								if fn, ok := tm["function"].(map[string]any); ok {
+									if fn["name"] == "codemode" {
+										if a, ok := fn["arguments"].(string); ok && a != "" {
+											fn["arguments"] = repairCodemodeArguments(a)
+										}
+									}
+								}
+							}
+						}
 					}
 					nc["delta"] = nd
 				}
@@ -3112,7 +3124,11 @@ func normalizeMessage(msg map[string]any) map[string]any {
 		for _, t := range tc {
 			if tm, ok := t.(map[string]any); ok {
 				if fn, ok := tm["function"].(map[string]any); ok {
+					name, _ := fn["name"].(string)
 					if a, ok := fn["arguments"].(string); ok {
+						if name == "codemode" {
+							a = repairCodemodeArguments(a)
+						}
 						fn["arguments"] = chatToolArguments(a)
 					} else if fn["arguments"] == nil {
 						fn["arguments"] = "{}"
@@ -3125,6 +3141,31 @@ func normalizeMessage(msg map[string]any) map[string]any {
 		out["content"] = c
 	}
 	return out
+}
+
+func repairCodemodeArguments(rawArgs string) string {
+	if !strings.Contains(rawArgs, "tools") {
+		return rawArgs
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(rawArgs), &parsed); err != nil {
+		return rawArgs
+	}
+	code, ok := parsed["code"].(string)
+	if !ok || code == "" {
+		return rawArgs
+	}
+	re := regexp.MustCompile(`\b(const|let|var)\s+tools\s*=\s*(await\s+searchTools|searchTools|ALL_TOOLS)`)
+	if re.MatchString(code) {
+		fixedCode := re.ReplaceAllString(code, "${1} searchResults = ${2}")
+		reRet := regexp.MustCompile(`\breturn\s+tools\s*([;\n\r])`)
+		fixedCode = reRet.ReplaceAllString(fixedCode, "return searchResults${1}")
+		parsed["code"] = fixedCode
+		if b, err := json.Marshal(parsed); err == nil {
+			return string(b)
+		}
+	}
+	return rawArgs
 }
 
 func getNested(obj map[string]any, keys ...any) any {

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"cline-go-proxy/internal/kit"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -84,7 +85,10 @@ func zenProjectID() string {
 	return zenProjID
 }
 
-const zenAPIBase = "https://opencode.ai/zen/v1"
+const (
+	zenAPIBase      = "https://opencode.ai/inference/v1"
+	zenCLIUserAgent = "opencode/latest/2.0.29/cli"
+)
 
 func initZenModels() {
 	zenModelsMu.Lock()
@@ -398,7 +402,7 @@ func loadZenConfig() *zenConfigData {
 		}
 	}
 	normalizeZenKeys(cfg)
-	if cfg.BaseURL == "" || cfg.BaseURL == "https://opencode.ai/inference/openai/v1" {
+	if cfg.BaseURL == "" || cfg.BaseURL == "https://opencode.ai/inference/openai/v1" || cfg.BaseURL == "https://opencode.ai/zen/v1" {
 		cfg.BaseURL = zenAPIBase
 	}
 	return cfg
@@ -778,38 +782,58 @@ func pinnedZenKey() string {
 
 // ============ zen 上游调用 ============
 
-// zenGateToolSpecs 免费层两个端点必须携带的 opencode 工具集（工具名与官方
-// CLI 一致）。FreeTier 中间件按工具名校验"请求是否来自 opencode CLI"
-//（2026-09-18 实测解码：缺工具/工具名不齐 → 403 FreeTierError，即使会话
-// 有效；乱序、假描述、仅核心 5 名(bash/edit/glob/grep/read)也通过）。
-// 描述用精简占位即可——工具注入后模型在 tool_choice=none（chat）或
-// 文本语义（responses）下不产生实质工具调用，回复保持纯文本。
-// 单一来源：改名/增删必须同时满足两个端点的校验，只改这里。
-var zenGateToolSpecs = []struct{ name, desc string }{
-	{"bash", "Execute a bash command"},
-	{"edit", "Edit a file"},
-	{"glob", "Find files by glob pattern"},
-	{"grep", "Search file contents"},
-	{"read", "Read a file"},
-	{"skill", "Load a skill"},
-	{"task", "Run a background task"},
-	{"todowrite", "Write a todo list"},
-	{"webfetch", "Fetch a web page"},
-	{"websearch", "Search the web"},
-	{"write", "Write a file"},
+//go:embed opencode_tools.json
+var opencodeToolsJSON []byte
+
+type opencodeToolDef struct {
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"`
+}
+
+var (
+	opencodeToolsOnce sync.Once
+	opencodeToolsMap  map[string]opencodeToolDef
+	opencodeCoreTools = []string{"shell", "edit", "glob", "grep", "read"}
+	zenGateToolSpecs  = []struct{ name, desc string }{
+		{"shell", "Run commands in the terminal"},
+		{"edit", "Edit a file"},
+		{"glob", "Find files by glob pattern"},
+		{"grep", "Search file contents"},
+		{"read", "Read a file"},
+	}
+)
+
+func getOpencodeTools() map[string]opencodeToolDef {
+	opencodeToolsOnce.Do(func() {
+		m := make(map[string]opencodeToolDef)
+		if len(opencodeToolsJSON) > 0 {
+			_ = json.Unmarshal(opencodeToolsJSON, &m)
+		}
+		opencodeToolsMap = m
+	})
+	return opencodeToolsMap
 }
 
 // zenGateTools chat 端点形态：tools[].{type,function:{name,description,parameters}}。
-// 返回 []any 与客户端解码出来的 tools 同型（下游要拼接两者）。
+// 使用官方客户端提取的真实 schema，防止 FreeTier 校验 403。
 func zenGateTools() []any {
-	out := make([]any, 0, len(zenGateToolSpecs))
-	for _, s := range zenGateToolSpecs {
+	toolsDef := getOpencodeTools()
+	out := make([]any, 0, len(opencodeCoreTools))
+	for _, name := range opencodeCoreTools {
+		desc := "Agent tool " + name
+		params := zenEmptySchema()
+		if def, ok := toolsDef[name]; ok {
+			desc = def.Description
+			if def.Parameters != nil {
+				params = def.Parameters
+			}
+		}
 		out = append(out, map[string]any{
 			"type": "function",
 			"function": map[string]any{
-				"name":        s.name,
-				"description": s.desc,
-				"parameters":  zenEmptySchema(),
+				"name":        name,
+				"description": desc,
+				"parameters":  params,
 			},
 		})
 	}
@@ -917,10 +941,11 @@ func zenClientTools(params map[string]any) []any {
 	return out
 }
 
-// zenMergeTools 合并客户端工具与 gate 占位工具：客户端定义优先，同名 gate
-// stub 跳过。gate 只校验工具名是否存在，带真实 schema 的客户端定义同样过闸，
-// 而 stub 抢先会让模型拿到空参数结构（如客户端 read 的 file_path 丢失）。
+// zenMergeTools 合并客户端工具与 gate 占位工具：客户端工具优先保留。
+// 若客户端工具包含已知 OpenCode 工具（如 shell/read/edit 等），
+// 用官方提取的真实定义替换其描述与参数，确保符合 FreeTier 校验。
 func zenMergeTools(clientTools []any, gateTools []any) []any {
+	toolsDef := getOpencodeTools()
 	merged := make([]any, 0, len(clientTools)+len(gateTools))
 	provided := map[string]bool{}
 	for _, t := range clientTools {
@@ -937,6 +962,11 @@ func zenMergeTools(clientTools []any, gateTools []any) []any {
 			continue
 		}
 		provided[n] = true
+		if fn["parameters"] == nil {
+			if def, ok := toolsDef[n]; ok && def.Parameters != nil {
+				fn["parameters"] = def.Parameters
+			}
+		}
 		merged = append(merged, tm)
 	}
 	for _, gt := range gateTools {
@@ -1165,9 +1195,34 @@ func zenClientFlatTools(params map[string]any) []map[string]any {
 	return out
 }
 
+func zenGateResponsesTools() []any {
+	toolsDef := getOpencodeTools()
+	out := make([]any, 0, len(opencodeCoreTools))
+	for _, name := range opencodeCoreTools {
+		desc := "Agent tool " + name
+		params := zenEmptySchema()
+		if def, ok := toolsDef[name]; ok {
+			desc = def.Description
+			if def.Parameters != nil {
+				params = def.Parameters
+			}
+		}
+		out = append(out, map[string]any{
+			"type":        "function",
+			"name":        name,
+			"description": desc,
+			"parameters":  params,
+			"strict":      false,
+		})
+	}
+	return out
+}
+
 // zenMergeResponsesTools 客户端 flat 工具优先，缺名补 gate stub 过闸。
 func zenMergeResponsesTools(clientTools []map[string]any) []any {
-	merged := make([]any, 0, len(clientTools)+len(zenGateToolSpecs))
+	toolsDef := getOpencodeTools()
+	gateTools := zenGateResponsesTools()
+	merged := make([]any, 0, len(clientTools)+len(gateTools))
 	provided := map[string]bool{}
 	for _, t := range clientTools {
 		n, _ := t["name"].(string)
@@ -1175,20 +1230,24 @@ func zenMergeResponsesTools(clientTools []map[string]any) []any {
 			continue
 		}
 		provided[n] = true
+		if t["parameters"] == nil {
+			if def, ok := toolsDef[n]; ok && def.Parameters != nil {
+				t["parameters"] = def.Parameters
+			}
+		}
 		merged = append(merged, t)
 	}
-	for _, s := range zenGateToolSpecs {
-		if provided[s.name] {
+	for _, gt := range gateTools {
+		gm, ok := gt.(map[string]any)
+		if !ok {
 			continue
 		}
-		provided[s.name] = true
-		merged = append(merged, map[string]any{
-			"type":        "function",
-			"name":        s.name,
-			"description": s.desc,
-			"parameters":  zenEmptySchema(),
-			"strict":      false,
-		})
+		n, _ := gm["name"].(string)
+		if n == "" || provided[n] {
+			continue
+		}
+		provided[n] = true
+		merged = append(merged, gm)
 	}
 	return merged
 }
@@ -1676,18 +1735,8 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 
 		token, orgID, isConsole := resolveZenKeyIdentity(key)
 
-		sess, user, ua := "", "", ""
-		if isConsole {
-			sess = CanonicalSessionID()
-			user = CanonicalRequestID()
-			ua = zenNativeUA
-		} else if token != "" {
-			// 会话粘性：同一 key 复用稳定的 sess_/UA（服务端会话绑定要求），
-			// msg_ 请求 ID 仍每次随机。
-			sess, user, ua = StickyZenIdentity(token)
-		} else {
-			sess, user, ua = kit.FreshZenIdentity()
-		}
+		sess := CanonicalSessionID()
+		ua := zenCLIUserAgent
 		body := buildZenResponsesBody(params, zm.ID, sess)
 		bodyJSON, err := json.Marshal(body)
 		if err != nil {
@@ -1697,14 +1746,19 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		if err != nil {
 			return nil, rateLimited, fmt.Errorf("create zen responses request: %w", err)
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
+		auth := "Bearer public"
+		if token != "" {
+			auth = "Bearer " + token
+		}
+		req.Header.Set("Authorization", auth)
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
 		req.Header.Set("User-Agent", ua)
-		req.Header.Set("x-opencode-session", sess)
-		req.Header.Set("x-session-id", sess)
-		req.Header.Set("x-session-affinity", sess)
-		req.Header.Set("x-opencode-request", user)
 		req.Header.Set("x-opencode-client", "cli")
+		req.Header.Set("x-opencode-session", sess)
+		req.Header.Set("x-opencode-session-id", sess)
+		req.Header.Set("x-session-affinity", sess)
+		req.Header.Set("X-Session-Id", sess)
 		req.Header.Set("x-opencode-project", zenProjectID())
 		if isConsole && orgID != "" {
 			req.Header.Set("x-opencode-org-id", orgID)
@@ -1862,13 +1916,6 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 
 	cfg := getZenConfig()
 	isOfficialZen := cfg.BaseURL == "" || strings.Contains(cfg.BaseURL, "opencode.ai")
-	if o.pinKey == "" && isOfficialZen && isLocalOpenCodeDaemonAvailable() {
-		resp, rateLimited, err := callZenViaLocalDaemon(ctx, params, stream, opts...)
-		if err == nil {
-			return resp, rateLimited, nil
-		}
-		log.Printf("  zen daemon bridge failed (%v), falling back to upstream direct", err)
-	}
 
 	body := buildZenBody(params, stream)
 
@@ -1927,24 +1974,22 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 
 		token, orgID, isConsole := resolveZenKeyIdentity(key)
 
-		sess, user, ua := "", "", ""
-		if isConsole {
-			sess = CanonicalSessionID()
-			user = CanonicalRequestID()
-			ua = zenNativeUA
-		} else if token != "" {
-			sess, user, ua = StickyZenIdentity(token)
-		} else {
-			sess, user, ua = kit.FreshZenIdentity()
+		sess := CanonicalSessionID()
+		ua := zenCLIUserAgent
+
+		auth := "Bearer public"
+		if token != "" {
+			auth = "Bearer " + token
 		}
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Authorization", auth)
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
 		req.Header.Set("User-Agent", ua)
-		req.Header.Set("x-opencode-session", sess)
-		req.Header.Set("x-session-id", sess)
-		req.Header.Set("x-session-affinity", sess)
-		req.Header.Set("x-opencode-request", user)
 		req.Header.Set("x-opencode-client", "cli")
+		req.Header.Set("x-opencode-session", sess)
+		req.Header.Set("x-opencode-session-id", sess)
+		req.Header.Set("x-session-affinity", sess)
+		req.Header.Set("X-Session-Id", sess)
 		req.Header.Set("x-opencode-project", zenProjectID())
 		if isConsole && orgID != "" {
 			req.Header.Set("x-opencode-org-id", orgID)
@@ -1974,6 +2019,11 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 				}
 				delay = zenRetryDelay(delay)
 				continue
+			}
+			if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
+				if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
+					return dResp, dRL, nil
+				}
 			}
 			return nil, rateLimited, fmt.Errorf("zen request: %w", err)
 		}
@@ -2064,6 +2114,11 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 			}
 			if attempt < retries {
 				continue
+			}
+		}
+		if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
+			if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
+				return dResp, dRL, nil
 			}
 		}
 		return nil, rateLimited, apiErr

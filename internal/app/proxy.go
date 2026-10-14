@@ -552,23 +552,6 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 		}
 	}
 
-	clientTools := zenClientTools(params)
-	if isStream && len(clientTools) > 0 {
-		chat, aerr := collectStreamResponse(resp)
-		if aerr != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{
-				"error": map[string]string{"message": aerr.Error(), "type": "api_error"},
-			})
-			tracker.finish(false, http.StatusBadGateway)
-			return
-		}
-		chat["model"] = zm.ID
-		repairXMLToolCalls(chat)
-		emitChatAsSSE(w, chat, usageFn)
-		tracker.finish(true, resp.StatusCode)
-		return
-	}
-
 	if isStream {
 		handleStreamResponseWithUsage(w, resp, usageFn)
 		tracker.finish(true, resp.StatusCode)
@@ -600,22 +583,6 @@ func handleZenChatDirect(w http.ResponseWriter, r *http.Request, params map[stri
 		if ct, ok := u["completion_tokens"].(float64); ok {
 			tracker.rec.CompletionTokens = int(ct)
 		}
-	}
-	clientTools := zenClientTools(params)
-	if isStream && len(clientTools) > 0 {
-		chat, aerr := collectStreamResponse(resp)
-		if aerr != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]any{
-				"error": map[string]string{"message": aerr.Error(), "type": "api_error"},
-			})
-			tracker.finish(false, http.StatusBadGateway)
-			return
-		}
-		chat["model"] = zm.ID
-		repairXMLToolCalls(chat)
-		emitChatAsSSE(w, chat, usageFn)
-		tracker.finish(true, resp.StatusCode)
-		return
 	}
 	if isStream {
 		handleStreamResponseWithUsage(w, resp, usageFn)
@@ -768,7 +735,7 @@ func emitChatAsSSE(w http.ResponseWriter, chat map[string]any, usageFn func(map[
 					n = 2048
 				}
 			}
-			chunk(map[string]any{"reasoning_content": reasoning[:n]}, nil)
+			chunk(map[string]any{"reasoning_content": reasoning[:n], "reasoning": reasoning[:n]}, nil)
 			reasoning = reasoning[n:]
 		}
 	}
@@ -1599,6 +1566,7 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 	}
 	if reasoning.Len() > 0 {
 		message["reasoning_content"] = reasoning.String()
+		message["reasoning"] = reasoning.String()
 	}
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
@@ -3088,6 +3056,16 @@ func normalizeOpenAIResponse(obj map[string]any) map[string]any {
 						}
 						nd[k] = v
 					}
+					if r, ok := nd["reasoning"].(string); ok && r != "" {
+						if _, hasRC := nd["reasoning_content"]; !hasRC {
+							nd["reasoning_content"] = r
+						}
+					}
+					if rc, ok := nd["reasoning_content"].(string); ok && rc != "" {
+						if _, hasR := nd["reasoning"]; !hasR {
+							nd["reasoning"] = rc
+						}
+					}
 					if tc, ok := nd["tool_calls"].([]any); ok && len(tc) > 0 {
 						if nd["content"] == nil {
 							nd["content"] = ""
@@ -3113,6 +3091,16 @@ func normalizeMessage(msg map[string]any) map[string]any {
 			continue
 		}
 		out[k] = v
+	}
+	if r, ok := out["reasoning"].(string); ok && r != "" {
+		if _, hasRC := out["reasoning_content"]; !hasRC {
+			out["reasoning_content"] = r
+		}
+	}
+	if rc, ok := out["reasoning_content"].(string); ok && rc != "" {
+		if _, hasR := out["reasoning"]; !hasR {
+			out["reasoning"] = rc
+		}
 	}
 	if tc, ok := out["tool_calls"].([]any); ok && len(tc) > 0 {
 		if out["content"] == nil {

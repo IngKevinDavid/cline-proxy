@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -86,9 +87,143 @@ func zenProjectID() string {
 }
 
 const (
-	zenAPIBase      = "https://opencode.ai/inference/v1"
-	zenCLIUserAgent = "opencode/latest/2.0.29/cli"
+	zenAPIBase             = "https://opencode.ai/inference/v1"
+	defaultOpenCodeVersion = "2.0.29"
 )
+
+var (
+	zenClientVerMu sync.RWMutex
+	zenClientVer   = defaultOpenCodeVersion
+)
+
+// zenCLIUserAgent generates the User-Agent expected by OpenCode's gate:
+// "opencode/latest/<version>/cli"
+func zenCLIUserAgent() string {
+	zenClientVerMu.RLock()
+	ver := zenClientVer
+	zenClientVerMu.RUnlock()
+	return "opencode/latest/" + ver + "/cli"
+}
+
+// GetZenClientVersion returns the active dynamically resolved client version.
+func GetZenClientVersion() string {
+	zenClientVerMu.RLock()
+	defer zenClientVerMu.RUnlock()
+	return zenClientVer
+}
+
+func fetchNpmOpenCodeVersion(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://registry.npmjs.org/@opencode/cli/latest", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "cline-proxy")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("npm registry returned HTTP %d", resp.StatusCode)
+	}
+
+	var data struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&data); err != nil {
+		return "", err
+	}
+	v := strings.TrimSpace(data.Version)
+	if v == "" {
+		return "", fmt.Errorf("empty version in npm response")
+	}
+	return v, nil
+}
+
+func fetchLocalOpenCodeVersion(ctx context.Context) (string, error) {
+	ctxCmd, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctxCmd, "opencode", "--version")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	text := string(out)
+	for _, part := range strings.Fields(text) {
+		part = strings.TrimPrefix(part, "v")
+		if strings.Count(part, ".") >= 2 {
+			return strings.TrimSpace(part), nil
+		}
+	}
+	return "", fmt.Errorf("could not parse version from output %q", text)
+}
+
+// updateZenClientVersion updates the version used for OpenCode CLI user-agent.
+// Priority:
+// 1. Explicit config override (if set and not "auto")
+// 2. Official npm registry (@opencode/cli latest)
+// 3. Local opencode CLI binary (`opencode --version`)
+// 4. Default seed version (2.0.29)
+func updateZenClientVersion() string {
+	cfg := getZenConfig()
+	if cfg != nil && cfg.ClientVersion != "" && cfg.ClientVersion != "auto" {
+		zenClientVerMu.Lock()
+		zenClientVer = cfg.ClientVersion
+		zenClientVerMu.Unlock()
+		return cfg.ClientVersion
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	// 1. Try npm registry
+	if ver, err := fetchNpmOpenCodeVersion(ctx); err == nil && ver != "" {
+		zenClientVerMu.Lock()
+		old := zenClientVer
+		zenClientVer = ver
+		zenClientVerMu.Unlock()
+		if old != ver {
+			log.Printf("zen client version updated: %s -> %s (source: npm registry)", old, ver)
+		}
+		return ver
+	}
+
+	// 2. Try local CLI
+	if ver, err := fetchLocalOpenCodeVersion(ctx); err == nil && ver != "" {
+		zenClientVerMu.Lock()
+		old := zenClientVer
+		zenClientVer = ver
+		zenClientVerMu.Unlock()
+		if old != ver {
+			log.Printf("zen client version updated: %s -> %s (source: local CLI)", old, ver)
+		}
+		return ver
+	}
+
+	zenClientVerMu.RLock()
+	defer zenClientVerMu.RUnlock()
+	return zenClientVer
+}
+
+func startZenVersionRefresher() {
+	go func() {
+		updateZenClientVersion()
+		ticker := time.NewTicker(1 * time.Hour)
+		for range ticker.C {
+			cfg := getZenConfig()
+			if cfg != nil && !cfg.Enabled {
+				continue
+			}
+			updateZenClientVersion()
+		}
+	}()
+}
+
 
 func initZenModels() {
 	zenModelsMu.Lock()
@@ -237,6 +372,7 @@ type zenCompactConfig struct {
 
 type zenConfigData struct {
 	Enabled         bool             `json:"enabled"`
+	ClientVersion   string           `json:"clientVersion,omitempty"` // 手工指定版本或 "auto" (默认 auto 探测)
 	Key             string           `json:"key"`            // 兼容字段：始终等于 Keys[0]（旧版单 key 读取用）
 	Keys            []string         `json:"keys,omitempty"` // zen 多 key 池，请求按 round-robin 轮转
 	BaseURL         string           `json:"baseURL"`
@@ -253,6 +389,7 @@ type zenConfigData struct {
 func defaultZenConfig() *zenConfigData {
 	return &zenConfigData{
 		Enabled:         true,
+		ClientVersion:   "auto",
 		Key:             "public",
 		Keys:            []string{"public"},
 		BaseURL:         zenAPIBase,
@@ -442,6 +579,13 @@ func setZenConfig(c *zenConfigData) {
 	zenConfigMu.Unlock()
 	saveZenConfig()
 	rebuildZenSem()
+	if c.ClientVersion != "" && c.ClientVersion != "auto" {
+		zenClientVerMu.Lock()
+		zenClientVer = c.ClientVersion
+		zenClientVerMu.Unlock()
+	} else {
+		go updateZenClientVersion()
+	}
 	// 清理已移除 key 的轮转状态
 	valid := map[string]bool{}
 	for _, k := range c.Keys {
@@ -1736,7 +1880,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		token, orgID, isConsole := resolveZenKeyIdentity(key)
 
 		sess := CanonicalSessionID()
-		ua := zenCLIUserAgent
+		ua := zenCLIUserAgent()
 		body := buildZenResponsesBody(params, zm.ID, sess)
 		bodyJSON, err := json.Marshal(body)
 		if err != nil {
@@ -1975,7 +2119,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		token, orgID, isConsole := resolveZenKeyIdentity(key)
 
 		sess := CanonicalSessionID()
-		ua := zenCLIUserAgent
+		ua := zenCLIUserAgent()
 
 		auth := "Bearer public"
 		if token != "" {

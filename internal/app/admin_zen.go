@@ -69,6 +69,7 @@ func handleZenConfigUpdate(w http.ResponseWriter, r *http.Request) {
 	var patch struct {
 		Enabled         *bool    `json:"enabled"`
 		Key             *string  `json:"key"`
+		ClientVersion   *string  `json:"clientVersion"`
 		Keys            []string `json:"keys"`
 		BaseURL         *string  `json:"baseURL"`
 		Proxies         []string `json:"proxies"`
@@ -92,6 +93,7 @@ func handleZenConfigUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	next := &zenConfigData{
 		Enabled:         cur.Enabled,
+		ClientVersion:   cur.ClientVersion,
 		Key:             cur.Key,
 		Keys:            cur.Keys,
 		BaseURL:         cur.BaseURL,
@@ -106,6 +108,9 @@ func handleZenConfigUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if patch.Enabled != nil {
 		next.Enabled = *patch.Enabled
+	}
+	if patch.ClientVersion != nil {
+		next.ClientVersion = strings.TrimSpace(*patch.ClientVersion)
 	}
 	if patch.Keys != nil {
 		// Multi-key pool full replacement; backward compatible with legacy single key

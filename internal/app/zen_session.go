@@ -2,8 +2,6 @@ package app
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -248,21 +246,20 @@ func StickyZenIdentity(key string) (sess, req, ua string) {
 	e, ok := zenSessions[key]
 	if !ok || e.Session == "" {
 		e = &zenSessionEntry{
-			Session: "sess_" + kit.RandAlphaNum(26),
+			Session: CanonicalSessionID(),
 			UA:      zenNativeUA,
-			// Minted=false: random ID is a placeholder during startup race conditions
-			// before harvester mints a genuine upstream session.
+			// Minted=false: placeholder before harvester or upstream confirms.
 		}
 		zenSessions[key] = e
 		saveZenSessionsLocked()
-		log.Printf("zen sticky session created for key#%d: %s (unminted placeholder, harvester will mint)", keyIndex(key), kit.Truncate(e.Session, 24))
+		log.Printf("zen sticky session created for key#%d: %s", keyIndex(key), kit.Truncate(e.Session, 24))
 	}
 	e.Updated = time.Now().Unix()
 	// Restore UA if missing
 	if e.UA == "" {
 		e.UA = zenNativeUA
 	}
-	return e.Session, "msg_" + kit.RandAlphaNum(26), e.UA
+	return e.Session, CanonicalRequestID(), e.UA
 }
 
 // ============ OpenCode Console OAuth Authentication & Sessions ============
@@ -360,11 +357,45 @@ func loadConsoleAuth() (*ConsoleAuth, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 	defer cancel()
 
+	// 1. Try OpenCode v2 `opencode auth export` (JSON format)
+	cmdExport := exec.CommandContext(ctx, "opencode", "auth", "export")
+	if out, err := cmdExport.Output(); err == nil && len(out) > 0 {
+		var creds []struct {
+			IntegrationID string `json:"integrationID"`
+			Active        bool   `json:"active"`
+			Value         struct {
+				Type     string `json:"type"`
+				Access   string `json:"access"`
+				Refresh  string `json:"refresh"`
+				Expires  int64  `json:"expires"`
+				Metadata struct {
+					OrgID string `json:"orgID"`
+					Email string `json:"email"`
+				} `json:"metadata"`
+			} `json:"value"`
+		}
+		if err := json.Unmarshal(out, &creds); err == nil {
+			for _, c := range creds {
+				if c.IntegrationID == "opencode" && c.Active && c.Value.Type == "oauth" && c.Value.Access != "" {
+					return &ConsoleAuth{
+						AccessToken:  c.Value.Access,
+						RefreshToken: c.Value.Refresh,
+						TokenExpiry:  c.Value.Expires,
+						ActiveOrgID:  c.Value.Metadata.OrgID,
+						Email:        c.Value.Metadata.Email,
+						LastUpdated:  time.Now(),
+					}, nil
+				}
+			}
+		}
+	}
+
+	// 2. Fallback to OpenCode v1 `opencode db`
 	query := "SELECT a.access_token, a.refresh_token, a.token_expiry, s.active_org_id, a.email FROM account a JOIN account_state s ON a.id = s.active_account_id LIMIT 1;"
 	cmd := exec.CommandContext(ctx, "opencode", "db", query)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("opencode db failed (%w): %s", err, strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("opencode auth failed (%w): %s", err, strings.TrimSpace(string(out)))
 	}
 
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
@@ -402,19 +433,13 @@ func loadConsoleAuth() (*ConsoleAuth, error) {
 }
 
 // CanonicalSessionID generates a session ID conforming to OpenCode's regex:
-// ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$
+// ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$ with descending timestamp.
 func CanonicalSessionID() string {
-	hexPart := make([]byte, 6)
-	_, _ = rand.Read(hexPart)
-	h := hex.EncodeToString(hexPart)
+	return kit.CanonicalSessionID()
+}
 
-	const alnum = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	alnumBytes := make([]byte, 14)
-	randBytes := make([]byte, 14)
-	_, _ = rand.Read(randBytes)
-	for i := 0; i < 14; i++ {
-		alnumBytes[i] = alnum[int(randBytes[i])%len(alnum)]
-	}
-
-	return fmt.Sprintf("ses_%s%s", h, string(alnumBytes))
+// CanonicalRequestID generates a request ID conforming to OpenCode's format:
+// ^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$ with ascending timestamp.
+func CanonicalRequestID() string {
+	return kit.CanonicalRequestID()
 }

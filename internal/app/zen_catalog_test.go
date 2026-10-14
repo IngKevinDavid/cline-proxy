@@ -143,8 +143,8 @@ func TestZenSeedBootstrapAliasesResolve(t *testing.T) {
 	if !ok {
 		t.Fatal("alias mimo must resolve to a free zen model")
 	}
-	if m.ID != "mimo-v2.5-free" {
-		t.Fatalf("alias mimo -> %q, want mimo-v2.5-free", m.ID)
+	if m.ID != "mimo-v2.6-flash-free" {
+		t.Fatalf("alias mimo -> %q, want mimo-v2.6-flash-free", m.ID)
 	}
 	if !strings.HasSuffix(m.ID, "-free") && m.ID != "big-pickle" {
 		t.Fatalf("resolved %q is not a free-looking id", m.ID)

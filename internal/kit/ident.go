@@ -3,6 +3,7 @@ package kit
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"sync"
 	"time"
 )
 
@@ -27,6 +28,8 @@ func WithRetryJitter(delay time.Duration) time.Duration {
 // ============================================================================
 
 var ZenUserAgents = []string{
+	"opencode/1.18.31 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14",
+	"opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14",
 	"opencode/latest/1.18.14/cli",
 	"opencode/latest/1.18.13/cli",
 	"opencode/1.18.14/cli",
@@ -35,9 +38,6 @@ var ZenUserAgents = []string{
 	"opencode/1.18.11/cli",
 	"opencode/latest/1.18.14/desktop",
 	"opencode/latest/1.18.13/desktop",
-	// 原生 responses 路径实测：官方 CLI 发 ai-sdk 形态 UA；网关轮换列表
-	// 加入该条目以匹配官方客户端指纹（连同 TLS 指纹见 tls_bun.go）
-	"opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14",
 }
 
 // mustRand 读满 n 字节加密随机数；crypto/rand 失败说明系统熵源异常，
@@ -67,13 +67,75 @@ func RandIntn(n int) int {
 	return v % n
 }
 
+var (
+	ocIDMu        sync.Mutex
+	ocIDLastMilli uint64
+	ocIDCounter   uint64
+)
+
+func ocIDTimestamp() (uint64, uint64) {
+	ocIDMu.Lock()
+	defer ocIDMu.Unlock()
+	now := uint64(time.Now().UnixMilli())
+	if now != ocIDLastMilli {
+		ocIDLastMilli = now
+		ocIDCounter = 0
+	}
+	ocIDCounter++
+	return now, ocIDCounter
+}
+
+// NewOCShapeID generates a 26-character ID conforming to OpenCode's gate
+// (packages/schema/src/identifier.ts): the first 12 lowercase hex characters
+// represent the 48-bit timestamp + counter, inverted (bitwise NOT) for descending
+// (used for ses_ session IDs) and standard for ascending (used for msg_ request IDs).
+// The remaining 14 characters are random base62 characters.
+func NewOCShapeID(descending bool) string {
+	const hexChars = "0123456789abcdef"
+	const alnumChars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	ts, counter := ocIDTimestamp()
+	current := ts*0x1000 + counter
+	value := current
+	if descending {
+		value = ^current
+	}
+	var b [26]byte
+	for i := 0; i < 6; i++ {
+		byteVal := byte(value >> (40 - 8*i))
+		b[i*2] = hexChars[byteVal>>4]
+		b[i*2+1] = hexChars[byteVal&0xf]
+	}
+	var rnd [14]byte
+	if _, err := rand.Read(rnd[:]); err != nil {
+		for i := range rnd {
+			rnd[i] = alnumChars[(counter+uint64(i)*31)%uint64(len(alnumChars))]
+		}
+	} else {
+		for i := range rnd {
+			rnd[i] = alnumChars[rnd[i]%byte(len(alnumChars))]
+		}
+	}
+	copy(b[12:], rnd[:])
+	return string(b[:])
+}
+
+// CanonicalSessionID generates a session ID conforming to OpenCode's regex:
+// ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$ with descending inverted timestamp.
+func CanonicalSessionID() string {
+	return "ses_" + NewOCShapeID(true)
+}
+
+// CanonicalRequestID generates a request ID conforming to OpenCode's format:
+// ^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$ with ascending timestamp.
+func CanonicalRequestID() string {
+	return "msg_" + NewOCShapeID(false)
+}
+
 // FreshZenIdentity 生成一组全新客户端身份 (session, request, user-agent)。
-// 格式经官方 CLI 实际流量核对：session 为 sess_<26 大小写字母+数字>，
-// request 为 msg_<26 大小写字母+数字>（与官方 msg_ 前缀一致）。
 func FreshZenIdentity() (string, string, string) {
-	return "sess_" + RandAlphaNum(26),
-		"msg_" + RandAlphaNum(26),
-		ZenUserAgents[RandIntn(len(ZenUserAgents))]
+	return CanonicalSessionID(),
+		CanonicalRequestID(),
+		ZenUserAgents[0]
 }
 
 // RandAlphaNum 生成 n 个大小写字母+数字（匹配官方 CLI 的 sess_/msg_ ID 字符集）。

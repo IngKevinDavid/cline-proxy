@@ -261,8 +261,8 @@ func probeZenModelEndpoint(ctx context.Context, modelID string) (string, error) 
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	// Step 1: Probe chat/completions first
-	resp1, _, err1 := callZenAPI(probeCtx, params, false)
+	// Step 1: Probe chat/completions first with stream: true (upstream free gate expects streaming)
+	resp1, _, err1 := callZenAPI(probeCtx, params, true)
 	if err1 == nil && resp1 != nil && resp1.StatusCode == http.StatusOK {
 		resp1.Body.Close()
 		learnZenEndpoint(modelID, "chat")
@@ -273,8 +273,8 @@ func probeZenModelEndpoint(ctx context.Context, modelID string) (string, error) 
 		resp1.Body.Close()
 	}
 
-	// Step 2: Fall back to responses
-	resp2, _, err2 := callZenResponsesAPI(probeCtx, params, false)
+	// Step 2: Fall back to responses with stream: true
+	resp2, _, err2 := callZenResponsesAPI(probeCtx, params, true)
 	if err2 == nil && resp2 != nil && resp2.StatusCode == http.StatusOK {
 		resp2.Body.Close()
 		learnZenEndpoint(modelID, "responses")

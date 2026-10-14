@@ -49,27 +49,42 @@ type ZenModel struct {
 // "free" 后缀的免费模型也因此入选；deepseek-v4-flash 这类 status=deprecated
 // 的条目即使 cost 为 0 也不入选）。
 var zenSeedModels = []ZenModel{
-	{ID: "mimo-v2.5-free", Aliases: []string{"mimo-v2.5", "mimo"}, Context: 200000, Output: 32000, Source: "seed"},
-	{ID: "nemotron-3-ultra-free", Aliases: []string{"nemotron-3-ultra", "nemotron"}, Context: 1000000, Output: 128000, Source: "seed"},
-	{ID: "nemotron-3.5-lightning-free", Aliases: []string{"nemotron-3.5-lightning", "nemotron-lightning"}, Context: 262144, Output: 262144, Source: "seed"},
-	{ID: "ling-3.0-flash-fin-free", Aliases: []string{"ling-3.0-flash-fin", "ling-fin", "ling"}, Context: 262144, Output: 32768, Source: "seed"},
+	{ID: "mimo-v2.6-flash-free", Aliases: []string{"mimo-v2.6-flash", "mimo-v2.6", "mimo", "mimo-free"}, Context: 262144, Output: 32768, Source: "seed"},
+	{ID: "cat-jam-free", Aliases: []string{"cat-jam"}, Context: 262144, Output: 32768, Source: "seed"},
+	{ID: "step-5-preview-free", Aliases: []string{"step-5-preview", "step-5"}, Context: 262144, Output: 32768, Source: "seed"},
+	{ID: "longcat-2.5-preview-free", Aliases: []string{"longcat-2.5-preview", "longcat-2.5", "longcat"}, Context: 262144, Output: 32768, Source: "seed"},
+	{ID: "space-bunny-free", Aliases: []string{"space-bunny"}, Context: 262144, Output: 32768, Source: "seed"},
+	{ID: "nemotron-3.5-lightning-free", Aliases: []string{"nemotron-3.5-lightning", "nemotron-lightning", "nemotron"}, Context: 262144, Output: 262144, Source: "seed"},
+	{ID: "jev-1.13-free", Aliases: []string{"jev-1.13", "jev"}, Context: 262144, Output: 32768, Source: "seed"},
 	// big-pickle：zen 创始免费模型（无 free 后缀，目录 cost 0/0，1.18.31 实测可用；
 	// opencode zen 免费层的默认别名，永久保留在种子中）
 	{ID: "big-pickle", Aliases: []string{"pickle"}, Context: 200000, Output: 32000, Source: "seed"},
 	// muse-spark 只在原生 /v1/responses 端点上可用：官方 opencode CLI 实测
 	// 对该模型只发 POST /zen/v1/responses（带 tools + reason、返回 SSE），
 	// chat/completions 上该模型 500（需经 responses 原生调用再转回 chat 形态）
-	{ID: "muse-spark-1.3-contributor-free", Aliases: []string{"muse-spark-contributor"}, Context: 1048576, Output: 131072, Source: "seed", Upstream: "responses"},
-	{ID: "muse-spark-1.2-contributor-free", Aliases: []string{"muse-spark"}, Context: 1048576, Output: 131072, Source: "seed", Upstream: "responses"},
+	{ID: "muse-spark-1.3-contributor-free", Aliases: []string{"muse-spark-contributor", "muse-spark-1.3"}, Context: 1048576, Output: 131072, Source: "seed", Upstream: "responses"},
+	{ID: "muse-spark-1.2-contributor-free", Aliases: []string{"muse-spark", "muse-spark-1.2"}, Context: 1048576, Output: 131072, Source: "seed", Upstream: "responses"},
 }
 
 var (
 	zenModelsMu sync.RWMutex
 	zenModels   = make(map[string]*ZenModel) // 主表:ID
 	zenAliases  = make(map[string]*ZenModel) // 别名表
+
+	zenProjectMu sync.Mutex
+	zenProjID    string
 )
 
-const zenAPIBase = "https://opencode.ai/inference/openai/v1"
+func zenProjectID() string {
+	zenProjectMu.Lock()
+	defer zenProjectMu.Unlock()
+	if zenProjID == "" {
+		zenProjID = kit.RandHex(20)
+	}
+	return zenProjID
+}
+
+const zenAPIBase = "https://opencode.ai/zen/v1"
 
 func initZenModels() {
 	zenModelsMu.Lock()
@@ -383,7 +398,7 @@ func loadZenConfig() *zenConfigData {
 		}
 	}
 	normalizeZenKeys(cfg)
-	if cfg.BaseURL == "" || cfg.BaseURL == "https://opencode.ai/zen/v1" {
+	if cfg.BaseURL == "" || cfg.BaseURL == "https://opencode.ai/inference/openai/v1" {
 		cfg.BaseURL = zenAPIBase
 	}
 	return cfg
@@ -1664,7 +1679,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		sess, user, ua := "", "", ""
 		if isConsole {
 			sess = CanonicalSessionID()
-			user = "msg_" + kit.RandAlphaNum(20)
+			user = CanonicalRequestID()
 			ua = zenNativeUA
 		} else if token != "" {
 			// 会话粘性：同一 key 复用稳定的 sess_/UA（服务端会话绑定要求），
@@ -1686,9 +1701,11 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", ua)
 		req.Header.Set("x-opencode-session", sess)
+		req.Header.Set("x-session-id", sess)
+		req.Header.Set("x-session-affinity", sess)
 		req.Header.Set("x-opencode-request", user)
 		req.Header.Set("x-opencode-client", "cli")
-		req.Header.Set("x-opencode-project", "global")
+		req.Header.Set("x-opencode-project", zenProjectID())
 		if isConsole && orgID != "" {
 			req.Header.Set("x-opencode-org-id", orgID)
 		}
@@ -1903,7 +1920,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		sess, user, ua := "", "", ""
 		if isConsole {
 			sess = CanonicalSessionID()
-			user = "msg_" + kit.RandAlphaNum(20)
+			user = CanonicalRequestID()
 			ua = zenNativeUA
 		} else if token != "" {
 			sess, user, ua = StickyZenIdentity(token)
@@ -1914,9 +1931,11 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", ua)
 		req.Header.Set("x-opencode-session", sess)
+		req.Header.Set("x-session-id", sess)
+		req.Header.Set("x-session-affinity", sess)
 		req.Header.Set("x-opencode-request", user)
 		req.Header.Set("x-opencode-client", "cli")
-		req.Header.Set("x-opencode-project", "global")
+		req.Header.Set("x-opencode-project", zenProjectID())
 		if isConsole && orgID != "" {
 			req.Header.Set("x-opencode-org-id", orgID)
 		}

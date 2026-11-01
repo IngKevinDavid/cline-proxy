@@ -18,3 +18,4 @@ func TestFindTorBinary(t *testing.T) {
 		t.Fatalf("tor binary at %s has unexpected size %d", bin, info.Size())
 	}
 }
+

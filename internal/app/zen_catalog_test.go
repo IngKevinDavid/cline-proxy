@@ -150,3 +150,73 @@ func TestZenSeedBootstrapAliasesResolve(t *testing.T) {
 		t.Fatalf("resolved %q is not a free-looking id", m.ID)
 	}
 }
+
+
+// 真实物理限额保护：上游 models.opencode.ai 声明保守的 200k 元数据，
+// applyZenCatalog 必须使用实测验证的真实物理窗口（DeepSeek 1,048,576、GLM 900k 等），
+// 防止 IDE/Agent 发生过早的上下文压缩。
+func TestZenApplyCatalogPreservesRealLimits(t *testing.T) {
+	zenModelsMu.Lock()
+	savedModels, savedAliases := zenModels, zenAliases
+	zenModels = map[string]*ZenModel{
+		"deepseek-v4.1-flash-free": {
+			ID:      "deepseek-v4.1-flash-free",
+			Aliases: []string{"deepseek"},
+			Context: 1048576,
+			Output:  32000,
+			Source:  "seed",
+		},
+	}
+	zenAliases = map[string]*ZenModel{
+		"deepseek": zenModels["deepseek-v4.1-flash-free"],
+	}
+	zenModelsMu.Unlock()
+	defer func() {
+		zenModelsMu.Lock()
+		zenModels, zenAliases = savedModels, savedAliases
+		zenModelsMu.Unlock()
+	}()
+
+	desired := map[string]bool{
+		"deepseek-v4.1-flash-free": true,
+		"glm-5.3-flash-free":       true,
+		"step-5-preview-free":      true,
+	}
+	overlay := map[string]zenModelOverlay{
+		// 模拟 models.opencode.ai 下发的保守元数据 (200k)
+		"deepseek-v4.1-flash-free": {Context: 200000, Output: 8192, ToolCall: true, Reasoning: true},
+		"glm-5.3-flash-free":       {Context: 200000, Output: 8192, ToolCall: true, Reasoning: true},
+		"step-5-preview-free":      {Context: 200000, Output: 8192, ToolCall: true, Reasoning: true},
+	}
+
+	applyZenCatalog(desired, overlay)
+
+	zenModelsMu.RLock()
+	defer zenModelsMu.RUnlock()
+
+	ds := zenModels["deepseek-v4.1-flash-free"]
+	if ds == nil {
+		t.Fatal("deepseek-v4.1-flash-free missing from zenModels")
+	}
+	if ds.Context != 1048576 {
+		t.Fatalf("deepseek context = %d, want real limit 1048576 (not the conservative 200k)", ds.Context)
+	}
+	if ds.Output != 32000 {
+		t.Fatalf("deepseek output = %d, want real limit 32000", ds.Output)
+	}
+
+	// 验证别名解析也指向具有真实物理限额的实例
+	if aliasModel, ok := zenAliases["deepseek"]; !ok || aliasModel.Context != 1048576 {
+		t.Fatalf("deepseek alias context = %v, want 1048576", aliasModel)
+	}
+
+	glm := zenModels["glm-5.3-flash-free"]
+	if glm == nil || glm.Context != 900000 {
+		t.Fatalf("glm-5.3-flash-free context = %v, want real limit 900000", glm)
+	}
+
+	step := zenModels["step-5-preview-free"]
+	if step == nil || step.Context != 1000000 {
+		t.Fatalf("step-5-preview-free context = %v, want real limit 1000000", step)
+	}
+}

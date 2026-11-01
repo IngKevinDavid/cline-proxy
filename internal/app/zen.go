@@ -55,10 +55,10 @@ var zenSeedModels = []ZenModel{
 	{ID: "glm-5.3-flash-free", Aliases: []string{"glm-5.3-flash", "glm-5.3", "glm"}, Context: 900000, Output: 32000, Source: "seed", ToolCall: true, Reasoning: true},
 	{ID: "nemotron-3.5-super-vl-free", Aliases: []string{"nemotron-3.5-super-vl", "nemotron-vl"}, Context: 1048576, Output: 131072, Source: "seed", ToolCall: true, Reasoning: true},
 	{ID: "mimo-v2.6-flash-free", Aliases: []string{"mimo-v2.6-flash", "mimo-v2.6", "mimo", "mimo-free"}, Context: 262144, Output: 32768, Source: "seed", ToolCall: true, Reasoning: true},
-	{ID: "cat-jam-free", Aliases: []string{"cat-jam"}, Context: 262144, Output: 32768, Source: "seed", ToolCall: true, Reasoning: true},
-	{ID: "step-5-preview-free", Aliases: []string{"step-5-preview", "step-5"}, Context: 262144, Output: 32768, Source: "seed", ToolCall: true, Reasoning: true},
-	{ID: "longcat-2.5-preview-free", Aliases: []string{"longcat-2.5-preview", "longcat-2.5", "longcat"}, Context: 262144, Output: 32768, Source: "seed", ToolCall: true, Reasoning: true},
-	{ID: "space-bunny-free", Aliases: []string{"space-bunny"}, Context: 262144, Output: 32768, Source: "seed", ToolCall: true, Reasoning: true},
+	{ID: "cat-jam-free", Aliases: []string{"cat-jam"}, Context: 262144, Output: 131072, Source: "seed", ToolCall: true, Reasoning: true},
+	{ID: "step-5-preview-free", Aliases: []string{"step-5-preview", "step-5"}, Context: 1000000, Output: 65536, Source: "seed", ToolCall: true, Reasoning: true},
+	{ID: "longcat-2.5-preview-free", Aliases: []string{"longcat-2.5-preview", "longcat-2.5", "longcat"}, Context: 1000000, Output: 131072, Source: "seed", ToolCall: true, Reasoning: true},
+	{ID: "space-bunny-free", Aliases: []string{"space-bunny"}, Context: 1048576, Output: 524288, Source: "seed", ToolCall: true, Reasoning: true},
 	{ID: "nemotron-3.5-lightning-free", Aliases: []string{"nemotron-3.5-lightning", "nemotron-lightning", "nemotron"}, Context: 262144, Output: 262144, Source: "seed", ToolCall: true, Reasoning: true},
 	{ID: "jev-1.13-free", Aliases: []string{"jev-1.13", "jev"}, Context: 262144, Output: 32768, Source: "seed"},
 	// big-pickle：zen 创始免费模型（无 free 后缀，目录 cost 0/0，1.18.31 实测可用；
@@ -69,6 +69,31 @@ var zenSeedModels = []ZenModel{
 	// chat/completions 上该模型 500（需经 responses 原生调用再转回 chat 形态）
 	{ID: "muse-spark-1.3-contributor-free", Aliases: []string{"muse-spark-contributor", "muse-spark-1.3"}, Context: 1048576, Output: 131072, Source: "seed", Upstream: "responses"},
 	{ID: "muse-spark-1.2-contributor-free", Aliases: []string{"muse-spark", "muse-spark-1.2"}, Context: 1048576, Output: 131072, Source: "seed", Upstream: "responses"},
+}
+
+// realZenModelLimits maps model IDs to verified physical context and output window limits.
+// models.opencode.ai advertises conservative limits (e.g. 200,000) as client metadata,
+// but the upstream inference gateway (https://opencode.ai/zen/v1) accepts the full window.
+var realZenModelLimits = map[string]struct{ context, output int }{
+	"deepseek-v4.1-flash-free":        {context: 1048576, output: 32000},
+	"glm-5.3-flash-free":              {context: 900000, output: 32000},
+	"nemotron-3.5-super-vl-free":      {context: 1048576, output: 131072},
+	"space-bunny-free":                {context: 1048576, output: 524288},
+	"step-5-preview-free":             {context: 1000000, output: 65536},
+	"longcat-2.5-preview-free":        {context: 1000000, output: 131072},
+	"cat-jam-free":                    {context: 262144, output: 131072},
+	"nemotron-3.5-lightning-free":      {context: 262144, output: 262144},
+	"mimo-v2.6-flash-free":            {context: 262144, output: 32768},
+	"muse-spark-1.3-contributor-free": {context: 1048576, output: 131072},
+	"muse-spark-1.2-contributor-free": {context: 1048576, output: 131072},
+}
+
+func getRealZenLimits(id string) (context int, output int, ok bool) {
+	clean := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(id)), "opencode/")
+	if lim, found := realZenModelLimits[clean]; found {
+		return lim.context, lim.output, true
+	}
+	return 0, 0, false
 }
 
 var (
@@ -711,14 +736,19 @@ var (
 
 // resolveZenKeyIdentity parses key credentials:
 // supports Console OAuth tokens (st_...), tokens with organization suffix (token#org_id),
-// or legacy Zen static keys. Falls back to local CLI login session (GetConsoleAuth) when key is empty or "public".
+// or legacy Zen static keys.
+// When key is "public", it returns empty token so upstream uses anonymous keyless "Bearer public".
+// When key is empty, it falls back to local CLI login session (GetConsoleAuth) if available.
 func resolveZenKeyIdentity(rawKey string) (token string, orgID string, isConsole bool) {
 	k := strings.TrimSpace(rawKey)
-	if k == "" || k == "public" {
+	if k == "public" {
+		return "", "", false
+	}
+	if k == "" {
 		if auth, err := GetConsoleAuth(); err == nil && auth != nil && auth.AccessToken != "" {
 			return auth.AccessToken, auth.ActiveOrgID, true
 		}
-		return rawKey, "", false
+		return "", "", false
 	}
 
 	token = k
@@ -2600,6 +2630,8 @@ func syncZenModels() (int, error) {
 
 // applyZenCatalog 把 live 结果写进模型表：存量条目就地更新（保留别名与
 // Upstream 提示），新条目按 overlay 限额建立。返回新增数量。
+// 对已验证实际物理上下文的模型（如 deepseek 1M、glm 900k 等），以 realZenModelLimits
+// 为准，覆盖 models.opencode.ai 声明的保守客户端元数据（200k），避免客户端过早 compact。
 func applyZenCatalog(desired map[string]bool, overlay map[string]zenModelOverlay) int {
 	zenModelsMu.Lock()
 	defer zenModelsMu.Unlock()
@@ -2607,22 +2639,30 @@ func applyZenCatalog(desired map[string]bool, overlay map[string]zenModelOverlay
 	for id := range desired {
 		ov := overlay[id]
 		if cur, ok := zenModels[id]; ok {
-			// 存量条目：overlay 限额覆盖种子/上次估算；别名与 Upstream 提示
-			// （如 muse-spark 的原生 responses）沿用，Source 升级为 live。
+			// 存量条目：实测物理限额优先；若未在表中则沿用 overlay 限额覆盖种子/上次估算；
+			// 别名与 Upstream 提示（如 muse-spark 的原生 responses）沿用，Source 升级为 live。
 			// 改副本再挂回（copy-on-write）：resolveZenModel 返回的指针在释放
 			// RLock 后仍被请求路径读取，就地改写会与其裸读竞争。
 			next := *cur
-			if ov.Context > 0 {
-				next.Context = ov.Context
-			}
-			if ov.Output > 0 {
-				next.Output = ov.Output
+			if rCtx, rOut, ok := getRealZenLimits(id); ok {
+				next.Context = rCtx
+				next.Output = rOut
+			} else {
+				if ov.Context > 0 {
+					next.Context = ov.Context
+				}
+				if ov.Output > 0 {
+					next.Output = ov.Output
+				}
 			}
 			if ov != (zenModelOverlay{}) {
 				next.ToolCall, next.Reasoning, next.Attach = ov.ToolCall, ov.Reasoning, ov.Attachment
 			}
 			next.Source = "live"
 			zenModels[id] = &next
+			for _, a := range next.Aliases {
+				zenAliases[a] = &next
+			}
 			continue
 		}
 		// 跳过与免费别名冲突的 ID（如付费 id 撞别名），保证别名解析不被覆盖
@@ -2630,17 +2670,22 @@ func applyZenCatalog(desired map[string]bool, overlay map[string]zenModelOverlay
 			continue
 		}
 		ctxN, outN := ov.Context, ov.Output
-		if ctxN <= 0 {
-			ctxN = 200000
-		}
-		if outN <= 0 {
-			outN = 32768
+		if rCtx, rOut, ok := getRealZenLimits(id); ok {
+			ctxN = rCtx
+			outN = rOut
+		} else {
+			if ctxN <= 0 {
+				ctxN = 200000
+			}
+			if outN <= 0 {
+				outN = 32768
+			}
 		}
 		upstream := ""
 		if strings.Contains(strings.ToLower(id), "muse-spark") {
 			upstream = "responses" // 实测 chat/completions 500，走原生 responses
 		}
-		zenModels[id] = &ZenModel{
+		zm := &ZenModel{
 			ID:        id,
 			Context:   ctxN,
 			Output:    outN,
@@ -2650,6 +2695,7 @@ func applyZenCatalog(desired map[string]bool, overlay map[string]zenModelOverlay
 			Reasoning: ov.Reasoning,
 			Attach:    ov.Attachment,
 		}
+		zenModels[id] = zm
 		added++
 	}
 	return added

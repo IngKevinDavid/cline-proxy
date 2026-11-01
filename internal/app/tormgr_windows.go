@@ -16,3 +16,4 @@ func hideWindow(cmd *exec.Cmd) {
 		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
 	}
 }
+

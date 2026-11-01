@@ -262,3 +262,149 @@ func repairXMLToolCalls(chat map[string]any) bool {
 
 	return true
 }
+
+var regexThinkBlock = regexp.MustCompile(`(?s)<think>(.*?)(?:</think>|$)`)
+
+// repairThinkTags inspects message content for <think>...</think> tags,
+// extracts the reasoning into reasoning_content and reasoning, and strips the tag from content.
+func repairThinkTags(msg map[string]any) bool {
+	if msg == nil {
+		return false
+	}
+	content, ok := msg["content"].(string)
+	if !ok || !strings.Contains(content, "<think") {
+		return false
+	}
+
+	matches := regexThinkBlock.FindStringSubmatch(content)
+	if len(matches) < 2 {
+		return false
+	}
+
+	thinkText := strings.TrimSpace(matches[1])
+	cleaned := strings.TrimSpace(regexThinkBlock.ReplaceAllString(content, ""))
+
+	msg["content"] = cleaned
+	if thinkText != "" {
+		if curReasoning, ok := msg["reasoning_content"].(string); ok && curReasoning != "" {
+			msg["reasoning_content"] = curReasoning + "\n" + thinkText
+			msg["reasoning"] = curReasoning + "\n" + thinkText
+		} else {
+			msg["reasoning_content"] = thinkText
+			msg["reasoning"] = thinkText
+		}
+	}
+	return true
+}
+
+// ThinkStreamFilter converts streamed <think>...</think> tokens into standard
+// reasoning_content and reasoning delta chunks for clients like Pi coding agent.
+type ThinkStreamFilter struct {
+	inThink bool
+	buffer  string
+}
+
+// NewThinkStreamFilter initializes a new filter instance.
+func NewThinkStreamFilter() *ThinkStreamFilter {
+	return &ThinkStreamFilter{}
+}
+
+// ProcessDelta processes a streaming chunk delta.
+func (f *ThinkStreamFilter) ProcessDelta(delta map[string]any) []map[string]any {
+	if delta == nil {
+		return nil
+	}
+
+	r, hasR := delta["reasoning"].(string)
+	rc, hasRC := delta["reasoning_content"].(string)
+	if hasR && r != "" && !hasRC {
+		delta["reasoning_content"] = r
+	}
+	if hasRC && rc != "" && !hasR {
+		delta["reasoning"] = rc
+	}
+
+	content, ok := delta["content"].(string)
+	if !ok || content == "" {
+		return []map[string]any{delta}
+	}
+
+	text := f.buffer + content
+	f.buffer = ""
+
+	var deltas []map[string]any
+
+	for len(text) > 0 {
+		if !f.inThink {
+			idx := strings.Index(text, "<think>")
+			if idx == -1 {
+				partial := false
+				for i := 1; i < len("<think>"); i++ {
+					if strings.HasSuffix(text, "<think>"[:i]) {
+						prefix := text[:len(text)-i]
+						if prefix != "" {
+							deltas = append(deltas, map[string]any{"content": prefix})
+						}
+						f.buffer = text[len(text)-i:]
+						partial = true
+						break
+					}
+				}
+				if !partial {
+					deltas = append(deltas, map[string]any{"content": text})
+				}
+				break
+			}
+
+			if idx > 0 {
+				deltas = append(deltas, map[string]any{"content": text[:idx]})
+			}
+			f.inThink = true
+			text = text[idx+len("<think>"):]
+		} else {
+			idx := strings.Index(text, "</think>")
+			if idx == -1 {
+				partial := false
+				for i := 1; i < len("</think>"); i++ {
+					if strings.HasSuffix(text, "</think>"[:i]) {
+						prefix := text[:len(text)-i]
+						if prefix != "" {
+							deltas = append(deltas, map[string]any{
+								"reasoning_content": prefix,
+								"reasoning":         prefix,
+							})
+						}
+						f.buffer = text[len(text)-i:]
+						partial = true
+						break
+					}
+				}
+				if !partial {
+					deltas = append(deltas, map[string]any{
+						"reasoning_content": text,
+						"reasoning":         text,
+					})
+				}
+				break
+			}
+
+			thinkPart := text[:idx]
+			if thinkPart != "" {
+				deltas = append(deltas, map[string]any{
+					"reasoning_content": thinkPart,
+					"reasoning":         thinkPart,
+				})
+			}
+			f.inThink = false
+			text = text[idx+len("</think>"):]
+			if strings.HasPrefix(text, "\n") {
+				text = text[1:]
+			}
+		}
+	}
+
+	if len(deltas) == 0 {
+		return nil
+	}
+	return deltas
+}

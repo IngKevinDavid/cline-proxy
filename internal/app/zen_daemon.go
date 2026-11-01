@@ -378,7 +378,10 @@ func callZenViaLocalDaemon(ctx context.Context, params map[string]any, stream bo
 	if err := json.NewDecoder(respGen.Body).Decode(&genResult); err != nil {
 		return nil, 0, fmt.Errorf("decode opencode daemon generate response: %w", err)
 	}
-	rawText := genResult.Data.Text
+	rawText := strings.TrimSpace(genResult.Data.Text)
+	if rawText == "" {
+		return nil, 0, fmt.Errorf("opencode daemon returned empty text")
+	}
 
 	// 4. Construct OpenAI chat completion response map
 	promptTokens := estimateJSON(params)
@@ -408,10 +411,17 @@ func callZenViaLocalDaemon(ctx context.Context, params map[string]any, stream bo
 		},
 	}
 
-	// Parse and extract XML/JSON tool calls if any
-	repairXMLToolCalls(chat)
+	return serializeChatResponse(chat, modelID, stream)
+}
 
-	// 5. Serialize into standard OpenAI SSE chunks
+// serializeChatResponse converts a parsed chat completion object into an HTTP response,
+// either as raw JSON (stream=false) or as SSE event-stream chunks (stream=true).
+func serializeChatResponse(chat map[string]any, modelID string, stream bool) (*http.Response, int, error) {
+	repairXMLToolCalls(chat)
+	if msg, ok := getNested(chat, "choices", 0, "message").(map[string]any); ok {
+		repairThinkTags(msg)
+	}
+
 	msg, _ := getNested(chat, "choices", 0, "message").(map[string]any)
 	if msg == nil {
 		msg = map[string]any{}
@@ -420,10 +430,33 @@ func callZenViaLocalDaemon(ctx context.Context, params map[string]any, stream bo
 	if finishReason == "" {
 		finishReason = "stop"
 	}
+	if tcs, ok := msg["tool_calls"].([]any); ok && len(tcs) > 0 {
+		if finishReason == "stop" || finishReason == "" {
+			finishReason = "tool_calls"
+		}
+	}
 	cleanedContent, _ := msg["content"].(string)
 
-	var sseBuf bytes.Buffer
+	if !stream {
+		chatBytes, _ := json.Marshal(chat)
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"application/json"},
+			},
+			Body:          io.NopCloser(bytes.NewReader(chatBytes)),
+			ContentLength: int64(len(chatBytes)),
+		}
+		return resp, 0, nil
+	}
 
+	now := time.Now().Unix()
+	chatcmplID, _ := chat["id"].(string)
+	if chatcmplID == "" {
+		chatcmplID = fmt.Sprintf("chatcmpl-resp-%x", time.Now().UnixNano())
+	}
+
+	var sseBuf bytes.Buffer
 	emitChunk := func(delta map[string]any, fr any) {
 		chunkObj := map[string]any{
 			"id":      chatcmplID,
@@ -444,15 +477,16 @@ func callZenViaLocalDaemon(ctx context.Context, params map[string]any, stream bo
 		sseBuf.WriteString("\n\n")
 	}
 
-	// Initial role chunk
 	emitChunk(map[string]any{"role": "assistant"}, nil)
 
-	// Content chunk(s)
+	if reasoning, ok := msg["reasoning_content"].(string); ok && reasoning != "" {
+		emitChunk(map[string]any{"reasoning_content": reasoning, "reasoning": reasoning}, nil)
+	}
+
 	if cleanedContent != "" {
 		emitChunk(map[string]any{"content": cleanedContent}, nil)
 	}
 
-	// Tool calls chunk(s)
 	if tcs, ok := msg["tool_calls"].([]any); ok && len(tcs) > 0 {
 		for i, tc := range tcs {
 			tcm, _ := tc.(map[string]any)
@@ -480,37 +514,23 @@ func callZenViaLocalDaemon(ctx context.Context, params map[string]any, stream bo
 		}
 	}
 
-	// Final finish chunk
 	emitChunk(map[string]any{}, finishReason)
 
-	// Usage chunk
-	usageObj := map[string]any{
-		"id":      chatcmplID,
-		"object":  "chat.completion.chunk",
-		"created": now,
-		"model":   modelID,
-		"usage":   chat["usage"],
-	}
-	usageData, _ := json.Marshal(usageObj)
-	sseBuf.WriteString("data: ")
-	sseBuf.Write(usageData)
-	sseBuf.WriteString("\n\n")
-
-	// Done marker
-	sseBuf.WriteString("data: [DONE]\n\n")
-
-	if !stream {
-		chatBytes, _ := json.Marshal(chat)
-		resp := &http.Response{
-			StatusCode: http.StatusOK,
-			Header: http.Header{
-				"Content-Type": []string{"application/json"},
-			},
-			Body:          io.NopCloser(bytes.NewReader(chatBytes)),
-			ContentLength: int64(len(chatBytes)),
+	if usage, ok := chat["usage"].(map[string]any); ok && len(usage) > 0 {
+		usageObj := map[string]any{
+			"id":      chatcmplID,
+			"object":  "chat.completion.chunk",
+			"created": now,
+			"model":   modelID,
+			"usage":   usage,
 		}
-		return resp, 0, nil
+		usageData, _ := json.Marshal(usageObj)
+		sseBuf.WriteString("data: ")
+		sseBuf.Write(usageData)
+		sseBuf.WriteString("\n\n")
 	}
+
+	sseBuf.WriteString("data: [DONE]\n\n")
 
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
@@ -520,7 +540,6 @@ func callZenViaLocalDaemon(ctx context.Context, params map[string]any, stream bo
 		Body:          io.NopCloser(bytes.NewReader(sseBuf.Bytes())),
 		ContentLength: int64(sseBuf.Len()),
 	}
-
 	return resp, 0, nil
 }
 
@@ -538,13 +557,13 @@ func callFallbackProvider(ctx context.Context, params map[string]any, stream boo
 		return nil, 0, fmt.Errorf("no fallback provider route for model %q", modelID)
 	}
 
-	// Clone params with rewritten model and stream
+	// Clone params with rewritten model and non-streaming to vyceai
 	clone := make(map[string]any, len(params))
 	for k, v := range params {
 		clone[k] = v
 	}
 	clone["model"] = targetModel
-	clone["stream"] = stream
+	clone["stream"] = false
 
 	bodyJSON, err := json.Marshal(clone)
 	if err != nil {
@@ -565,13 +584,18 @@ func callFallbackProvider(ctx context.Context, params map[string]any, stream boo
 	if err != nil {
 		return nil, 0, fmt.Errorf("fallback request to vyceai: %w", err)
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		b := kit.ReadBody(resp)
-		_ = resp.Body.Close()
 		return nil, 0, fmt.Errorf("fallback vyceai error (%d): %s", resp.StatusCode, b)
 	}
 
+	var chat map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&chat); err != nil {
+		return nil, 0, fmt.Errorf("decode vyceai response: %w", err)
+	}
+
 	log.Printf("  fallback provider: %q served via vyceai as %q (status 200)", modelID, targetModel)
-	return resp, 0, nil
+	return serializeChatResponse(chat, modelID, stream)
 }

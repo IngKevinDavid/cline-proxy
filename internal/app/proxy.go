@@ -735,6 +735,9 @@ func emitChatAsSSE(w http.ResponseWriter, chat map[string]any, usageFn func(map[
 	msg, _ := getNested(chat, "choices", 0, "message").(map[string]any)
 	if msg == nil {
 		msg = map[string]any{}
+	} else {
+		repairThinkTags(msg)
+		repairXMLToolCalls(chat)
 	}
 	finish, _ := getNested(chat, "choices", 0, "finish_reason").(string)
 	chunk := func(delta map[string]any, fr any) {
@@ -1211,6 +1214,7 @@ func handleStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Respons
 	w.WriteHeader(http.StatusOK)
 
 	reader := bufio.NewReader(upstream.Body)
+	thinkFilter := NewThinkStreamFilter()
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -1252,6 +1256,32 @@ func handleStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Respons
 					}
 				}
 				normalized := normalizeOpenAIResponse(obj)
+				if delta, ok := getNested(normalized, "choices", 0, "delta").(map[string]any); ok {
+					deltas := thinkFilter.ProcessDelta(delta)
+					if len(deltas) > 0 {
+						for _, d := range deltas {
+							chunkCopy := make(map[string]any, len(normalized))
+							for k, v := range normalized {
+								chunkCopy[k] = v
+							}
+							if chList, ok := chunkCopy["choices"].([]any); ok && len(chList) > 0 {
+								if chMap, ok := chList[0].(map[string]any); ok {
+									newChoice := make(map[string]any, len(chMap))
+									for ck, cv := range chMap {
+										newChoice[ck] = cv
+									}
+									newChoice["delta"] = d
+									chunkCopy["choices"] = []any{newChoice}
+								}
+							}
+							if normBytes, err := json.Marshal(chunkCopy); err == nil {
+								w.Write([]byte("data: " + string(normBytes) + "\n\n"))
+								flusher.Flush()
+							}
+						}
+						continue
+					}
+				}
 				if normBytes, err := json.Marshal(normalized); err == nil {
 					w.Write([]byte("data: " + string(normBytes) + "\n\n"))
 					flusher.Flush()
@@ -3132,6 +3162,7 @@ func normalizeMessage(msg map[string]any) map[string]any {
 		}
 		out[k] = v
 	}
+	repairThinkTags(out)
 	if r, ok := out["reasoning"].(string); ok && r != "" {
 		if _, hasRC := out["reasoning_content"]; !hasRC {
 			out["reasoning_content"] = r

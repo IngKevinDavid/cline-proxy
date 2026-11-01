@@ -110,6 +110,10 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/zen/keys/test", adminCORS(auth(handleZenKeyTest)))
 	mux.HandleFunc("/admin/api/zen/sessions", adminCORS(auth(handleZenSessions)))
 	mux.HandleFunc("/admin/api/zen/sessions/mint", adminCORS(auth(handleZenSessionsMint)))
+	mux.HandleFunc("/admin/api/egress/status", adminCORS(auth(handleAdminEgressStatus)))
+	mux.HandleFunc("/admin/api/transport", adminCORS(auth(handleAdminEgressStatus)))
+	mux.HandleFunc("/admin/api/tor/rotate", adminCORS(auth(handleAdminTorRotate)))
+	mux.HandleFunc("/admin/api/warp/rotate", adminCORS(auth(handleAdminWarpRotate)))
 	mux.HandleFunc("/admin/zen/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/", http.StatusFound)
 	})

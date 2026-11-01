@@ -226,7 +226,7 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 <div class="nav-group">Services</div>
 <div class="nav-item" data-tab="settings"><span class="nav-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1z"/></svg></span> Gateway settings</div>
 <div class="nav-item" data-tab="logs"><span class="nav-ico"><svg viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg></span> Request logs</div>
-<div class="nav-item" data-tab="proxypool"><span class="nav-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="19" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="M12 7.5v4m0 0-5.5 5m5.5-5 5.5 5"/></svg></span> Proxy pool</div>
+<div class="nav-item" data-tab="proxypool"><span class="nav-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="19" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="M12 7.5v4m0 0-5.5 5m5.5-5 5.5 5"/></svg></span> Proxy & Egress (WARP/Tor)</div>
 <div class="nav-item" data-tab="opencode"><span class="nav-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14.5 14.5 0 0 1 0 18 14.5 14.5 0 0 1 0-18z"/></svg></span> opencode free models</div>
 <div class="nav-item" data-tab="combos"><span class="nav-ico"><svg viewBox="0 0 24 24"><path d="M8 3v5a4 4 0 0 1-4 4 4 4 0 0 1 4 4v5M16 3v5a4 4 0 0 0 4 4 4 4 0 0 0-4 4v5"/></svg></span> Combos</div>
 <div class="sidebar-footer">
@@ -376,7 +376,65 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 </div>
 
 <div id="tab-proxypool" class="tab-panel" style="display:none">
-<h2>Proxy pool</h2>
+<h2>Proxy & Egress Network (WARP & Tor)</h2>
+
+<div class="section">
+  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20zM2 12h20"/></svg></span> Egress Network & Automatic/Manual IP Rotation</div>
+  <div class="section-body">
+    <div class="hint" style="margin-bottom:12px">Monitor real-time exit IPs for Direct connection, Embedded Tor daemon, and Cloudflare WARP. Manual and auto-failover (429 defense) rotations are tracked here.</div>
+    <div class="cards" style="grid-template-columns:repeat(3,1fr);margin-bottom:16px">
+      <!-- Direct IP Card -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <div class="label">Direct Connection</div>
+          <span class="badge" style="font-size:11px;padding:2px 8px;border-radius:4px;background:rgba(59,130,246,0.15);color:#3b82f6">Direct</span>
+        </div>
+        <div class="num blue" id="egressDirectIp" style="font-size:18px;font-family:monospace">-</div>
+        <div class="hint" style="margin-top:6px">Default machine egress</div>
+      </div>
+      <!-- Embedded Tor Card -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <div class="label">Embedded Tor (:9052)</div>
+          <span id="egressTorBadge" class="badge" style="font-size:11px;padding:2px 8px;border-radius:4px;background:rgba(34,197,94,0.15);color:#22c55e">Checking...</span>
+        </div>
+        <div class="num purple" id="egressTorIp" style="font-size:18px;font-family:monospace">-</div>
+        <div style="display:flex;gap:6px;margin-top:10px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-sm btn-primary" id="btnRotateTor" onclick="rotateTorManual()">Rotate Tor IP</button>
+          <span class="hint" id="egressTorRotates" style="font-size:11px">Rotations: 0</span>
+        </div>
+      </div>
+      <!-- Cloudflare WARP Card -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <div class="label">Cloudflare WARP (:40000)</div>
+          <span id="egressWarpBadge" class="badge" style="font-size:11px;padding:2px 8px;border-radius:4px;background:rgba(168,85,247,0.15);color:#a855f7">Checking...</span>
+        </div>
+        <div class="num green" id="egressWarpIp" style="font-size:18px;font-family:monospace">-</div>
+        <div style="display:flex;gap:6px;margin-top:10px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-sm btn-primary" id="btnRotateWarp" onclick="rotateWarpManual()">Rotate WARP IP</button>
+          <span class="hint" id="egressWarpRotates" style="font-size:11px">Rotations: 0</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- History Table -->
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <strong style="font-size:13px">IP Rotation Event Log (Auto & Manual)</strong>
+      <button class="btn btn-sm" onclick="loadEgressStatus(true)">Refresh IPs</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th style="width:140px">Time</th><th style="width:90px">Egress</th><th style="width:100px">Trigger</th><th>IP Change</th><th style="width:80px">Status</th><th>Details</th></tr>
+        </thead>
+        <tbody id="egressHistoryBody">
+          <tr><td colspan="6" class="empty">No rotation events recorded yet</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
 <div class="section">
   <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="19" r="2.5"/><circle cx="19" cy="19" r="2.5"/><path d="M12 7.5v4m0 0-5.5 5m5.5-5 5.5 5"/></svg></span> Shared egress proxies</div>
   <div class="section-body">
@@ -1428,7 +1486,84 @@ async function testZenKey(index, btn) {
 }
 
 // ========== Proxy pool ==========
+async function loadEgressStatus(force) {
+  try {
+    const res = await api('GET', '/egress/status');
+    const d = res.data || {};
+    if (_('egressDirectIp')) _('egressDirectIp').textContent = d.directIp || 'Unavailable';
+    if (_('egressTorIp')) _('egressTorIp').textContent = (d.tor && d.tor.currentIp) ? d.tor.currentIp : ((d.tor && d.tor.active) ? 'Active (probing...)' : 'Offline');
+    if (_('egressTorBadge')) {
+      const active = d.tor && d.tor.active;
+      _('egressTorBadge').textContent = active ? 'Online' : 'Offline';
+      _('egressTorBadge').style.color = active ? '#22c55e' : '#ef4444';
+      _('egressTorBadge').style.background = active ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)';
+    }
+    if (_('egressTorRotates')) _('egressTorRotates').textContent = 'Rotations: ' + ((d.tor && d.tor.rotationCount) || 0);
+
+    if (_('egressWarpIp')) _('egressWarpIp').textContent = (d.warp && d.warp.currentIp) ? d.warp.currentIp : ((d.warp && d.warp.active) ? 'Active (probing...)' : 'Inactive');
+    if (_('egressWarpBadge')) {
+      const active = d.warp && d.warp.active;
+      _('egressWarpBadge').textContent = active ? 'Connected' : 'Disconnected';
+      _('egressWarpBadge').style.color = active ? '#22c55e' : '#eab308';
+      _('egressWarpBadge').style.background = active ? 'rgba(34,197,94,0.15)' : 'rgba(234,179,8,0.15)';
+    }
+    if (_('egressWarpRotates')) _('egressWarpRotates').textContent = 'Rotations: ' + ((d.warp && d.warp.rotationCount) || 0);
+
+    const history = d.history || [];
+    const tbody = _('egressHistoryBody');
+    if (tbody) {
+      if (history.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="empty">No rotation events recorded yet</td></tr>';
+      } else {
+        tbody.innerHTML = history.map(h => {
+          const badgeClass = h.status === 'ok' ? 'green' : 'red';
+          const ipChange = h.oldIp ? (esc(h.oldIp) + ' &rarr; ' + esc(h.newIp || '?')) : esc(h.newIp || '-');
+          return '<tr>' +
+            '<td style="font-size:12px">' + esc(fmtTime(h.timestamp)) + '</td>' +
+            '<td><span class="badge" style="text-transform:uppercase;font-size:11px">' + esc(h.type) + '</span></td>' +
+            '<td>' + esc(h.trigger) + '</td>' +
+            '<td style="font-family:monospace;font-size:12px">' + ipChange + '</td>' +
+            '<td><span class="badge ' + badgeClass + '">' + esc(h.status) + '</span></td>' +
+            '<td style="font-size:12px">' + esc(h.message) + '</td>' +
+            '</tr>';
+        }).join('');
+      }
+    }
+  } catch (e) {
+    console.error('loadEgressStatus failed:', e);
+  }
+}
+
+async function rotateTorManual() {
+  const btn = _('btnRotateTor');
+  if (btn) { btn.disabled = true; btn.textContent = 'Rotating...'; }
+  try {
+    const res = await api('POST', '/tor/rotate', {});
+    toast(res.data && res.data.message ? res.data.message : 'Tor rotated successfully', 'success');
+    await loadEgressStatus(true);
+  } catch (e) {
+    toast('Tor rotate error: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Rotate Tor IP'; }
+  }
+}
+
+async function rotateWarpManual() {
+  const btn = _('btnRotateWarp');
+  if (btn) { btn.disabled = true; btn.textContent = 'Rotating...'; }
+  try {
+    const res = await api('POST', '/warp/rotate', {});
+    toast(res.data && res.data.message ? res.data.message : 'WARP rotated successfully', 'success');
+    await loadEgressStatus(true);
+  } catch (e) {
+    toast('WARP rotate error: ' + e.message, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Rotate WARP IP'; }
+  }
+}
+
 async function loadProxyPool() {
+  loadEgressStatus();
   try {
     const [oc, cfg] = await Promise.all([api('GET', '/opencode/config'), api('GET', '/config')]);
     const c = oc.data;

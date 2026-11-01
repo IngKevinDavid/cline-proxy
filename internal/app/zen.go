@@ -1046,18 +1046,16 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 			body["model"] = m.ID
 		}
 	}
-	delete(body, "reasoning_effort")
+	// Map reasoning_effort according to Zen chat vocabulary (low, high, max)
+	if eff, ok := params["reasoning_effort"].(string); ok && eff != "" {
+		body["reasoning_effort"] = mapZenChatReasoningEffort(eff)
+	} else if eff, ok := params["reasoningEffort"].(string); ok && eff != "" {
+		body["reasoning_effort"] = mapZenChatReasoningEffort(eff)
+	} else {
+		body["reasoning_effort"] = "high"
+	}
 	delete(body, "reasoningEffort")
-	// FreeTier gate（2026-09-18 实测解码）：zen 免费层 chat 端点校验请求体
-	// 是否携带 opencode 工具集，缺失则 403（"can only be used from within
-	// OpenCode"）。恒注入 11 个规范工具名保证过闸。tool_choice 按客户端
-	// 是否带工具分流（实测对比）：
-	//  - 客户端无工具（纯文本问答）：tool_choice=none。auto 会让部分模型
-	//    （ling 多轮实测）在有工具但无需调用时返回空文本；none 保证回复。
-	//  - 客户端带工具（IDE agent 模式，Cursor 等）：客户端定义优先（同名时
-	//    覆盖 gate 占位 stub，模型才能拿到真实参数 schema）+ tool_choice=auto，
-	//    模型可发起调用、IDE 执行后回传结果（实测 ling 调用客户端自定义
-	//    get_weather 成功）。客户端显式 none 时尊重（实测 chat 端点接受 none）。
+
 	delete(body, "functions")
 	delete(body, "function_call")
 	clientTools := zenClientTools(params)
@@ -1066,62 +1064,174 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 		body["tool_choice"] = "none"
 	} else {
 		body["tools"] = zenMergeTools(clientTools, zenGateTools())
-		body["tool_choice"] = "auto"
-		if tc, _ := params["tool_choice"].(string); tc == "none" {
-			body["tool_choice"] = "none"
+		if tc, ok := params["tool_choice"]; ok && tc != nil {
+			body["tool_choice"] = tc
+		} else {
+			body["tool_choice"] = "auto"
 		}
 	}
 	return body
 }
 
-// zenClientTools 提取客户端工具（chat 嵌套形态 tools[]，兼容已废弃的
-// functions[] 形态），返回可直接发给 chat 端点的嵌套定义。
-func zenClientTools(params map[string]any) []any {
+func mapZenChatReasoningEffort(effort string) string {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "low", "none", "off", "disabled":
+		return "low"
+	case "high", "medium", "minimal":
+		return "high"
+	case "max", "xhigh", "extra_high", "extra-high", "ultra":
+		return "max"
+	default:
+		return "high"
+	}
+}
+
+// sanitizeOneTool normalizes a tool item into standard OpenAI nested
+// {type: "function", function: {name, description, parameters}} shape.
+func sanitizeOneTool(t any) map[string]any {
+	tm, ok := t.(map[string]any)
+	if !ok || tm == nil {
+		return nil
+	}
+
+	typ, _ := tm["type"].(string)
+	typ = strings.ToLower(strings.TrimSpace(typ))
+	if typ == "namespace" || typ == "provider" || typ == "group" {
+		return nil
+	}
+
+	// Shape 1: Standard nested {type: "function", function: {name, description, parameters}}
+	if fn, ok := tm["function"].(map[string]any); ok && fn != nil {
+		name, _ := fn["name"].(string)
+		if name == "" {
+			name, _ = tm["name"].(string)
+		}
+		if name == "" {
+			return nil
+		}
+		desc, _ := fn["description"].(string)
+		if desc == "" {
+			desc, _ = tm["description"].(string)
+		}
+		params := fn["parameters"]
+		if params == nil {
+			params = fn["input_schema"]
+		}
+		if params == nil {
+			params = tm["parameters"]
+		}
+		if params == nil {
+			params = tm["input_schema"]
+		}
+		if params == nil {
+			params = zenEmptySchema()
+		}
+		repairToolSchema(params)
+		return map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        name,
+				"description": desc,
+				"parameters":  params,
+			},
+		}
+	}
+
+	// Shape 2: Flat function tool {type: "function", name: "...", description: "...", parameters: {...}}
+	// or Anthropic shape {name: "...", description: "...", input_schema: {...}}
+	name, _ := tm["name"].(string)
+	if name != "" {
+		desc, _ := tm["description"].(string)
+		params := tm["parameters"]
+		if params == nil {
+			params = tm["input_schema"]
+		}
+		if params == nil {
+			params = zenEmptySchema()
+		}
+		repairToolSchema(params)
+		return map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        name,
+				"description": desc,
+				"parameters":  params,
+			},
+		}
+	}
+
+	return nil
+}
+
+// flattenToolList flattens tools from an array or a map[string]any {name: def}
+// and unwraps namespaces/groups.
+func flattenToolList(raw any) []any {
+	var list []any
+	switch v := raw.(type) {
+	case []any:
+		list = v
+	case map[string]any:
+		for name, def := range v {
+			if defMap, ok := def.(map[string]any); ok {
+				copyMap := make(map[string]any)
+				for k, val := range defMap {
+					copyMap[k] = val
+				}
+				if _, ok := copyMap["name"]; !ok {
+					copyMap["name"] = name
+				}
+				list = append(list, copyMap)
+			}
+		}
+	default:
+		return nil
+	}
+
 	var out []any
-	if ct, ok := params["tools"].([]any); ok {
-		for _, t := range ct {
-			tm, ok := t.(map[string]any)
-			if !ok {
-				continue
-			}
-			fn, ok := tm["function"].(map[string]any)
-			if !ok {
-				continue
-			}
-			n, _ := fn["name"].(string)
-			if n == "" {
-				continue
-			}
-			if fn["parameters"] == nil {
-				fn["parameters"] = zenEmptySchema() // null schema 上游判非法
-			}
-			out = append(out, tm)
+	for _, item := range list {
+		im, ok := item.(map[string]any)
+		if !ok || im == nil {
+			continue
 		}
-	}
-	if len(out) > 0 {
-		return out
-	}
-	if fns, ok := params["functions"].([]any); ok {
-		for _, f := range fns {
-			fm, ok := f.(map[string]any)
-			if !ok {
-				continue
+		typ, _ := im["type"].(string)
+		typ = strings.ToLower(strings.TrimSpace(typ))
+		if typ == "namespace" || typ == "provider" || typ == "group" {
+			if nested, ok := im["tools"]; ok {
+				out = append(out, flattenToolList(nested)...)
 			}
-			n, _ := fm["name"].(string)
-			if n == "" {
-				continue
-			}
-			fn := map[string]any{"name": n}
-			if d, ok := fm["description"].(string); ok {
-				fn["description"] = d
-			}
-			if p, ok := fm["parameters"]; ok && p != nil {
-				fn["parameters"] = p
-			} else {
-				fn["parameters"] = zenEmptySchema()
-			}
-			out = append(out, map[string]any{"type": "function", "function": fn})
+			continue
 		}
+		out = append(out, item)
+	}
+	return out
+}
+
+// zenClientTools extracts and normalizes all client tools into standard OpenAI format.
+func zenClientTools(params map[string]any) []any {
+	rawTools := params["tools"]
+	if rawTools == nil {
+		rawTools = params["functions"]
+	}
+	if rawTools == nil {
+		return nil
+	}
+
+	flattened := flattenToolList(rawTools)
+	var out []any
+	seen := make(map[string]bool)
+
+	for _, t := range flattened {
+		norm := sanitizeOneTool(t)
+		if norm == nil {
+			continue
+		}
+		fn, _ := norm["function"].(map[string]any)
+		name, _ := fn["name"].(string)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, norm)
 	}
 	return out
 }
@@ -1168,11 +1278,15 @@ func repairToolSchema(node any) {
 			m["required"] = valid
 		}
 	}
-	for _, key := range []string{"items", "allOf", "anyOf", "oneOf"} {
+	for _, key := range []string{"items", "allOf", "anyOf", "oneOf", "$defs", "definitions"} {
 		if sub, ok := m[key]; ok {
 			if subSlice, ok := sub.([]any); ok {
 				for _, item := range subSlice {
 					repairToolSchema(item)
+				}
+			} else if subMap, ok := sub.(map[string]any); ok {
+				for _, v := range subMap {
+					repairToolSchema(v)
 				}
 			} else {
 				repairToolSchema(sub)
@@ -1182,11 +1296,11 @@ func repairToolSchema(node any) {
 }
 
 // zenMergeTools 合并客户端工具与 gate 占位工具：客户端工具优先保留。
-// 若客户端工具包含已知 OpenCode 工具（如 shell/read/edit 等），
-// 用官方提取的真实定义替换其描述与参数，确保符合 FreeTier 校验。
+// 当客户端提供工具时，仅补充缺失的 'read' 工具（通过 FreeTier gate），
+// 不注入多余的 'shell'/'edit'/'glob'/'grep'，避免模型在 Agent 环境下产生混淆与无限遍历。
 func zenMergeTools(clientTools []any, gateTools []any) []any {
 	toolsDef := getOpencodeTools()
-	merged := make([]any, 0, len(clientTools)+len(gateTools))
+	merged := make([]any, 0, len(clientTools)+1)
 	provided := map[string]bool{}
 	for _, t := range clientTools {
 		tm, ok := t.(map[string]any)
@@ -1215,21 +1329,21 @@ func zenMergeTools(clientTools []any, gateTools []any) []any {
 		}
 		merged = append(merged, tm)
 	}
-	for _, gt := range gateTools {
-		tm, ok := gt.(map[string]any)
-		if !ok {
-			continue
+
+	// 仅当客户端工具未包含 'read' 时补充最小 read stub 满足 edge gate 校验
+	if !provided["read"] {
+		readParams := zenEmptySchema()
+		if def, ok := toolsDef["read"]; ok && def.Parameters != nil {
+			readParams = def.Parameters
 		}
-		fn, _ := tm["function"].(map[string]any)
-		n, _ := fn["name"].(string)
-		if n == "" || provided[n] {
-			continue
-		}
-		provided[n] = true
-		if fn["parameters"] != nil {
-			repairToolSchema(fn["parameters"])
-		}
-		merged = append(merged, tm)
+		merged = append(merged, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "read",
+				"description": "Read file contents",
+				"parameters":  readParams,
+			},
+		})
 	}
 	return merged
 }
@@ -2102,11 +2216,15 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 			}
 			if pidx == -2 {
 				// WARP IP was rate-limited; rotate tunnel connection
-				_ = RotateWarp()
+				if err := RotateWarp(); err == nil {
+					RecordRotationEvent("warp", "auto_429", "", "", "ok", "WARP rotated on 429 rate limit")
+				}
 			}
 			if pidx == -3 || useFailoverProxy {
 				// Tor circuit was rate-limited or switching to Tor; rotate circuit
-				_ = RotateTor(9053)
+				if err := RotateTor(9053); err == nil {
+					RecordRotationEvent("tor", "auto_429", "", "", "ok", "Tor circuit rotated on 429 rate limit")
+				}
 			}
 			useFailoverProxy = true
 
@@ -2137,9 +2255,15 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				retryKey = "public"
 				continue
 			}
-			if strings.Contains(apiErr.Body, "FreeUsageLimitError") && isOfficialZen && isLocalOpenCodeDaemonAvailable() {
-				log.Printf("  zen responses FreeUsageLimitError: bridging via local opencode daemon")
-				if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
+			if strings.Contains(apiErr.Body, "FreeUsageLimitError") {
+				if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
+					log.Printf("  zen responses FreeUsageLimitError: bridging via local opencode daemon")
+					if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
+						return dResp, dRL, nil
+					}
+				}
+				log.Printf("  zen responses FreeUsageLimitError: bridging via high-availability fallback provider")
+				if dResp, dRL, dErr := callFallbackProvider(ctx, params, stream); dErr == nil {
 					return dResp, dRL, nil
 				}
 			}
@@ -2368,11 +2492,15 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 			}
 			if pidx == -2 {
 				// WARP IP was rate-limited; rotate tunnel connection
-				_ = RotateWarp()
+				if err := RotateWarp(); err == nil {
+					RecordRotationEvent("warp", "auto_429", "", "", "ok", "WARP rotated on 429 rate limit")
+				}
 			}
 			if pidx == -3 || useFailoverProxy {
 				// Tor circuit was rate-limited or switching to Tor; rotate circuit
-				_ = RotateTor(9053)
+				if err := RotateTor(9053); err == nil {
+					RecordRotationEvent("tor", "auto_429", "", "", "ok", "Tor circuit rotated on 429 rate limit")
+				}
 			}
 			useFailoverProxy = true
 
@@ -2396,9 +2524,15 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 				key = "public"
 				continue
 			}
-			if strings.Contains(apiErr.Body, "FreeUsageLimitError") && isOfficialZen && isLocalOpenCodeDaemonAvailable() {
-				log.Printf("  zen edge FreeUsageLimitError: bridging via local opencode daemon")
-				if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
+			if strings.Contains(apiErr.Body, "FreeUsageLimitError") {
+				if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
+					log.Printf("  zen edge FreeUsageLimitError: bridging via local opencode daemon")
+					if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
+						return dResp, dRL, nil
+					}
+				}
+				log.Printf("  zen edge FreeUsageLimitError: bridging via high-availability fallback provider")
+				if dResp, dRL, dErr := callFallbackProvider(ctx, params, stream); dErr == nil {
 					return dResp, dRL, nil
 				}
 			}

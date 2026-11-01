@@ -190,7 +190,12 @@ func GetWarpStatus(cfg *zenConfigData) WarpStatus {
 		}
 	}
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
-	active := warpActive && ProbeSocks5(addr, 500*time.Millisecond)
+	listening := ProbeSocks5(addr, 500*time.Millisecond)
+	if listening {
+		warpActive = true
+		warpConnected = true
+	}
+	active := listening
 
 	var lastAttempt string
 	if !warpLastAttemptAt.IsZero() {

@@ -177,6 +177,11 @@ func ProbeWarpIP(force bool) string {
 		return ""
 	}
 
+	warpMu.Lock()
+	warpActive = true
+	warpConnected = true
+	warpMu.Unlock()
+
 	socksURL := fmt.Sprintf("socks5://%s", socksAddr)
 	client := proxyClientFor(socksURL)
 	ip, err := probeIPViaClient(client)
@@ -198,7 +203,10 @@ func GetEgressOverview() map[string]any {
 	cfg := getZenConfig()
 	warpStatus := GetWarpStatus(cfg)
 
-	torReady := torActive && ProbeSocks5(fmt.Sprintf("127.0.0.1:%d", torSocksPort), 500*time.Millisecond)
+	torReady := (torActive || ProbeSocks5(fmt.Sprintf("127.0.0.1:%d", torSocksPort), 500*time.Millisecond))
+	if torReady {
+		torActive = true
+	}
 
 	directIP := ProbeDirectIP(false)
 	torIP := ""

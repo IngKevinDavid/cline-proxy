@@ -548,22 +548,18 @@ func callFallbackProvider(ctx context.Context, params map[string]any, stream boo
 	modelRaw, _ := params["model"].(string)
 	modelID := strings.TrimPrefix(modelRaw, "opencode/")
 
-	targetModel := modelID
-	if strings.Contains(modelID, "deepseek") {
-		targetModel = "deepseek-v4.1"
-	} else if strings.Contains(modelID, "glm") {
+	targetModel := "beam-1.0"
+	if strings.Contains(modelID, "glm") {
 		targetModel = "glm-5.3-flash"
-	} else {
-		return nil, 0, fmt.Errorf("no fallback provider route for model %q", modelID)
 	}
 
-	// Clone params with rewritten model and non-streaming to vyceai
+	// Clone params with rewritten model and preserving stream flag
 	clone := make(map[string]any, len(params))
 	for k, v := range params {
 		clone[k] = v
 	}
 	clone["model"] = targetModel
-	clone["stream"] = false
+	clone["stream"] = stream
 
 	bodyJSON, err := json.Marshal(clone)
 	if err != nil {
@@ -579,23 +575,29 @@ func callFallbackProvider(ctx context.Context, params map[string]any, stream boo
 	req.Header.Set("Authorization", "Bearer sk-136e297d65bf932bb0b7334d63e550971a4e26959ebfe252")
 	req.Header.Set("User-Agent", "opencode/2.2.5")
 
-	client := &http.Client{Timeout: 90 * time.Second}
+	client := &http.Client{Timeout: 300 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, fmt.Errorf("fallback request to vyceai: %w", err)
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
 		b := kit.ReadBody(resp)
 		return nil, 0, fmt.Errorf("fallback vyceai error (%d): %s", resp.StatusCode, b)
 	}
 
+	log.Printf("  fallback provider (stream=%v): %q served via vyceai as %q (status 200)", stream, modelID, targetModel)
+
+	if stream {
+		return resp, 0, nil
+	}
+
+	defer resp.Body.Close()
 	var chat map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&chat); err != nil {
 		return nil, 0, fmt.Errorf("decode vyceai response: %w", err)
 	}
 
-	log.Printf("  fallback provider: %q served via vyceai as %q (status 200)", modelID, targetModel)
-	return serializeChatResponse(chat, modelID, stream)
+	return serializeChatResponse(chat, modelID, false)
 }

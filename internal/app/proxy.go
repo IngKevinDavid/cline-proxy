@@ -88,6 +88,24 @@ func StartProxy(host string, port int) error {
 	LoadRequestLogsFromFile()
 	go cleanupCompactStates()
 
+	// Egress network auto-start (WARP and Tor active by default)
+	go func() {
+		log.Printf("[egress] auto-starting network backends (Embedded Tor & Cloudflare WARP)...")
+		if torURL, err := EnsureTorReady(9052, 9053); err != nil {
+			log.Printf("[egress] Tor startup note: %v", err)
+		} else {
+			log.Printf("[egress] Tor active on %s (control :9053)", torURL)
+			go ProbeTorIP(true)
+		}
+
+		if warpURL, err := EnsureWarpReady("127.0.0.1", 40000); err != nil {
+			log.Printf("[egress] WARP startup note: %v", err)
+		} else {
+			log.Printf("[egress] WARP active on %s", warpURL)
+			go ProbeWarpIP(true)
+		}
+	}()
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -561,7 +579,7 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 			defer fResp.Body.Close()
 			tracker.rec.Status = fResp.StatusCode
 			if isStream {
-				handleStreamResponseWithUsage(w, fResp, usageFn)
+				handleStreamResponseWithUsage(w, fResp, usageFn, zm.ID)
 			} else {
 				stops := stopSequencesFrom(params)
 				handleNonStreamResponseWithUsage(w, fResp, usageFn, stops)
@@ -718,9 +736,13 @@ func emitChatAsSSE(w http.ResponseWriter, chat map[string]any, usageFn func(map[
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
 	flush := func() {
 		if flusher != nil {
 			flusher.Flush()
@@ -1126,7 +1148,7 @@ func getMsgCount(params map[string]any) int {
 	return 0
 }
 
-func handleStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Response, onUsage func(map[string]any)) {
+func handleStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Response, onUsage func(map[string]any), targetModel ...string) {
 	// Check Flusher support BEFORE writing any headers
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -1210,8 +1232,10 @@ func handleStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Respons
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 
 	reader := bufio.NewReader(upstream.Body)
 	thinkFilter := NewThinkStreamFilter()
@@ -1256,6 +1280,9 @@ func handleStreamResponseWithUsage(w http.ResponseWriter, upstream *http.Respons
 					}
 				}
 				normalized := normalizeOpenAIResponse(obj)
+				if len(targetModel) > 0 && targetModel[0] != "" {
+					normalized["model"] = targetModel[0]
+				}
 				if delta, ok := getNested(normalized, "choices", 0, "delta").(map[string]any); ok {
 					deltas := thinkFilter.ProcessDelta(delta)
 					if len(deltas) > 0 {

@@ -2066,6 +2066,10 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				// WARP IP was rate-limited; rotate tunnel connection
 				_ = RotateWarp()
 			}
+			if pidx == -3 {
+				// Tor circuit was rate-limited; rotate circuit
+				_ = RotateTor(9053)
+			}
 			useFailoverProxy = true
 			// 原样记录上游的 Retry-After（HTTP 日期还是秒数、值是多少）：
 			// 冷却时长完全由它决定，而面板只能看到换算后的截止时刻。没有这行，
@@ -2297,6 +2301,10 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 			if pidx == -2 {
 				// WARP IP was rate-limited; rotate tunnel connection
 				_ = RotateWarp()
+			}
+			if pidx == -3 {
+				// Tor circuit was rate-limited; rotate circuit
+				_ = RotateTor(9053)
 			}
 			useFailoverProxy = true
 			// 冷却当前 key；若还有其他未冷却 key 则立即切换重试（不睡眠）。

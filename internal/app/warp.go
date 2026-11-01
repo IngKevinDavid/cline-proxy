@@ -209,3 +209,4 @@ func GetWarpStatus(cfg *zenConfigData) WarpStatus {
 		LastError:     warpLastError,
 	}
 }
+

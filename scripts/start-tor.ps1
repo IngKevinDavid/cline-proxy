@@ -1,7 +1,12 @@
 # PowerShell helper to run user-space Tor SOCKS5 proxy on 127.0.0.1:9052
-# No administrator privileges required.
+# No administrator privileges required. Self-contained within cline-proxy.
 
-$torExe = "d:\Rstudio\01_proyectos\opencode-zen-proxy\desktop\tools\torwin\tor.exe"
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$torExe = [System.IO.Path]::GetFullPath((Join-Path $scriptDir "..\tools\tor\tor.exe"))
+if (-not (Test-Path $torExe)) {
+    # Fallback to current working directory
+    $torExe = [System.IO.Path]::GetFullPath("tools\tor\tor.exe")
+}
 if (-not (Test-Path $torExe)) {
     Write-Error "Tor binary not found at $torExe"
     exit 1
@@ -13,14 +18,16 @@ if ($conn) {
     exit 0
 }
 
-$dataDir = Join-Path $env:TEMP "tor-proxy-data"
+$dataDir = Join-Path $env:TEMP "cline-proxy-tor-data"
 if (-not (Test-Path $dataDir)) {
     New-Item -ItemType Directory -Path $dataDir | Out-Null
 }
 
-Write-Host "[tor] Starting Tor SOCKS5 proxy on 127.0.0.1:9052..." -ForegroundColor Cyan
+Write-Host "[tor] Starting Tor SOCKS5 proxy on 127.0.0.1:9052 (ControlPort 9053)..." -ForegroundColor Cyan
 Start-Process -FilePath $torExe -ArgumentList @(
     "--SocksPort", "9052",
+    "--ControlPort", "9053",
+    "--CookieAuthentication", "0",
     "--DataDirectory", $dataDir,
     "--RunAsDaemon", "0"
 ) -WindowStyle Hidden

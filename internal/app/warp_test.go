@@ -53,3 +53,4 @@ func TestPickProxyOrFailover(t *testing.T) {
 		t.Errorf("expected ('', -1) with empty proxies, got (%q, %d)", url, idx)
 	}
 }
+

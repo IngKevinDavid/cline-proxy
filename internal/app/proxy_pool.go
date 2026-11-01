@@ -160,8 +160,12 @@ func pickProxyOrFailover(preferFailover bool) (string, int) {
 		if warpURL, err := EnsureWarpReady(host, port); err == nil && warpURL != "" {
 			return warpURL, -2
 		}
-		// 2. 备用尝试本地 Tor SOCKS5 代理 (9052, 19050, 9050)
-		for _, torPort := range []int{9052, 19050, 9050} {
+		// 2. 备用尝试内置 Tor SOCKS5 代理 (9052)
+		if torURL, err := EnsureTorReady(9052, 9053); err == nil && torURL != "" {
+			return torURL, -3
+		}
+		// 3. 检查外部已在运行的 SOCKS5 端口 (19050, 9050)
+		for _, torPort := range []int{19050, 9050} {
 			addr := fmt.Sprintf("127.0.0.1:%d", torPort)
 			if ProbeSocks5(addr, 500*time.Millisecond) {
 				return fmt.Sprintf("socks5://%s", addr), -3
@@ -239,9 +243,11 @@ func dialViaProxy(ctx context.Context, raw, network, addr string) (net.Conn, err
 	case "http", "https":
 		return dialHTTPProxy(ctx, u, network, addr)
 	case "socks5", "socks5h":
-		auth := &proxy.Auth{}
+		var auth *proxy.Auth
 		if u.User != nil {
-			auth.User = u.User.Username()
+			auth = &proxy.Auth{
+				User: u.User.Username(),
+			}
 			auth.Password, _ = u.User.Password()
 		}
 		d, err := proxy.SOCKS5("tcp", u.Host, auth, proxy.Direct)

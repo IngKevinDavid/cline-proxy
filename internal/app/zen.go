@@ -2102,27 +2102,11 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 	rateLimited := 0
 	retryKey := "" // 非空时重试沿用该 key（保持 key sess_ 一致）
 	useFailoverProxy := false
-
-	if len(opts) == 0 || opts[0].pinKey == "" {
-		if isAllZenKeysCooling() {
-			zenKeyMu.Lock()
-			until := zenKeyCool["public"]
-			zenKeyMu.Unlock()
-			remaining := time.Until(until)
-			if remaining > 0 {
-				log.Printf("  zen upstream in cooldown (%v remaining), skipping doomed request to opencode", formatDuration(remaining))
-				if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
-					if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
-						return dResp, dRL, nil
-					}
-				}
-				return callFallbackProvider(ctx, params, stream)
-			}
-		}
-	}
+	lastPidx := -1
 
 	for attempt := 0; ; attempt++ {
-		proxyURL, pidx := pickProxyOrFailover(useFailoverProxy)
+		proxyURL, pidx := pickProxyOrFailoverWithPreference(useFailoverProxy, lastPidx)
+		lastPidx = pidx
 		viaProxy := "direct"
 		if proxyURL != "" {
 			viaProxy = maskProxyURL(proxyURL)
@@ -2284,44 +2268,17 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				retryKey = "public"
 				continue
 			}
-			if strings.Contains(apiErr.Body, "FreeUsageLimitError") {
-				cooldownZenKey(key, 15*time.Minute)
-				cooldownZenKey("public", 15*time.Minute)
-				log.Printf("  zen responses FreeUsageLimitError: cooling down key and public tier for 15m; bridging to fallback")
-				if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
-					if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
-						return dResp, dRL, nil
-					}
-				}
-				if dResp, dRL, dErr := callFallbackProvider(ctx, params, stream); dErr == nil {
-					return dResp, dRL, nil
-				}
-			}
 			if attempt < retries {
-				wait := 1 * time.Second
-				if !useFailoverProxy && pidx >= 0 {
-					wait = delay
-					if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > wait {
-						wait = retryAfter
-					}
-					if wait > 30*time.Second {
-						wait = 30 * time.Second
-					}
-				}
-				log.Printf("  zen responses rate limited (%d), rotating IP and retrying %d/%d after %v", resp.StatusCode, attempt+1, retries, wait)
-				if !sleepCtx(ctx, kit.WithRetryJitter(wait)) {
+				log.Printf("  zen responses rate limited (%d), rotating IP via Tor/WARP and retrying %d/%d...", resp.StatusCode, attempt+1, retries)
+				if !sleepCtx(ctx, kit.WithRetryJitter(1*time.Second)) {
 					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
 				}
-				delay = zenRetryDelay(delay)
 				continue
 			}
 			if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
 				if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
 					return dResp, dRL, nil
 				}
-			}
-			if dResp, dRL, dErr := callFallbackProvider(ctx, params, stream); dErr == nil {
-				return dResp, dRL, nil
 			}
 			markZenFail()
 			return nil, rateLimited, apiErr
@@ -2412,29 +2369,11 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 	delay := time.Second
 	rateLimited := 0
 	useFailoverProxy := false
-
-	if len(opts) == 0 || opts[0].pinKey == "" {
-		if isAllZenKeysCooling() {
-			zenKeyMu.Lock()
-			until := zenKeyCool["public"]
-			zenKeyMu.Unlock()
-			remaining := time.Until(until)
-			if remaining > 0 {
-				log.Printf("  zen upstream in cooldown (%v remaining), skipping doomed request to opencode", formatDuration(remaining))
-				if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
-					if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
-						return dResp, dRL, nil
-					}
-				}
-				return callFallbackProvider(ctx, params, stream)
-			}
-		}
-	}
+	lastPidx := -1
 
 	for attempt := 0; ; attempt++ {
-		// 代理轮转（round_robin 默认）: 每次上游尝试显式挑选出口,
-		// 冷却中的代理被跳过; 当 preferFailover 为 true 时自动尝试 WARP / Tor SOCKS5 出口。
-		proxyURL, pidx := pickProxyOrFailover(useFailoverProxy)
+		proxyURL, pidx := pickProxyOrFailoverWithPreference(useFailoverProxy, lastPidx)
+		lastPidx = pidx
 		viaProxy := "direct"
 		if proxyURL != "" {
 			viaProxy = maskProxyURL(proxyURL)
@@ -2573,44 +2512,17 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 				key = "public"
 				continue
 			}
-			if strings.Contains(apiErr.Body, "FreeUsageLimitError") {
-				cooldownZenKey(key, 15*time.Minute)
-				cooldownZenKey("public", 15*time.Minute)
-				log.Printf("  zen edge FreeUsageLimitError: cooling down key and public tier for 15m; bridging to fallback")
-				if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
-					if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
-						return dResp, dRL, nil
-					}
-				}
-				if dResp, dRL, dErr := callFallbackProvider(ctx, params, stream); dErr == nil {
-					return dResp, dRL, nil
-				}
-			}
 			if attempt < retries {
-				wait := 1 * time.Second
-				if !useFailoverProxy && pidx >= 0 {
-					wait = delay
-					if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > wait {
-						wait = retryAfter
-					}
-					if wait > 30*time.Second {
-						wait = 30 * time.Second
-					}
-				}
-				log.Printf("  zen rate limited (%d), rotating IP and retrying %d/%d after %v", resp.StatusCode, attempt+1, retries, wait)
-				if !sleepCtx(ctx, kit.WithRetryJitter(wait)) {
+				log.Printf("  zen rate limited (%d), rotating IP via Tor/WARP and retrying %d/%d...", resp.StatusCode, attempt+1, retries)
+				if !sleepCtx(ctx, kit.WithRetryJitter(1*time.Second)) {
 					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
 				}
-				delay = zenRetryDelay(delay)
 				continue
 			}
 			if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
 				if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
 					return dResp, dRL, nil
 				}
-			}
-			if dResp, dRL, dErr := callFallbackProvider(ctx, params, stream); dErr == nil {
-				return dResp, dRL, nil
 			}
 			markZenFail()
 			return nil, rateLimited, apiErr

@@ -126,9 +126,13 @@ func pickUpstreamProxy() (string, int) {
 	return pickProxyOrFailover(false)
 }
 
-// pickProxyOrFailover 按策略选择代理。当 preferFailover 为 true 时，
-// 若常规代理池不可用或处于冷却，自动尝试 Cloudflare WARP 或本地 Tor SOCKS5 出口。
+// pickProxyOrFailover 按策略选择代理。
 func pickProxyOrFailover(preferFailover bool) (string, int) {
+	return pickProxyOrFailoverWithPreference(preferFailover, -1)
+}
+
+// pickProxyOrFailoverWithPreference 在限流时在 Tor 与 Cloudflare WARP 之间交替轮转
+func pickProxyOrFailoverWithPreference(preferFailover bool, lastPidx int) (string, int) {
 	cfg := getZenConfig()
 	n := 0
 	if cfg != nil {
@@ -142,7 +146,6 @@ func pickProxyOrFailover(preferFailover bool) (string, int) {
 		case "fill":
 			idx = 0
 		}
-		// 冷却跳过:线性探测下一个可用代理
 		foundAvailable := false
 		for i := 0; i < n; i++ {
 			if zenProxyAvailable(idx) {
@@ -156,7 +159,6 @@ func pickProxyOrFailover(preferFailover bool) (string, int) {
 		}
 	}
 
-	// 发生限流或网络故障时触发 WARP / Tor 自动故障转移
 	if preferFailover && (cfg == nil || cfg.WarpAutoFailover) {
 		host := "127.0.0.1"
 		port := 40000
@@ -168,18 +170,26 @@ func pickProxyOrFailover(preferFailover bool) (string, int) {
 				port = cfg.WarpSocksPort
 			}
 		}
-		// 1. 优先尝试内置 Tor SOCKS5 代理 (9052 / 9053) — 具备主动 IP 轮转 (SIGNAL NEWNYM) 能力，秒级自愈 429
+
+		// If last egress was Tor (-3), alternate to WARP (-2)
+		if lastPidx == -3 {
+			if warpURL, err := EnsureWarpReady(host, port); err == nil && warpURL != "" {
+				return warpURL, -2
+			}
+		}
+
+		// Try Tor SOCKS5 (9052 / 9053)
 		if torURL, err := EnsureTorReady(9052, 9053); err == nil && torURL != "" {
 			return torURL, -3
 		}
-		// 2. 检查外部已在运行的 Tor SOCKS5 端口 (19050, 9050)
 		for _, torPort := range []int{19050, 9050} {
 			addr := fmt.Sprintf("127.0.0.1:%d", torPort)
 			if ProbeSocks5(addr, 500*time.Millisecond) {
 				return fmt.Sprintf("socks5://%s", addr), -3
 			}
 		}
-		// 3. 备用尝试 Cloudflare WARP SOCKS5 代理
+
+		// Fallback to WARP
 		if warpURL, err := EnsureWarpReady(host, port); err == nil && warpURL != "" {
 			return warpURL, -2
 		}

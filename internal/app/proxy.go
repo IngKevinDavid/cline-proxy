@@ -575,18 +575,7 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 				return
 			}
 		}
-		if fResp, _, fErr := callFallbackProvider(r.Context(), params, isStream); fErr == nil {
-			defer fResp.Body.Close()
-			tracker.rec.Status = fResp.StatusCode
-			if isStream {
-				handleStreamResponseWithUsage(w, fResp, usageFn, zm.ID)
-			} else {
-				stops := stopSequencesFrom(params)
-				handleNonStreamResponseWithUsage(w, fResp, usageFn, stops)
-			}
-			tracker.finish(true, fResp.StatusCode)
-			return
-		}
+
 		log.Printf("  zen api error: %v", err)
 		tracker.rec.RateLimited = rateLimited
 		writeJSON(w, http.StatusBadGateway, map[string]any{

@@ -109,13 +109,13 @@ func zenProjectID() string {
 	zenProjectMu.Lock()
 	defer zenProjectMu.Unlock()
 	if zenProjID == "" {
-		zenProjID = kit.RandHex(20)
+		zenProjID = kit.RandHex(40)
 	}
 	return zenProjID
 }
 
 const (
-	zenAPIBase             = "https://opencode.ai/inference/v1"
+	zenAPIBase             = "https://opencode.ai/zen/v1"
 	defaultOpenCodeVersion = "2.0.29"
 )
 
@@ -573,7 +573,7 @@ func loadZenConfig() *zenConfigData {
 		}
 	}
 	normalizeZenKeys(cfg)
-	if cfg.BaseURL == "" || cfg.BaseURL == "https://opencode.ai/inference/openai/v1" || cfg.BaseURL == "https://opencode.ai/zen/v1" {
+	if cfg.BaseURL == "" || cfg.BaseURL == "https://opencode.ai/inference/openai/v1" || cfg.BaseURL == "https://opencode.ai/inference/v1" {
 		cfg.BaseURL = zenAPIBase
 	}
 	return cfg
@@ -1036,8 +1036,10 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 			body[key] = val
 		}
 	}
-	if stream {
-		body["stream"] = true
+	// Free tier models must always stream upstream (the proxy folds back if client asked for JSON)
+	body["stream"] = true
+	if _, ok := body["stream_options"]; !ok {
+		body["stream_options"] = map[string]any{"include_usage": true}
 	}
 	if model, ok := params["model"].(string); ok {
 		if m, ok := resolveZenModel(model); ok {
@@ -1811,7 +1813,7 @@ func responsesSSEToChat(resp *http.Response) (map[string]any, error) {
 				}
 			}
 		}
-		if !sawData && !strings.HasPrefix(line, "data:") && rawHead.Len() < 8192 {
+		if !sawData && !strings.HasPrefix(line, "data:") && rawHead.Len() < 32000 {
 			rawHead.WriteString(line)
 			rawHead.WriteString("\n")
 		}
@@ -2002,6 +2004,11 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 			key = retryKey
 		}
 
+		if isZenFreeModel(zm) && (key == "" || zenKeyCooling(key)) {
+			key = "public"
+			retryKey = "public"
+		}
+
 		token, orgID, isConsole := resolveZenKeyIdentity(key)
 
 		sess := CanonicalSessionID()
@@ -2096,11 +2103,12 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				// WARP IP was rate-limited; rotate tunnel connection
 				_ = RotateWarp()
 			}
-			if pidx == -3 {
-				// Tor circuit was rate-limited; rotate circuit
+			if pidx == -3 || useFailoverProxy {
+				// Tor circuit was rate-limited or switching to Tor; rotate circuit
 				_ = RotateTor(9053)
 			}
 			useFailoverProxy = true
+
 			// 原样记录上游的 Retry-After（HTTP 日期还是秒数、值是多少）：
 			// 冷却时长完全由它决定，而面板只能看到换算后的截止时刻。没有这行，
 			// "这个 key 为什么冷却这么久"只能靠猜（实测 FreeUsageLimitError
@@ -2122,15 +2130,24 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				log.Printf("  zen responses rate limited (%d), switching to next zen key (%d configured)", resp.StatusCode, len(cfg.Keys))
 				continue
 			}
+			if key != "public" && (strings.Contains(apiErr.Body, "FreeUsageLimitError") || isZenFreeModel(zm)) {
+				log.Printf("  zen responses rate limit: switching from key#%d to anonymous public tier", keyIndex(key))
+				key = "public"
+				retryKey = "public"
+				continue
+			}
 			if attempt < retries {
-				wait := delay
-				if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > wait {
-					wait = retryAfter
+				wait := 1 * time.Second
+				if !useFailoverProxy && pidx >= 0 {
+					wait = delay
+					if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > wait {
+						wait = retryAfter
+					}
+					if wait > 30*time.Second {
+						wait = 30 * time.Second
+					}
 				}
-				if wait > 30*time.Second {
-					wait = 30 * time.Second
-				}
-				log.Printf("  zen responses rate limited (%d), retry %d/%d after %v", resp.StatusCode, attempt+1, retries, wait)
+				log.Printf("  zen responses rate limited (%d), rotating IP and retrying %d/%d after %v", resp.StatusCode, attempt+1, retries, wait)
 				if !sleepCtx(ctx, kit.WithRetryJitter(wait)) {
 					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
 				}
@@ -2253,6 +2270,12 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 			key = pickZenKey()
 		}
 
+		modelStr, _ := params["model"].(string)
+		zm, _ := resolveZenModel(modelStr)
+		if zm != nil && isZenFreeModel(zm) && (key == "" || zenKeyCooling(key)) {
+			key = "public"
+		}
+
 		token, orgID, isConsole := resolveZenKeyIdentity(key)
 
 		sess := CanonicalSessionID()
@@ -2332,11 +2355,12 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 				// WARP IP was rate-limited; rotate tunnel connection
 				_ = RotateWarp()
 			}
-			if pidx == -3 {
-				// Tor circuit was rate-limited; rotate circuit
+			if pidx == -3 || useFailoverProxy {
+				// Tor circuit was rate-limited or switching to Tor; rotate circuit
 				_ = RotateTor(9053)
 			}
 			useFailoverProxy = true
+
 			// 冷却当前 key；若还有其他未冷却 key 则立即切换重试（不睡眠）。
 			// Retry-After 原样入日志（同 responses 路径）。
 			rawRetry := resp.Header.Get("Retry-After")
@@ -2349,18 +2373,26 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 			}
 			if next := pickZenKey(); next != "" && next != key && !zenKeyCooling(next) {
 				log.Printf("  zen rate limited (%d), switching to next zen key (%d configured)", resp.StatusCode, len(cfg.Keys))
+				key = next
+				continue
+			}
+			if key != "public" && (strings.Contains(apiErr.Body, "FreeUsageLimitError") || (zm != nil && isZenFreeModel(zm))) {
+				log.Printf("  zen rate limited: switching from key#%d to anonymous public tier", keyIndex(key))
+				key = "public"
 				continue
 			}
 			if attempt < retries {
-				// Retry-After 封顶 30s：更长的等待没有意义（槽位被占、客户端早已离开）
-				wait := delay
-				if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > wait {
-					wait = retryAfter
+				wait := 1 * time.Second
+				if !useFailoverProxy && pidx >= 0 {
+					wait = delay
+					if retryAfter := parseRetryAfter(resp.Header.Get("Retry-After")); retryAfter > wait {
+						wait = retryAfter
+					}
+					if wait > 30*time.Second {
+						wait = 30 * time.Second
+					}
 				}
-				if wait > 30*time.Second {
-					wait = 30 * time.Second
-				}
-				log.Printf("  zen rate limited (%d), retry %d/%d after %v", resp.StatusCode, attempt+1, retries, wait)
+				log.Printf("  zen rate limited (%d), rotating IP and retrying %d/%d after %v", resp.StatusCode, attempt+1, retries, wait)
 				if !sleepCtx(ctx, kit.WithRetryJitter(wait)) {
 					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
 				}

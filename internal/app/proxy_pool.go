@@ -156,20 +156,20 @@ func pickProxyOrFailover(preferFailover bool) (string, int) {
 				port = cfg.WarpSocksPort
 			}
 		}
-		// 1. 优先尝试 Cloudflare WARP SOCKS5 代理
-		if warpURL, err := EnsureWarpReady(host, port); err == nil && warpURL != "" {
-			return warpURL, -2
-		}
-		// 2. 备用尝试内置 Tor SOCKS5 代理 (9052)
+		// 1. 优先尝试内置 Tor SOCKS5 代理 (9052 / 9053) — 具备主动 IP 轮转 (SIGNAL NEWNYM) 能力，秒级自愈 429
 		if torURL, err := EnsureTorReady(9052, 9053); err == nil && torURL != "" {
 			return torURL, -3
 		}
-		// 3. 检查外部已在运行的 SOCKS5 端口 (19050, 9050)
+		// 2. 检查外部已在运行的 Tor SOCKS5 端口 (19050, 9050)
 		for _, torPort := range []int{19050, 9050} {
 			addr := fmt.Sprintf("127.0.0.1:%d", torPort)
 			if ProbeSocks5(addr, 500*time.Millisecond) {
 				return fmt.Sprintf("socks5://%s", addr), -3
 			}
+		}
+		// 3. 备用尝试 Cloudflare WARP SOCKS5 代理
+		if warpURL, err := EnsureWarpReady(host, port); err == nil && warpURL != "" {
+			return warpURL, -2
 		}
 	}
 

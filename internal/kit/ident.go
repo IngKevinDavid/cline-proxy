@@ -85,19 +85,29 @@ func ocIDTimestamp() (uint64, uint64) {
 	return now, ocIDCounter
 }
 
+const (
+	zenSessionEpoch = uint64(0x1b000000046ffe)
+	zenSessionTick  = uint64(4096)
+	zenSessionMask  = uint64(0xffffffffffff)
+)
+
 // NewOCShapeID generates a 26-character ID conforming to OpenCode's gate
 // (packages/schema/src/identifier.ts): the first 12 lowercase hex characters
-// represent the 48-bit timestamp + counter, inverted (bitwise NOT) for descending
-// (used for ses_ session IDs) and standard for ascending (used for msg_ request IDs).
+// represent the 48-bit timestamp.
+// For descending IDs (ses_ session IDs), it implements OpenCode's official
+// formula: (zenSessionEpoch - now_ms * 4096) mod 2^48.
+// For ascending IDs (msg_ request IDs), it uses standard ascending millisecond timestamp.
 // The remaining 14 characters are random base62 characters.
 func NewOCShapeID(descending bool) string {
 	const hexChars = "0123456789abcdef"
 	const alnumChars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	ts, counter := ocIDTimestamp()
-	current := ts*0x1000 + counter
-	value := current
+	nowMs := uint64(time.Now().UnixMilli())
+	var value uint64
 	if descending {
-		value = ^current
+		value = (zenSessionEpoch - nowMs*zenSessionTick) & zenSessionMask
+	} else {
+		ts, counter := ocIDTimestamp()
+		value = (ts*0x1000 + counter) & zenSessionMask
 	}
 	var b [26]byte
 	for i := 0; i < 6; i++ {
@@ -108,7 +118,7 @@ func NewOCShapeID(descending bool) string {
 	var rnd [14]byte
 	if _, err := rand.Read(rnd[:]); err != nil {
 		for i := range rnd {
-			rnd[i] = alnumChars[(counter+uint64(i)*31)%uint64(len(alnumChars))]
+			rnd[i] = alnumChars[uint64(i*31)%uint64(len(alnumChars))]
 		}
 	} else {
 		for i := range rnd {

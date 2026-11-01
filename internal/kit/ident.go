@@ -2,7 +2,9 @@ package kit
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 	"sync"
 	"time"
 )
@@ -85,35 +87,69 @@ func ocIDTimestamp() (uint64, uint64) {
 	return now, ocIDCounter
 }
 
-const (
-	zenSessionEpoch = uint64(0x1b000000046ffe)
-	zenSessionTick  = uint64(4096)
-	zenSessionMask  = uint64(0xffffffffffff)
+var (
+	canonicalSessionPattern   = regexp.MustCompile(`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`)
+	descendingTimePartPattern = regexp.MustCompile(`^[0-9a-f]{9}f[c-f][0-9a-f]$`)
 )
+
+const sessionTimestampWindow = 30 * 24 * time.Hour
+
+var bootNonce = mintBootNonce()
+
+func mintBootNonce() []byte {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		for i := range buf {
+			buf[i] = byte(i * 37)
+		}
+	}
+	return buf
+}
+
+// descendingTimePart renders a plausible recent timestamp in the official
+// client's Identifier.descending() layout: a 36-bit timestamp shifted into the
+// top of a 48-bit word, ORed with counter 1, then bitwise-NOT-ed so the low 12
+// hex digits read ffe. The hash only picks the offset within
+// sessionTimestampWindow; it never supplies the date itself.
+func descendingTimePart(now time.Time, hash []byte) string {
+	window := uint64(sessionTimestampWindow / time.Millisecond)
+	offset := (uint64(hash[0])<<24 | uint64(hash[1])<<16 | uint64(hash[2])<<8 | uint64(hash[3])) % window
+	base := now.UTC().Truncate(24 * time.Hour).Add(-time.Duration(offset) * time.Millisecond)
+	current := uint64(base.UnixMilli())<<12 | 1
+	inverted := ^current & 0xFFFFFFFFFFFF
+	return hex.EncodeToString([]byte{
+		byte(inverted >> 40), byte(inverted >> 32), byte(inverted >> 24),
+		byte(inverted >> 16), byte(inverted >> 8), byte(inverted),
+	})
+}
+
+// IsOfficialSessionID reports whether signal is a session minted by the
+// official client's Identifier.descending().
+func IsOfficialSessionID(signal string) bool {
+	return canonicalSessionPattern.MatchString(signal) && descendingTimePartPattern.MatchString(signal[4:16])
+}
 
 // NewOCShapeID generates a 26-character ID conforming to OpenCode's gate
 // (packages/schema/src/identifier.ts): the first 12 lowercase hex characters
 // represent the 48-bit timestamp.
-// For descending IDs (ses_ session IDs), it implements OpenCode's official
-// formula: (zenSessionEpoch - now_ms * 4096) mod 2^48.
+// For descending IDs (ses_ session IDs), it uses descending inverted timestamp within recent window.
 // For ascending IDs (msg_ request IDs), it uses standard ascending millisecond timestamp.
 // The remaining 14 characters are random base62 characters.
 func NewOCShapeID(descending bool) string {
-	const hexChars = "0123456789abcdef"
 	const alnumChars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
-	nowMs := uint64(time.Now().UnixMilli())
-	var value uint64
+	var timePart string
 	if descending {
-		value = (zenSessionEpoch - nowMs*zenSessionTick) & zenSessionMask
+		var randBytes [4]byte
+		mustRand(randBytes[:])
+		timePart = descendingTimePart(time.Now(), randBytes[:])
 	} else {
 		ts, counter := ocIDTimestamp()
-		value = (ts*0x1000 + counter) & zenSessionMask
-	}
-	var b [26]byte
-	for i := 0; i < 6; i++ {
-		byteVal := byte(value >> (40 - 8*i))
-		b[i*2] = hexChars[byteVal>>4]
-		b[i*2+1] = hexChars[byteVal&0xf]
+		value := (ts*0x1000 + counter) & 0xffffffffffff
+		var tb [6]byte
+		for i := 0; i < 6; i++ {
+			tb[i] = byte(value >> (40 - 8*i))
+		}
+		timePart = hex.EncodeToString(tb[:])
 	}
 	var rnd [14]byte
 	if _, err := rand.Read(rnd[:]); err != nil {
@@ -122,17 +158,40 @@ func NewOCShapeID(descending bool) string {
 		}
 	} else {
 		for i := range rnd {
-			rnd[i] = alnumChars[rnd[i]%byte(len(alnumChars))]
+			rnd[i] = alnumChars[(rnd[i]^bootNonce[i%len(bootNonce)])%byte(len(alnumChars))]
 		}
 	}
-	copy(b[12:], rnd[:])
-	return string(b[:])
+	return timePart + string(rnd[:])
 }
 
 // CanonicalSessionID generates a session ID conforming to OpenCode's regex:
 // ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$ with descending inverted timestamp.
 func CanonicalSessionID() string {
 	return "ses_" + NewOCShapeID(true)
+}
+
+// CanonicalSessionIDFor preserves official sessions, or mints a deterministic
+// session ID salted with bootNonce for a downstream conversation signal.
+func CanonicalSessionIDFor(signal string) string {
+	if IsOfficialSessionID(signal) {
+		return signal
+	}
+	if signal == "" {
+		return CanonicalSessionID()
+	}
+	hasher := sha256.New()
+	hasher.Write([]byte("ses\x00"))
+	hasher.Write(bootNonce)
+	hasher.Write([]byte{0})
+	hasher.Write([]byte(signal))
+	sum := hasher.Sum(nil)
+	timePart := descendingTimePart(time.Now(), sum[:6])
+	const alnumChars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+	var rnd [14]byte
+	for i := 0; i < 14; i++ {
+		rnd[i] = alnumChars[sum[6+i]%byte(len(alnumChars))]
+	}
+	return "ses_" + timePart + string(rnd[:])
 }
 
 // CanonicalRequestID generates a request ID conforming to OpenCode's format:

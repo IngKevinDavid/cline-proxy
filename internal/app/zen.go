@@ -101,21 +101,20 @@ var (
 	zenModels   = make(map[string]*ZenModel) // 主表:ID
 	zenAliases  = make(map[string]*ZenModel) // 别名表
 
-	zenProjectMu sync.Mutex
-	zenProjID    string
 )
 
 func zenProjectID() string {
-	zenProjectMu.Lock()
-	defer zenProjectMu.Unlock()
-	if zenProjID == "" {
-		zenProjID = kit.RandHex(40)
-	}
-	return zenProjID
+	return kit.RandHex(40)
+}
+
+func isAnonZenKey(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	return k == "" || k == "public" || strings.HasPrefix(k, "public#")
 }
 
 const (
 	zenAPIBase             = "https://opencode.ai/zen/v1"
+	zenV2InferenceBase     = "https://opencode.ai/inference/openai/v1"
 	defaultOpenCodeVersion = "2.0.29"
 )
 
@@ -910,7 +909,8 @@ func uncoolZenKey(key string) {
 // 与 ZEN_PIN_KEY 环境变量的区别：那是进程级排障开关，会影响所有并发请求；
 // pinKey 只作用于这一次调用（管理面板的 per-key "Test" 按钮），绝不影响正常轮转。
 type zenCallOpts struct {
-	pinKey string
+	pinKey   string
+	pinProxy string
 }
 
 // zenKeyStatus 每个 key 的运行时状态（管理面板展示用，key 值打码）。
@@ -975,17 +975,7 @@ func pinnedZenKey() string {
 
 // ============ zen 上游调用 ============
 
-//go:embed opencode_tools.json
-var opencodeToolsJSON []byte
-
-type opencodeToolDef struct {
-	Description string         `json:"description"`
-	Parameters  map[string]any `json:"parameters"`
-}
-
 var (
-	opencodeToolsOnce sync.Once
-	opencodeToolsMap  map[string]opencodeToolDef
 	opencodeCoreTools = []string{"shell", "edit", "glob", "grep", "read"}
 	zenGateToolSpecs  = []struct{ name, desc string }{
 		{"shell", "Run commands in the terminal"},
@@ -995,17 +985,6 @@ var (
 		{"read", "Read a file"},
 	}
 )
-
-func getOpencodeTools() map[string]opencodeToolDef {
-	opencodeToolsOnce.Do(func() {
-		m := make(map[string]opencodeToolDef)
-		if len(opencodeToolsJSON) > 0 {
-			_ = json.Unmarshal(opencodeToolsJSON, &m)
-		}
-		opencodeToolsMap = m
-	})
-	return opencodeToolsMap
-}
 
 // zenGateTools chat 端点形态：tools[].{type,function:{name,description,parameters}}。
 // 使用官方客户端提取的真实 schema，防止 FreeTier 校验 403。
@@ -1340,20 +1319,21 @@ func zenMergeTools(clientTools []any, gateTools []any) []any {
 		merged = append(merged, tm)
 	}
 
-	// 仅当客户端工具未包含 'read' 时补充最小 read stub 满足 edge gate 校验
-	if !provided["read"] {
-		readParams := zenEmptySchema()
-		if def, ok := toolsDef["read"]; ok && def.Parameters != nil {
-			readParams = def.Parameters
+	for _, gt := range gateTools {
+		tm, ok := gt.(map[string]any)
+		if !ok {
+			continue
 		}
-		merged = append(merged, map[string]any{
-			"type": "function",
-			"function": map[string]any{
-				"name":        "read",
-				"description": "Read file contents",
-				"parameters":  readParams,
-			},
-		})
+		fn, _ := tm["function"].(map[string]any)
+		if fn == nil {
+			continue
+		}
+		n, _ := fn["name"].(string)
+		if n == "" || provided[n] {
+			continue
+		}
+		provided[n] = true
+		merged = append(merged, tm)
 	}
 	return merged
 }
@@ -1522,9 +1502,8 @@ func buildZenResponsesBody(params map[string]any, modelID string, promptKey stri
 	// FreeTier gate（2026-09-18 实测解码）：/v1/responses 端点同样校验请求体
 	// 是否携带 opencode 工具集，缺失则 403；且必须 flat 形态 + tool_choice=auto
 	//（chat 嵌套形态 400 missing name、tool_choice=none 400 only auto allowed）。
-	// 恒注入 11 个规范工具名 + auto——auto 是 responses 端点唯一接受的值。
-	// 客户端工具（chat 嵌套或已是 flat）优先于同名 gate stub，schema 才不丢。
-	body["tools"] = zenMergeResponsesTools(zenClientFlatTools(params))
+	// Apply 13-tool completion and client tool obfuscation for responses
+	ShapeZenResponsesRequest(body)
 	body["tool_choice"] = "auto"
 	return body
 }
@@ -2082,6 +2061,9 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		return nil, 0, fmt.Errorf("model %q is not a known zen model", model)
 	}
 	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/responses"
+	if isAnonZenKey(cfg.Key) && (cfg.BaseURL == "" || cfg.BaseURL == zenAPIBase) {
+		endpoint = zenV2InferenceBase + "/responses"
+	}
 	isOfficialZen := cfg.BaseURL == "" || strings.Contains(cfg.BaseURL, "opencode.ai")
 
 	zenStateMu.Lock()
@@ -2106,6 +2088,15 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 
 	for attempt := 0; ; attempt++ {
 		proxyURL, pidx := pickProxyOrFailoverWithPreference(useFailoverProxy, lastPidx)
+		if o.pinProxy != "" {
+			if o.pinProxy == "direct" {
+				proxyURL = ""
+				pidx = -1
+			} else {
+				proxyURL = o.pinProxy
+				pidx = -1
+			}
+		}
 		lastPidx = pidx
 		viaProxy := "direct"
 		if proxyURL != "" {
@@ -2141,11 +2132,18 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		sess := CanonicalSessionID()
 		ua := zenCLIUserAgent()
 		body := buildZenResponsesBody(params, zm.ID, sess)
+		if isAnonZenKey(key) {
+			ShapeZenResponsesRequest(body)
+		}
 		bodyJSON, err := json.Marshal(body)
 		if err != nil {
 			return nil, rateLimited, fmt.Errorf("marshal zen responses body: %w", err)
 		}
-		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(bodyJSON))
+		reqEndpoint := endpoint
+		if isAnonZenKey(key) && (cfg.BaseURL == "" || cfg.BaseURL == zenAPIBase) {
+			reqEndpoint = zenV2InferenceBase + "/responses"
+		}
+		req, err := http.NewRequestWithContext(ctx, "POST", reqEndpoint, bytes.NewReader(bodyJSON))
 		if err != nil {
 			return nil, rateLimited, fmt.Errorf("create zen responses request: %w", err)
 		}
@@ -2341,6 +2339,9 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 	isOfficialZen := cfg.BaseURL == "" || strings.Contains(cfg.BaseURL, "opencode.ai")
 
 	body := buildZenBody(params, stream)
+	if isAnonZenKey(cfg.Key) {
+		ShapeZenChatRequest(body)
+	}
 
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
@@ -2348,6 +2349,9 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 	}
 
 	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
+	if isAnonZenKey(cfg.Key) && (cfg.BaseURL == "" || cfg.BaseURL == zenAPIBase) {
+		endpoint = zenV2InferenceBase + "/chat/completions"
+	}
 
 	// 先取信号量再等待：不能在持有 zenStateMu 时阻塞在 channel 上，
 	// 否则并发打满时（in-flight 调用要拿 zenStateMu 记成功/失败才能释放槽位）
@@ -2373,14 +2377,19 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 
 	for attempt := 0; ; attempt++ {
 		proxyURL, pidx := pickProxyOrFailoverWithPreference(useFailoverProxy, lastPidx)
+		if o.pinProxy != "" {
+			if o.pinProxy == "direct" {
+				proxyURL = ""
+				pidx = -1
+			} else {
+				proxyURL = o.pinProxy
+				pidx = -1
+			}
+		}
 		lastPidx = pidx
 		viaProxy := "direct"
 		if proxyURL != "" {
 			viaProxy = maskProxyURL(proxyURL)
-		}
-		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(bodyJSON))
-		if err != nil {
-			return nil, rateLimited, fmt.Errorf("create zen request: %w", err)
 		}
 		// 客户端身份：会话粘性——同一 key 复用稳定的 sess_/UA（服务端
 		// 会话绑定要求，随机 sess_ 会 403），msg_ 请求 ID 每次随机。
@@ -2406,6 +2415,15 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 
 		sess := CanonicalSessionID()
 		ua := zenCLIUserAgent()
+
+		reqEndpoint := endpoint
+		if isAnonZenKey(key) && (cfg.BaseURL == "" || cfg.BaseURL == zenAPIBase) {
+			reqEndpoint = zenV2InferenceBase + "/chat/completions"
+		}
+		req, err := http.NewRequestWithContext(ctx, "POST", reqEndpoint, bytes.NewReader(bodyJSON))
+		if err != nil {
+			return nil, rateLimited, fmt.Errorf("create zen request: %w", err)
+		}
 
 		auth := "Bearer public"
 		if token != "" {

@@ -171,14 +171,19 @@ func pickProxyOrFailoverWithPreference(preferFailover bool, lastPidx int) (strin
 			}
 		}
 
-		// If last egress was Tor (-3), alternate to WARP (-2)
-		if lastPidx == -3 {
-			if warpURL, err := EnsureWarpReady(host, port); err == nil && warpURL != "" {
-				return warpURL, -2
+		// If last egress was WARP (-2), alternate to Tor (-3)
+		if lastPidx == -2 {
+			if torURL, err := EnsureTorReady(9052, 9053); err == nil && torURL != "" {
+				return torURL, -3
 			}
 		}
 
-		// Try Tor SOCKS5 (9052 / 9053)
+		// Prefer WARP first (low latency, clean anycast egress)
+		if warpURL, err := EnsureWarpReady(host, port); err == nil && warpURL != "" {
+			return warpURL, -2
+		}
+
+		// Fallback to Tor SOCKS5 (9052 / 9053)
 		if torURL, err := EnsureTorReady(9052, 9053); err == nil && torURL != "" {
 			return torURL, -3
 		}
@@ -187,11 +192,6 @@ func pickProxyOrFailoverWithPreference(preferFailover bool, lastPidx int) (strin
 			if ProbeSocks5(addr, 500*time.Millisecond) {
 				return fmt.Sprintf("socks5://%s", addr), -3
 			}
-		}
-
-		// Fallback to WARP
-		if warpURL, err := EnsureWarpReady(host, port); err == nil && warpURL != "" {
-			return warpURL, -2
 		}
 	}
 

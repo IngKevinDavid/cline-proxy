@@ -1593,7 +1593,7 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 					}
 					if fn, ok := tcMap["function"].(map[string]any); ok {
 						if n, ok := fn["name"].(string); ok && n != "" {
-							acc.call["function"].(map[string]any)["name"] = n
+							acc.call["function"].(map[string]any)["name"] = GlobalRestoreToolName(n)
 						}
 						// cline 上游在工具调用的起始分片发送 "arguments":""（空字符串）。
 						// 空串必须整体跳过：若走对象分支会把空串序列化成字面量 ""
@@ -3148,6 +3148,9 @@ func normalizeOpenAIResponse(obj map[string]any) map[string]any {
 						for _, t := range tc {
 							if tm, ok := t.(map[string]any); ok {
 								if fn, ok := tm["function"].(map[string]any); ok {
+									if n, ok := fn["name"].(string); ok && n != "" {
+										fn["name"] = GlobalRestoreToolName(n)
+									}
 									if fn["name"] == "codemode" {
 										if a, ok := fn["arguments"].(string); ok && a != "" {
 											fn["arguments"] = repairCodemodeArguments(a)
@@ -3199,6 +3202,10 @@ func normalizeMessage(msg map[string]any) map[string]any {
 			if tm, ok := t.(map[string]any); ok {
 				if fn, ok := tm["function"].(map[string]any); ok {
 					name, _ := fn["name"].(string)
+					if name != "" {
+						name = GlobalRestoreToolName(name)
+						fn["name"] = name
+					}
 					if a, ok := fn["arguments"].(string); ok {
 						if name == "codemode" {
 							a = repairCodemodeArguments(a)

@@ -615,6 +615,71 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 <div id="tab-opencode" class="tab-panel" style="display:none">
 <h2>opencode free models (unified gateway)</h2>
 
+<!-- Egress Network Quick Status & Manual Rotation -->
+<div class="cards" style="margin-bottom:18px">
+  <div class="card">
+    <div class="num blue" id="ocTorStatusBadge" style="font-size:20px">Tor Ready</div>
+    <div class="label" id="ocTorIpLabel">IP: Loading...</div>
+    <div style="margin-top:10px"><button class="btn btn-sm" id="btnOcRotateTor" onclick="rotateTorManual()">Rotate Tor Circuit</button></div>
+  </div>
+  <div class="card">
+    <div class="num green" id="ocWarpStatusBadge" style="font-size:20px">WARP Connected</div>
+    <div class="label" id="ocWarpIpLabel">IP: Loading...</div>
+    <div style="margin-top:10px"><button class="btn btn-sm" id="btnOcRotateWarp" onclick="rotateWarpManual()">Rotate WARP Tunnel</button></div>
+  </div>
+  <div class="card">
+    <div class="num purple" style="font-size:20px">Tor ↔ WARP</div>
+    <div class="label">Alternating IP Rotation on 429</div>
+    <div style="margin-top:10px;font-size:12px;color:var(--text2)">Strict OpenCode Mode</div>
+  </div>
+</div>
+
+<!-- OpenCode Diagnostic Playground & Probe -->
+<div class="section">
+  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg></span> Diagnostic Playground & Probe (OpenCode v2 Inference)</div>
+  <div class="section-body">
+    <div class="form-row">
+      <div class="field" style="flex:2">
+        <label>Model</label>
+        <select id="ocPlayModel"></select>
+      </div>
+      <div class="field">
+        <label>Protocol</label>
+        <select id="ocPlayProto">
+          <option value="chat">Chat (/v1/chat/completions)</option>
+          <option value="responses">Responses (/v1/responses)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Egress Tunnel</label>
+        <select id="ocPlayEgress">
+          <option value="auto">Auto (Tor ↔ WARP Failover)</option>
+          <option value="tor">Tor SOCKS5 (:9052)</option>
+          <option value="warp">Cloudflare WARP (:40000)</option>
+          <option value="direct">Direct</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="field" style="flex:1">
+        <label>Prompt</label>
+        <input type="text" id="ocPlayPrompt" value="Say hello in one short sentence." placeholder="Enter test prompt...">
+      </div>
+      <div class="field" style="flex:0 0 auto;align-self:flex-end">
+        <button class="btn btn-primary" id="btnRunPlayProbe" onclick="runPlaygroundProbe()">Send Test Probe</button>
+      </div>
+    </div>
+    <div id="ocPlayResultBox" style="margin-top:14px;display:none">
+      <div class="flex" style="gap:10px;margin-bottom:8px;align-items:center;flex-wrap:wrap">
+        <span id="ocPlayStatusBadge" class="probe-pill" style="font-size:12px;font-weight:600"></span>
+        <span id="ocPlayLatency" class="stat-mini" style="font-size:12px"></span>
+        <span id="ocPlayEgressUsed" class="stat-mini" style="font-size:12px"></span>
+      </div>
+      <pre id="ocPlayOutput" class="mono" style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;max-height:220px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-size:12px;line-height:1.5"></pre>
+    </div>
+  </div>
+</div>
+
 <div class="section">
   <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14.5 14.5 0 0 1 0 18 14.5 14.5 0 0 1 0-18z"/></svg></span> Upstream config</div>
   <div class="section-body">
@@ -709,8 +774,9 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 </div>
 
 <div class="section">
-  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg></span> opencode model list
-    <button class="btn btn-sm" onclick="refreshOcModels()" style="margin-left:auto">Sync now</button>
+  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg></span> Model Quotas & Availability
+    <input type="text" id="ocModelSearch" oninput="filterOcModels()" placeholder="Search models..." style="max-width:200px;margin-left:auto;padding:3px 8px;font-size:12px;border-radius:4px;border:1px solid var(--border);background:var(--bg2);color:var(--text)">
+    <button class="btn btn-sm" onclick="refreshOcModels()" style="margin-left:8px">Sync now</button>
   </div>
   <div class="section-body" style="padding:6px">
     <div id="ocModelsList" style="padding:12px">Loading...</div>
@@ -1605,22 +1671,110 @@ async function saveClineProxies() {
   } catch (e) { toast('Save failed: ' + e.message, 'error'); }
 }
 
+let cachedOcModels = [];
+
+function renderOcModelsTable(models) {
+  _('ocModelsList').innerHTML = '<div class="table-wrap"><table><thead><tr><th style="text-align:left">Model ID</th><th>Context</th><th>Output</th><th>Tools</th><th>Reason</th><th>Attach</th><th>Endpoint</th><th>Source</th><th style="width:70px">Action</th></tr></thead><tbody>' +
+    models.map(m => '<tr><td style="text-align:left;font-family:monospace;font-weight:600">' + esc(m.id) + '</td><td>' + esc(m.context) + '</td><td>' + esc(m.output) + '</td><td>' + (m.toolCall ? '✓' : '-') + '</td><td>' + (m.reasoning ? '✓' : '-') + '</td><td>' + (m.attach ? '✓' : '-') + '</td><td style="font-family:monospace;font-size:11px">' + esc(m.upstream === 'responses' ? 'responses' : 'chat') + '</td><td>' + esc(m.source) + '</td><td><button class="btn btn-sm btn-ghost" onclick="probeSpecificModel(\'' + esc(m.id) + '\', \'' + esc(m.upstream) + '\')">Probe</button></td></tr>').join('') +
+    '</tbody></table></div><div class="hint">' + models.length + ' free models listed (auto-synced from public registry)</div>';
+}
+
+function filterOcModels() {
+  const q = (_('ocModelSearch') ? _('ocModelSearch').value : '').trim().toLowerCase();
+  if (!q) {
+    renderOcModelsTable(cachedOcModels);
+    return;
+  }
+  const filtered = cachedOcModels.filter(m => (m.id || '').toLowerCase().includes(q) || (m.upstream || '').toLowerCase().includes(q));
+  renderOcModelsTable(filtered);
+}
+
 async function loadOcModels() {
   try {
     const d = await api('GET', '/opencode/models');
-    const models = d.data.models || [];
-    _('ocModelsList').innerHTML = '<div class="table-wrap"><table><thead><tr><th style="text-align:left">Model ID</th><th>Context</th><th>Output</th><th>Tools</th><th>Reason</th><th>Attach</th><th>Endpoint</th><th>Source</th></tr></thead><tbody>' +
-      models.map(m => '<tr><td style="text-align:left;font-family:monospace">' + esc(m.id) + '</td><td>' + esc(m.context) + '</td><td>' + esc(m.output) + '</td><td>' + (m.toolCall ? '✓' : '-') + '</td><td>' + (m.reasoning ? '✓' : '-') + '</td><td>' + (m.attach ? '✓' : '-') + '</td><td style="font-family:monospace;font-size:11px">' + esc(m.upstream === 'responses' ? 'responses' : 'chat') + '</td><td>' + esc(m.source) + '</td></tr>').join('') +
-      '</tbody></table></div><div class="hint">' + models.length + ' free models total (auto-synced every 10 minutes from public registry)</div>';
-    // 探测模型下拉：与模型表同一份数据；重渲染时保留用户当前的选择。
+    cachedOcModels = d.data.models || [];
+    filterOcModels();
+    
+    // Populate probe model selects
     const sel = _('ocProbeModel');
     if (sel) {
       const prev = sel.value;
       sel.innerHTML = '<option value="">auto — big-pickle first, then live models</option>' +
-        models.map(m => '<option value="' + esc(m.id) + '">' + esc(m.id) + (m.source === 'live' ? '' : ' (seed)') + '</option>').join('');
+        cachedOcModels.map(m => '<option value="' + esc(m.id) + '">' + esc(m.id) + (m.source === 'live' ? '' : ' (seed)') + '</option>').join('');
       if (Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
     }
+    const playSel = _('ocPlayModel');
+    if (playSel) {
+      const prev = playSel.value || 'deepseek-v4.1-flash-free';
+      playSel.innerHTML = cachedOcModels.map(m => '<option value="' + esc(m.id) + '">' + esc(m.id) + (m.upstream === 'responses' ? ' [responses]' : ' [chat]') + '</option>').join('');
+      if (Array.from(playSel.options).some(o => o.value === prev)) playSel.value = prev;
+    }
+    
+    // Also refresh egress indicators
+    if (typeof loadEgressStatus === 'function') {
+      api('GET', '/egress/status').then(res => {
+        const eg = res.data || {};
+        if (_('ocTorIpLabel')) _('ocTorIpLabel').textContent = 'IP: ' + ((eg.tor && eg.tor.currentIp) ? eg.tor.currentIp : ((eg.tor && eg.tor.active) ? 'Active' : 'Offline'));
+        if (_('ocWarpIpLabel')) _('ocWarpIpLabel').textContent = 'IP: ' + ((eg.warp && eg.warp.currentIp) ? eg.warp.currentIp : ((eg.warp && eg.warp.active) ? 'Connected' : 'Offline'));
+      }).catch(() => {});
+    }
   } catch (e) { _('ocModelsList').textContent = 'Failed to load'; }
+}
+
+async function runPlaygroundProbe() {
+  const btn = _('btnRunPlayProbe');
+  const model = _('ocPlayModel') ? _('ocPlayModel').value : 'deepseek-v4.1-flash-free';
+  const proto = _('ocPlayProto') ? _('ocPlayProto').value : 'chat';
+  const egress = _('ocPlayEgress') ? _('ocPlayEgress').value : 'auto';
+  const prompt = (_('ocPlayPrompt') && _('ocPlayPrompt').value.trim()) ? _('ocPlayPrompt').value.trim() : 'Say hello in one short sentence.';
+  
+  if (btn) { btn.disabled = true; btn.textContent = 'Probing...'; }
+  _('ocPlayResultBox').style.display = 'block';
+  _('ocPlayStatusBadge').textContent = 'Testing...';
+  _('ocPlayStatusBadge').className = 'probe-pill';
+  _('ocPlayStatusBadge').style.background = 'rgba(138,180,248,0.15)';
+  _('ocPlayStatusBadge').style.color = '#8ab4f8';
+  _('ocPlayLatency').textContent = '';
+  _('ocPlayEgressUsed').textContent = '';
+  _('ocPlayOutput').textContent = 'Sending request to OpenCode inference gate...';
+
+  try {
+    const res = await api('POST', '/opencode/probe', {
+      model: model,
+      prompt: prompt,
+      egress: egress,
+      protocol: proto
+    });
+    const d = res.data || {};
+    const ok = res.success && d.ok;
+    _('ocPlayStatusBadge').textContent = d.http_status ? ('HTTP ' + d.http_status + (ok ? ' OK' : '')) : (ok ? 'Success' : 'Failed');
+    _('ocPlayStatusBadge').style.background = ok ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)';
+    _('ocPlayStatusBadge').style.color = ok ? '#22c55e' : '#ef4444';
+    _('ocPlayLatency').textContent = (d.latency_ms || 0) + 'ms';
+    _('ocPlayEgressUsed').textContent = 'Via: ' + (d.egress || egress);
+    if (d.response) {
+      _('ocPlayOutput').textContent = d.response;
+    } else if (d.error) {
+      _('ocPlayOutput').textContent = 'Error: ' + d.error;
+    } else {
+      _('ocPlayOutput').textContent = JSON.stringify(d, null, 2);
+    }
+  } catch (e) {
+    _('ocPlayStatusBadge').textContent = 'Error';
+    _('ocPlayStatusBadge').style.background = 'rgba(239,68,68,0.15)';
+    _('ocPlayStatusBadge').style.color = '#ef4444';
+    _('ocPlayOutput').textContent = 'Probe request failed: ' + e.message;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Send Test Probe'; }
+  }
+}
+
+function probeSpecificModel(modelId, upstream) {
+  if (_('ocPlayModel')) _('ocPlayModel').value = modelId;
+  if (_('ocPlayProto')) _('ocPlayProto').value = (upstream === 'responses' ? 'responses' : 'chat');
+  const box = _('ocPlayModel');
+  if (box) box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  runPlaygroundProbe();
 }
 
 // ========== Live session IDs (zen FreeTier gate) ==========

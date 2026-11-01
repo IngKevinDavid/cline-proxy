@@ -448,3 +448,145 @@ func handleZenSessionsMint(w http.ResponseWriter, r *http.Request) {
 	}
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: msg, Data: state})
 }
+
+
+// POST /admin/api/zen/probe and /admin/api/opencode/probe
+// Runs a live diagnostic probe test for any OpenCode model and egress route.
+func handleZenProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		Model    string `json:"model"`
+		Prompt   string `json:"prompt"`
+		Egress   string `json:"egress"`   // "auto", "tor", "warp", "direct"
+		Protocol string `json:"protocol"` // "chat", "responses"
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON: " + err.Error()})
+		return
+	}
+	if strings.TrimSpace(req.Model) == "" {
+		req.Model = "deepseek-v4.1-flash-free"
+	}
+	if strings.TrimSpace(req.Prompt) == "" {
+		req.Prompt = "Say hello in one short sentence."
+	}
+	if strings.TrimSpace(req.Protocol) == "" {
+		req.Protocol = "chat"
+	}
+
+	zm, ok := resolveZenFreeModel(req.Model)
+	if !ok {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: fmt.Sprintf("model %q is not a known zen free model", req.Model)})
+		return
+	}
+
+	opts := zenCallOpts{}
+	switch strings.ToLower(strings.TrimSpace(req.Egress)) {
+	case "tor":
+		opts.pinProxy = "socks5://127.0.0.1:9052"
+	case "warp":
+		opts.pinProxy = "socks5://127.0.0.1:40000"
+	case "direct":
+		opts.pinProxy = "direct"
+	default:
+		// auto: prefer active WARP or Tor when available
+		if warpURL, err := EnsureWarpReady("127.0.0.1", 40000); err == nil && warpURL != "" {
+			opts.pinProxy = warpURL
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	params := map[string]any{
+		"model": zm.ID,
+		"messages": []any{
+			map[string]any{"role": "user", "content": req.Prompt},
+		},
+		"max_tokens": 128,
+	}
+
+	start := time.Now()
+	var (
+		resp    *http.Response
+		callErr error
+	)
+	if req.Protocol == "responses" || zm.Upstream == "responses" {
+		resp, _, callErr = callZenResponsesAPI(ctx, params, true, opts)
+	} else {
+		resp, _, callErr = callZenAPI(ctx, params, true, opts)
+	}
+	latency := time.Since(start).Milliseconds()
+
+	result := map[string]any{
+		"model":      zm.ID,
+		"protocol":   req.Protocol,
+		"egress":     req.Egress,
+		"latency_ms": latency,
+	}
+
+	if callErr != nil {
+		result["ok"] = false
+		result["http_status"] = 502
+		result["error"] = callErr.Error()
+		he := (*zenHTTPError)(nil)
+		if errors.As(callErr, &he) {
+			result["http_status"] = he.Status
+			result["error"] = fmt.Sprintf("HTTP %d: %s", he.Status, kit.Truncate(he.Body, 500))
+		}
+		writeAPI(w, http.StatusOK, apiResponse{Success: false, Message: "probe failed", Data: result})
+		return
+	}
+	defer resp.Body.Close()
+
+	result["http_status"] = resp.StatusCode
+	result["ok"] = resp.StatusCode >= 200 && resp.StatusCode < 300
+
+	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 16384))
+	respStr := string(respBytes)
+
+	if strings.Contains(resp.Header.Get("Content-Type"), "event-stream") || strings.HasPrefix(strings.TrimSpace(respStr), "data:") {
+		var collected strings.Builder
+		for _, line := range strings.Split(respStr, "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "[DONE]" || payload == "" {
+				continue
+			}
+			var chunk map[string]any
+			if err := json.Unmarshal([]byte(payload), &chunk); err == nil {
+				if choices, ok := chunk["choices"].([]any); ok && len(choices) > 0 {
+					if c0, ok := choices[0].(map[string]any); ok {
+						if delta, ok := c0["delta"].(map[string]any); ok {
+							if text, ok := delta["content"].(string); ok {
+								collected.WriteString(text)
+							}
+						}
+					}
+				}
+			}
+		}
+		if collected.Len() > 0 {
+			result["response"] = collected.String()
+		} else {
+			result["response"] = kit.Truncate(respStr, 1000)
+		}
+	} else {
+		result["response"] = kit.Truncate(respStr, 1000)
+	}
+
+	writeAPI(w, http.StatusOK, apiResponse{Success: result["ok"].(bool), Message: fmt.Sprintf("HTTP %d (%dms)", resp.StatusCode, latency), Data: result})
+}

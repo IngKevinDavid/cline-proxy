@@ -51,12 +51,15 @@ type ZenModel struct {
 // "free" 后缀的免费模型也因此入选；deepseek-v4-flash 这类 status=deprecated
 // 的条目即使 cost 为 0 也不入选）。
 var zenSeedModels = []ZenModel{
-	{ID: "mimo-v2.6-flash-free", Aliases: []string{"mimo-v2.6-flash", "mimo-v2.6", "mimo", "mimo-free"}, Context: 262144, Output: 32768, Source: "seed"},
-	{ID: "cat-jam-free", Aliases: []string{"cat-jam"}, Context: 262144, Output: 32768, Source: "seed"},
-	{ID: "step-5-preview-free", Aliases: []string{"step-5-preview", "step-5"}, Context: 262144, Output: 32768, Source: "seed"},
-	{ID: "longcat-2.5-preview-free", Aliases: []string{"longcat-2.5-preview", "longcat-2.5", "longcat"}, Context: 262144, Output: 32768, Source: "seed"},
-	{ID: "space-bunny-free", Aliases: []string{"space-bunny"}, Context: 262144, Output: 32768, Source: "seed"},
-	{ID: "nemotron-3.5-lightning-free", Aliases: []string{"nemotron-3.5-lightning", "nemotron-lightning", "nemotron"}, Context: 262144, Output: 262144, Source: "seed"},
+	{ID: "deepseek-v4.1-flash-free", Aliases: []string{"deepseek-v4.1-flash", "deepseek-v4-flash-free", "deepseek-v4-flash", "deepseek"}, Context: 1048576, Output: 32000, Source: "seed", ToolCall: true, Reasoning: true},
+	{ID: "glm-5.3-flash-free", Aliases: []string{"glm-5.3-flash", "glm-5.3", "glm"}, Context: 900000, Output: 32000, Source: "seed", ToolCall: true, Reasoning: true},
+	{ID: "nemotron-3.5-super-vl-free", Aliases: []string{"nemotron-3.5-super-vl", "nemotron-vl"}, Context: 1048576, Output: 131072, Source: "seed", ToolCall: true, Reasoning: true},
+	{ID: "mimo-v2.6-flash-free", Aliases: []string{"mimo-v2.6-flash", "mimo-v2.6", "mimo", "mimo-free"}, Context: 262144, Output: 32768, Source: "seed", ToolCall: true, Reasoning: true},
+	{ID: "cat-jam-free", Aliases: []string{"cat-jam"}, Context: 262144, Output: 32768, Source: "seed", ToolCall: true, Reasoning: true},
+	{ID: "step-5-preview-free", Aliases: []string{"step-5-preview", "step-5"}, Context: 262144, Output: 32768, Source: "seed", ToolCall: true, Reasoning: true},
+	{ID: "longcat-2.5-preview-free", Aliases: []string{"longcat-2.5-preview", "longcat-2.5", "longcat"}, Context: 262144, Output: 32768, Source: "seed", ToolCall: true, Reasoning: true},
+	{ID: "space-bunny-free", Aliases: []string{"space-bunny"}, Context: 262144, Output: 32768, Source: "seed", ToolCall: true, Reasoning: true},
+	{ID: "nemotron-3.5-lightning-free", Aliases: []string{"nemotron-3.5-lightning", "nemotron-lightning", "nemotron"}, Context: 262144, Output: 262144, Source: "seed", ToolCall: true, Reasoning: true},
 	{ID: "jev-1.13-free", Aliases: []string{"jev-1.13", "jev"}, Context: 262144, Output: 32768, Source: "seed"},
 	// big-pickle：zen 创始免费模型（无 free 后缀，目录 cost 0/0，1.18.31 实测可用；
 	// opencode zen 免费层的默认别名，永久保留在种子中）
@@ -383,6 +386,9 @@ type zenConfigData struct {
 	Failover        bool             `json:"failover"`        // zen 连续失败后故障转移到 cline 账号池,默认 true
 	FailoverCount   int              `json:"failoverCount"`   // 触发故障转移的连续失败次数,默认 3
 	FailoverMinutes int              `json:"failoverMinutes"` // 故障转移窗口(分钟),默认 5
+	WarpAutoFailover bool            `json:"warpAutoFailover"` // WARP SOCKS5 自动故障转移,默认 true
+	WarpSocksHost    string          `json:"warpSocksHost"`    // 默认 127.0.0.1
+	WarpSocksPort    int             `json:"warpSocksPort"`    // 默认 40000
 	Compaction      zenCompactConfig `json:"compaction"`
 }
 
@@ -399,6 +405,9 @@ func defaultZenConfig() *zenConfigData {
 		Failover:        true,
 		FailoverCount:   3,
 		FailoverMinutes: 5,
+		WarpAutoFailover: true,
+		WarpSocksHost:    "127.0.0.1",
+		WarpSocksPort:    40000,
 		Compaction: zenCompactConfig{
 			Auto:       true,
 			Buffer:     20000,
@@ -1085,6 +1094,61 @@ func zenClientTools(params map[string]any) []any {
 	return out
 }
 
+// repairToolSchema 校验并清理 tools parameters 模式：
+// 移除在 properties 中未声明的 required 字段，防止严格的上游校验器抛出 422。
+func repairToolSchema(node any) {
+	m, ok := node.(map[string]any)
+	if !ok || m == nil {
+		return
+	}
+	props, _ := m["properties"].(map[string]any)
+	if props != nil {
+		for _, v := range props {
+			repairToolSchema(v)
+		}
+	}
+	if req, ok := m["required"].([]any); ok {
+		var valid []any
+		for _, r := range req {
+			if str, ok := r.(string); ok && props != nil {
+				if _, exists := props[str]; exists {
+					valid = append(valid, str)
+				}
+			}
+		}
+		if len(valid) == 0 {
+			delete(m, "required")
+		} else {
+			m["required"] = valid
+		}
+	} else if reqStr, ok := m["required"].([]string); ok {
+		var valid []string
+		for _, str := range reqStr {
+			if props != nil {
+				if _, exists := props[str]; exists {
+					valid = append(valid, str)
+				}
+			}
+		}
+		if len(valid) == 0 {
+			delete(m, "required")
+		} else {
+			m["required"] = valid
+		}
+	}
+	for _, key := range []string{"items", "allOf", "anyOf", "oneOf"} {
+		if sub, ok := m[key]; ok {
+			if subSlice, ok := sub.([]any); ok {
+				for _, item := range subSlice {
+					repairToolSchema(item)
+				}
+			} else {
+				repairToolSchema(sub)
+			}
+		}
+	}
+}
+
 // zenMergeTools 合并客户端工具与 gate 占位工具：客户端工具优先保留。
 // 若客户端工具包含已知 OpenCode 工具（如 shell/read/edit 等），
 // 用官方提取的真实定义替换其描述与参数，确保符合 FreeTier 校验。
@@ -1111,6 +1175,9 @@ func zenMergeTools(clientTools []any, gateTools []any) []any {
 				fn["parameters"] = def.Parameters
 			}
 		}
+		if fn["parameters"] != nil {
+			repairToolSchema(fn["parameters"])
+		}
 		if n == "codemode" {
 			enhanceCodemodeTool(fn)
 		}
@@ -1127,6 +1194,9 @@ func zenMergeTools(clientTools []any, gateTools []any) []any {
 			continue
 		}
 		provided[n] = true
+		if fn["parameters"] != nil {
+			repairToolSchema(fn["parameters"])
+		}
 		merged = append(merged, tm)
 	}
 	return merged
@@ -1874,9 +1944,10 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 	delay := time.Second
 	rateLimited := 0
 	retryKey := "" // 非空时重试沿用该 key（保持 key sess_ 一致）
+	useFailoverProxy := false
 
 	for attempt := 0; ; attempt++ {
-		proxyURL, pidx := pickUpstreamProxy()
+		proxyURL, pidx := pickProxyOrFailover(useFailoverProxy)
 		viaProxy := "direct"
 		if proxyURL != "" {
 			viaProxy = maskProxyURL(proxyURL)
@@ -1943,6 +2014,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				cooldownUpstreamProxy(pidx, 2*time.Minute)
 				log.Printf("  zen proxy failed (%v), cooldown exit %s for 2m", err, viaProxy)
 			}
+			useFailoverProxy = true
 			if attempt < retries {
 				log.Printf("  zen responses network error (%v), retry %d/%d after %v", err, attempt+1, retries, delay)
 				if !sleepCtx(ctx, kit.WithRetryJitter(delay)) {
@@ -1985,10 +2057,16 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 
 		if isRateLimited(resp.StatusCode, bodyBytes) {
 			rateLimited++
-			// 上游按限流处理（429，或关键词命中的 403/502/503）：标记随错误
-			// 返回，消费者据此区分"限流型 403"（key 已冷却、收割机未触发）与
-			// "会话死亡型 403"（FreeTier，触发收割机）。
 			apiErr.RateLimited = true
+			if pidx >= 0 {
+				cooldownUpstreamProxy(pidx, 5*time.Minute)
+				log.Printf("  zen rate limited (%d), cooldown proxy exit %s for 5m", resp.StatusCode, viaProxy)
+			}
+			if pidx == -2 {
+				// WARP IP was rate-limited; rotate tunnel connection
+				_ = RotateWarp()
+			}
+			useFailoverProxy = true
 			// 原样记录上游的 Retry-After（HTTP 日期还是秒数、值是多少）：
 			// 冷却时长完全由它决定，而面板只能看到换算后的截止时刻。没有这行，
 			// "这个 key 为什么冷却这么久"只能靠猜（实测 FreeUsageLimitError
@@ -2113,11 +2191,12 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 	}
 	delay := time.Second
 	rateLimited := 0
+	useFailoverProxy := false
 
 	for attempt := 0; ; attempt++ {
 		// 代理轮转（round_robin 默认）: 每次上游尝试显式挑选出口,
-		// 冷却中的代理被跳过; 未配置代理时直连。
-		proxyURL, pidx := pickUpstreamProxy()
+		// 冷却中的代理被跳过; 当 preferFailover 为 true 时自动尝试 WARP / Tor SOCKS5 出口。
+		proxyURL, pidx := pickProxyOrFailover(useFailoverProxy)
 		viaProxy := "direct"
 		if proxyURL != "" {
 			viaProxy = maskProxyURL(proxyURL)
@@ -2179,6 +2258,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 				cooldownUpstreamProxy(pidx, 2*time.Minute)
 				log.Printf("  zen proxy failed (%v), cooldown exit %s for 2m", err, viaProxy)
 			}
+			useFailoverProxy = true
 			// 网络错误:退避重试(不计入故障转移,瞬时可恢复);ctx 取消时中断等待
 			if attempt < retries {
 				log.Printf("  zen network error (%v), retry %d/%d after %v", err, attempt+1, retries, delay)
@@ -2209,12 +2289,16 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 
 		if isRateLimited(resp.StatusCode, bodyBytes) {
 			rateLimited++
-			// 上游按限流处理（标记随错误返回，同 responses 路径）。
 			apiErr.RateLimited = true
-			// 不冷却出口代理: 代理成功送达了 HTTP 响应,它没有故障。限流是 zen
-			// 对 key/身份/IP 组合的判定,把出口毒化 10 分钟只会让上游繁忙期
-			// (慢模型 503/429)把整个池打瘫;下一次尝试的轮转自然换到下一出口,
-			// key 冷却 + 轮转已足够分摊负载。
+			if pidx >= 0 {
+				cooldownUpstreamProxy(pidx, 5*time.Minute)
+				log.Printf("  zen rate limited (%d), cooldown proxy exit %s for 5m", resp.StatusCode, viaProxy)
+			}
+			if pidx == -2 {
+				// WARP IP was rate-limited; rotate tunnel connection
+				_ = RotateWarp()
+			}
+			useFailoverProxy = true
 			// 冷却当前 key；若还有其他未冷却 key 则立即切换重试（不睡眠）。
 			// Retry-After 原样入日志（同 responses 路径）。
 			rawRetry := resp.Header.Get("Retry-After")

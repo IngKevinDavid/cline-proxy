@@ -40,3 +40,6 @@ combos.json
 .session-secret
 requests.jsonl
 .atl/
+
+.jupyter/
+.jupyter_ystore.db

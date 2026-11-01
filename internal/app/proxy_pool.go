@@ -111,26 +111,65 @@ func zenProxyCooldownStatus() map[string]string {
 // 由调用方在每次上游尝试时显式调用 —— 请求级轮转（round_robin 一比一）,
 // 不依赖连接复用时机。
 func pickUpstreamProxy() (string, int) {
+	return pickProxyOrFailover(false)
+}
+
+// pickProxyOrFailover 按策略选择代理。当 preferFailover 为 true 时，
+// 若常规代理池不可用或处于冷却，自动尝试 Cloudflare WARP 或本地 Tor SOCKS5 出口。
+func pickProxyOrFailover(preferFailover bool) (string, int) {
 	cfg := getZenConfig()
-	n := len(cfg.Proxies)
-	if n == 0 {
-		return "", -1
+	n := 0
+	if cfg != nil {
+		n = len(cfg.Proxies)
 	}
-	idx := int(zenProxyCount.Add(1)-1) % n
-	switch cfg.ProxyStrategy {
-	case "random":
-		idx = int(time.Now().UnixNano() % int64(n))
-	case "fill":
-		idx = 0
-	}
-	// 冷却跳过:线性探测下一个可用代理
-	for i := 0; i < n; i++ {
-		if zenProxyAvailable(idx) {
-			break
+	if n > 0 {
+		idx := int(zenProxyCount.Add(1)-1) % n
+		switch cfg.ProxyStrategy {
+		case "random":
+			idx = int(time.Now().UnixNano() % int64(n))
+		case "fill":
+			idx = 0
 		}
-		idx = (idx + 1) % n
+		// 冷却跳过:线性探测下一个可用代理
+		foundAvailable := false
+		for i := 0; i < n; i++ {
+			if zenProxyAvailable(idx) {
+				foundAvailable = true
+				break
+			}
+			idx = (idx + 1) % n
+		}
+		if foundAvailable || !preferFailover {
+			return cfg.Proxies[idx], idx
+		}
 	}
-	return cfg.Proxies[idx], idx
+
+	// 发生限流或网络故障时触发 WARP / Tor 自动故障转移
+	if preferFailover && (cfg == nil || cfg.WarpAutoFailover) {
+		host := "127.0.0.1"
+		port := 40000
+		if cfg != nil {
+			if cfg.WarpSocksHost != "" {
+				host = cfg.WarpSocksHost
+			}
+			if cfg.WarpSocksPort > 0 {
+				port = cfg.WarpSocksPort
+			}
+		}
+		// 1. 优先尝试 Cloudflare WARP SOCKS5 代理
+		if warpURL, err := EnsureWarpReady(host, port); err == nil && warpURL != "" {
+			return warpURL, -2
+		}
+		// 2. 备用尝试本地 Tor SOCKS5 代理 (9052, 19050, 9050)
+		for _, torPort := range []int{9052, 19050, 9050} {
+			addr := fmt.Sprintf("127.0.0.1:%d", torPort)
+			if ProbeSocks5(addr, 500*time.Millisecond) {
+				return fmt.Sprintf("socks5://%s", addr), -3
+			}
+		}
+	}
+
+	return "", -1
 }
 
 func maskProxyURL(raw string) string {

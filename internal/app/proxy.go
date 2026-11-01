@@ -507,6 +507,18 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 	// 仍由 Upstream 字段直达，无额外探测开销。
 	// （trade-off 记录：曾考虑按目录 provider.npm 推断端点，但 29 个免费模型
 	// 中 23 个无 npm 字段、无规律可循——运行时探测是唯一可靠信号。）
+	usageFn := func(u map[string]any) {
+		if pt, ok := u["prompt_tokens"].(float64); ok {
+			tracker.rec.CompletionTokens += int(pt) - tracker.rec.PromptTokens
+			if tracker.rec.CompletionTokens < 0 {
+				tracker.rec.CompletionTokens = 0
+			}
+		}
+		if ct, ok := u["completion_tokens"].(float64); ok {
+			tracker.rec.CompletionTokens = int(ct)
+		}
+	}
+
 	if zm.Upstream == "responses" && !isLocalOpenCodeDaemonAvailable() {
 		_ = handleZenResponsesNative(w, r, params, zm, tracker)
 		return
@@ -530,6 +542,33 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 		return
 	}
 	if err != nil {
+		if isLocalOpenCodeDaemonAvailable() {
+			log.Printf("  zen api error (%v), attempting local daemon recovery", err)
+			if dResp, _, dErr := callZenViaLocalDaemon(r.Context(), params, isStream); dErr == nil {
+				defer dResp.Body.Close()
+				tracker.rec.Status = dResp.StatusCode
+				if isStream {
+					handleStreamResponseWithUsage(w, dResp, usageFn)
+				} else {
+					stops := stopSequencesFrom(params)
+					handleNonStreamResponseWithUsage(w, dResp, usageFn, stops)
+				}
+				tracker.finish(true, dResp.StatusCode)
+				return
+			}
+		}
+		if fResp, _, fErr := callFallbackProvider(r.Context(), params, isStream); fErr == nil {
+			defer fResp.Body.Close()
+			tracker.rec.Status = fResp.StatusCode
+			if isStream {
+				handleStreamResponseWithUsage(w, fResp, usageFn)
+			} else {
+				stops := stopSequencesFrom(params)
+				handleNonStreamResponseWithUsage(w, fResp, usageFn, stops)
+			}
+			tracker.finish(true, fResp.StatusCode)
+			return
+		}
 		log.Printf("  zen api error: %v", err)
 		tracker.rec.RateLimited = rateLimited
 		writeJSON(w, http.StatusBadGateway, map[string]any{
@@ -541,18 +580,6 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 	tracker.rec.RateLimited = rateLimited
 	defer resp.Body.Close()
 	tracker.rec.Status = resp.StatusCode
-
-	usageFn := func(u map[string]any) {
-		if pt, ok := u["prompt_tokens"].(float64); ok {
-			tracker.rec.CompletionTokens += int(pt) - tracker.rec.PromptTokens
-			if tracker.rec.CompletionTokens < 0 {
-				tracker.rec.CompletionTokens = 0
-			}
-		}
-		if ct, ok := u["completion_tokens"].(float64); ok {
-			tracker.rec.CompletionTokens = int(ct)
-		}
-	}
 
 	if isStream {
 		handleStreamResponseWithUsage(w, resp, usageFn)

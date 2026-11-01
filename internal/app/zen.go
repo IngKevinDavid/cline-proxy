@@ -1958,6 +1958,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		return nil, 0, fmt.Errorf("model %q is not a known zen model", model)
 	}
 	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/responses"
+	isOfficialZen := cfg.BaseURL == "" || strings.Contains(cfg.BaseURL, "opencode.ai")
 
 	zenStateMu.Lock()
 	sem := zenSem
@@ -2136,6 +2137,12 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				retryKey = "public"
 				continue
 			}
+			if strings.Contains(apiErr.Body, "FreeUsageLimitError") && isOfficialZen && isLocalOpenCodeDaemonAvailable() {
+				log.Printf("  zen responses FreeUsageLimitError: bridging via local opencode daemon")
+				if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
+					return dResp, dRL, nil
+				}
+			}
 			if attempt < retries {
 				wait := 1 * time.Second
 				if !useFailoverProxy && pidx >= 0 {
@@ -2153,6 +2160,14 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				}
 				delay = zenRetryDelay(delay)
 				continue
+			}
+			if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
+				if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
+					return dResp, dRL, nil
+				}
+			}
+			if dResp, dRL, dErr := callFallbackProvider(ctx, params, stream); dErr == nil {
+				return dResp, dRL, nil
 			}
 			markZenFail()
 			return nil, rateLimited, apiErr
@@ -2381,6 +2396,12 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 				key = "public"
 				continue
 			}
+			if strings.Contains(apiErr.Body, "FreeUsageLimitError") && isOfficialZen && isLocalOpenCodeDaemonAvailable() {
+				log.Printf("  zen edge FreeUsageLimitError: bridging via local opencode daemon")
+				if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
+					return dResp, dRL, nil
+				}
+			}
 			if attempt < retries {
 				wait := 1 * time.Second
 				if !useFailoverProxy && pidx >= 0 {
@@ -2398,6 +2419,14 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 				}
 				delay = zenRetryDelay(delay)
 				continue
+			}
+			if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
+				if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
+					return dResp, dRL, nil
+				}
+			}
+			if dResp, dRL, dErr := callFallbackProvider(ctx, params, stream); dErr == nil {
+				return dResp, dRL, nil
 			}
 			markZenFail()
 			return nil, rateLimited, apiErr

@@ -18,25 +18,34 @@ import (
 )
 
 const (
-	openCodeDaemonDefaultPort = 49374
-	openCodeDaemonBaseURL     = "http://127.0.0.1:49374"
+	openCodeDaemonDefaultPort    = 49374
+	openCodeDaemonDefaultBaseURL = "http://127.0.0.1:49374"
 )
 
 var (
 	zenDaemonMu         sync.RWMutex
+	zenDaemonURL        string
 	zenDaemonPassword   string
 	zenDaemonLastCheck  time.Time
 	zenDaemonAvailable  bool
 	zenDaemonCheckDelay = 15 * time.Second
 )
 
-// getOpenCodeServicePassword discovers the local OpenCode daemon password from service.json.
-func getOpenCodeServicePassword() string {
+type openCodeServiceFile struct {
+	ID       string `json:"id"`
+	Version  string `json:"version"`
+	URL      string `json:"url"`
+	PID      int    `json:"pid"`
+	Password string `json:"password"`
+}
+
+// getOpenCodeServiceDetails discovers the active OpenCode daemon base URL and password.
+func getOpenCodeServiceDetails() (string, string) {
 	zenDaemonMu.RLock()
-	if zenDaemonPassword != "" && time.Since(zenDaemonLastCheck) < 5*time.Minute {
-		pwd := zenDaemonPassword
+	if zenDaemonURL != "" && zenDaemonPassword != "" && time.Since(zenDaemonLastCheck) < 5*time.Minute {
+		u, p := zenDaemonURL, zenDaemonPassword
 		zenDaemonMu.RUnlock()
-		return pwd
+		return u, p
 	}
 	zenDaemonMu.RUnlock()
 
@@ -44,11 +53,21 @@ func getOpenCodeServicePassword() string {
 	defer zenDaemonMu.Unlock()
 
 	var candidatePaths []string
+	// Priority 1: ~/.local/state/opencode/service.json (official OpenCode v2 state file with dynamic URL and password)
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		candidatePaths = append(candidatePaths, filepath.Join(home, ".config", "opencode", "service.json"))
+		candidatePaths = append(candidatePaths,
+			filepath.Join(home, ".local", "state", "opencode", "service.json"),
+			filepath.Join(home, ".config", "opencode", "service.json"),
+		)
 	}
 	if userProfile := os.Getenv("USERPROFILE"); userProfile != "" {
-		candidatePaths = append(candidatePaths, filepath.Join(userProfile, ".config", "opencode", "service.json"))
+		candidatePaths = append(candidatePaths,
+			filepath.Join(userProfile, ".local", "state", "opencode", "service.json"),
+			filepath.Join(userProfile, ".config", "opencode", "service.json"),
+		)
+	}
+	if localAppData := os.Getenv("LOCALAPPDATA"); localAppData != "" {
+		candidatePaths = append(candidatePaths, filepath.Join(localAppData, "opencode", "service.json"))
 	}
 	if appData := os.Getenv("APPDATA"); appData != "" {
 		candidatePaths = append(candidatePaths, filepath.Join(appData, "opencode", "service.json"))
@@ -59,65 +78,57 @@ func getOpenCodeServicePassword() string {
 		if err != nil || len(data) == 0 {
 			continue
 		}
-		var cfg struct {
-			Password string `json:"password"`
-		}
-		if err := json.Unmarshal(data, &cfg); err == nil && cfg.Password != "" {
-			zenDaemonPassword = cfg.Password
-			return zenDaemonPassword
+		var state openCodeServiceFile
+		if err := json.Unmarshal(data, &state); err == nil {
+			if state.URL != "" {
+				zenDaemonURL = strings.TrimRight(state.URL, "/")
+			}
+			if state.Password != "" {
+				zenDaemonPassword = state.Password
+			}
+			if zenDaemonURL != "" && zenDaemonPassword != "" {
+				return zenDaemonURL, zenDaemonPassword
+			}
 		}
 	}
-	return zenDaemonPassword
+	if zenDaemonURL == "" {
+		zenDaemonURL = openCodeDaemonDefaultBaseURL
+	}
+	return zenDaemonURL, zenDaemonPassword
 }
 
-// isLocalOpenCodeDaemonAvailable probes the local OpenCode service health at http://127.0.0.1:49374/api/info.
+// getOpenCodeServicePassword discovers the local OpenCode daemon password.
+func getOpenCodeServicePassword() string {
+	_, pwd := getOpenCodeServiceDetails()
+	return pwd
+}
+
+// isLocalOpenCodeDaemonAvailable probes the local OpenCode service health at <daemonURL>/api/info.
 func isLocalOpenCodeDaemonAvailable() bool {
 	zenDaemonMu.RLock()
-	if time.Since(zenDaemonLastCheck) < zenDaemonCheckDelay {
+	if time.Since(zenDaemonLastCheck) < zenDaemonCheckDelay && zenDaemonURL != "" {
 		avail := zenDaemonAvailable
 		zenDaemonMu.RUnlock()
 		return avail
 	}
 	zenDaemonMu.RUnlock()
 
-	zenDaemonMu.Lock()
-	defer zenDaemonMu.Unlock()
-
-	zenDaemonLastCheck = time.Now()
-
-	pwd := zenDaemonPassword
-	if pwd == "" {
-		// Discover without holding outer lock indefinitely
-		var candidatePaths []string
-		if home, err := os.UserHomeDir(); err == nil && home != "" {
-			candidatePaths = append(candidatePaths, filepath.Join(home, ".config", "opencode", "service.json"))
-		}
-		if userProfile := os.Getenv("USERPROFILE"); userProfile != "" {
-			candidatePaths = append(candidatePaths, filepath.Join(userProfile, ".config", "opencode", "service.json"))
-		}
-		for _, p := range candidatePaths {
-			if data, err := os.ReadFile(p); err == nil && len(data) > 0 {
-				var cfg struct {
-					Password string `json:"password"`
-				}
-				if json.Unmarshal(data, &cfg) == nil && cfg.Password != "" {
-					pwd = cfg.Password
-					zenDaemonPassword = pwd
-					break
-				}
-			}
-		}
-	}
-
-	if pwd == "" {
+	daemonURL, pwd := getOpenCodeServiceDetails()
+	if pwd == "" || daemonURL == "" {
+		zenDaemonMu.Lock()
 		zenDaemonAvailable = false
+		zenDaemonLastCheck = time.Now()
+		zenDaemonMu.Unlock()
 		return false
 	}
 
-	client := &http.Client{Timeout: 1 * time.Second}
-	req, err := http.NewRequest("GET", openCodeDaemonBaseURL+"/api/info", nil)
+	client := &http.Client{Timeout: 2 * time.Second}
+	req, err := http.NewRequest("GET", daemonURL+"/api/info", nil)
 	if err != nil {
+		zenDaemonMu.Lock()
 		zenDaemonAvailable = false
+		zenDaemonLastCheck = time.Now()
+		zenDaemonMu.Unlock()
 		return false
 	}
 	authHeader := "Basic " + base64.StdEncoding.EncodeToString([]byte("opencode:"+pwd))
@@ -125,13 +136,20 @@ func isLocalOpenCodeDaemonAvailable() bool {
 
 	resp, err := client.Do(req)
 	if err != nil {
+		zenDaemonMu.Lock()
 		zenDaemonAvailable = false
+		zenDaemonLastCheck = time.Now()
+		zenDaemonMu.Unlock()
 		return false
 	}
 	defer resp.Body.Close()
 
+	zenDaemonMu.Lock()
+	zenDaemonLastCheck = time.Now()
 	zenDaemonAvailable = (resp.StatusCode == http.StatusOK)
-	return zenDaemonAvailable
+	avail := zenDaemonAvailable
+	zenDaemonMu.Unlock()
+	return avail
 }
 
 // formatDaemonPrompt renders OpenAI messages and tools into a single prompt for OpenCode daemon generation.
@@ -245,12 +263,12 @@ func formatMessageContent(content any) string {
 	}
 }
 
-// callZenViaLocalDaemon executes inference via the running OpenCode service daemon on 127.0.0.1:49374.
-// It returns an *http.Response delivering standard OpenAI SSE chunks matching what proxy.go expects.
+// callZenViaLocalDaemon executes inference via the running OpenCode service daemon.
+// It returns an *http.Response delivering standard OpenAI SSE chunks or JSON matching what proxy.go expects.
 func callZenViaLocalDaemon(ctx context.Context, params map[string]any, stream bool, opts ...zenCallOpts) (*http.Response, int, error) {
-	pwd := getOpenCodeServicePassword()
-	if pwd == "" {
-		return nil, 0, fmt.Errorf("local opencode service password not found")
+	daemonURL, pwd := getOpenCodeServiceDetails()
+	if pwd == "" || daemonURL == "" {
+		return nil, 0, fmt.Errorf("local opencode service details not found")
 	}
 
 	modelRaw, _ := params["model"].(string)
@@ -263,7 +281,7 @@ func callZenViaLocalDaemon(ctx context.Context, params map[string]any, stream bo
 	client := &http.Client{Timeout: 90 * time.Second}
 
 	// 1. Create a session on the local daemon
-	reqCreate, err := http.NewRequestWithContext(ctx, "POST", openCodeDaemonBaseURL+"/api/session", bytes.NewReader([]byte("{}")))
+	reqCreate, err := http.NewRequestWithContext(ctx, "POST", daemonURL+"/api/session", bytes.NewReader([]byte("{}")))
 	if err != nil {
 		return nil, 0, fmt.Errorf("create session request: %w", err)
 	}
@@ -296,7 +314,7 @@ func callZenViaLocalDaemon(ctx context.Context, params map[string]any, stream bo
 		go func() {
 			delCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			delReq, err := http.NewRequestWithContext(delCtx, "DELETE", openCodeDaemonBaseURL+"/api/session/"+sessionID, nil)
+			delReq, err := http.NewRequestWithContext(delCtx, "DELETE", daemonURL+"/api/session/"+sessionID, nil)
 			if err == nil {
 				delReq.Header.Set("Authorization", authHeader)
 				if resp, err := client.Do(delReq); err == nil {
@@ -313,7 +331,7 @@ func callZenViaLocalDaemon(ctx context.Context, params map[string]any, stream bo
 			"providerID": "opencode",
 		},
 	})
-	reqPatch, err := http.NewRequestWithContext(ctx, "PATCH", openCodeDaemonBaseURL+"/api/session/"+sid, bytes.NewReader(patchBody))
+	reqPatch, err := http.NewRequestWithContext(ctx, "PATCH", daemonURL+"/api/session/"+sid, bytes.NewReader(patchBody))
 	if err != nil {
 		return nil, 0, fmt.Errorf("patch session model request: %w", err)
 	}
@@ -332,7 +350,7 @@ func callZenViaLocalDaemon(ctx context.Context, params map[string]any, stream bo
 		"prompt": promptText,
 	})
 
-	reqGen, err := http.NewRequestWithContext(ctx, "POST", openCodeDaemonBaseURL+"/api/session/"+sid+"/generate", bytes.NewReader(genBody))
+	reqGen, err := http.NewRequestWithContext(ctx, "POST", daemonURL+"/api/session/"+sid+"/generate", bytes.NewReader(genBody))
 	if err != nil {
 		return nil, 0, fmt.Errorf("generate text request: %w", err)
 	}
@@ -481,6 +499,19 @@ func callZenViaLocalDaemon(ctx context.Context, params map[string]any, stream bo
 	// Done marker
 	sseBuf.WriteString("data: [DONE]\n\n")
 
+	if !stream {
+		chatBytes, _ := json.Marshal(chat)
+		resp := &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"application/json"},
+			},
+			Body:          io.NopCloser(bytes.NewReader(chatBytes)),
+			ContentLength: int64(len(chatBytes)),
+		}
+		return resp, 0, nil
+	}
+
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
 		Header: http.Header{
@@ -490,5 +521,57 @@ func callZenViaLocalDaemon(ctx context.Context, params map[string]any, stream bo
 		ContentLength: int64(sseBuf.Len()),
 	}
 
+	return resp, 0, nil
+}
+
+// callFallbackProvider forwards requests to vyceai when Zen and local daemon are rate-limited or unavailable.
+func callFallbackProvider(ctx context.Context, params map[string]any, stream bool) (*http.Response, int, error) {
+	modelRaw, _ := params["model"].(string)
+	modelID := strings.TrimPrefix(modelRaw, "opencode/")
+
+	targetModel := modelID
+	if strings.Contains(modelID, "deepseek") {
+		targetModel = "deepseek-v4.1"
+	} else if strings.Contains(modelID, "glm") {
+		targetModel = "glm-5.3-flash"
+	} else {
+		return nil, 0, fmt.Errorf("no fallback provider route for model %q", modelID)
+	}
+
+	// Clone params with rewritten model and stream
+	clone := make(map[string]any, len(params))
+	for k, v := range params {
+		clone[k] = v
+	}
+	clone["model"] = targetModel
+	clone["stream"] = stream
+
+	bodyJSON, err := json.Marshal(clone)
+	if err != nil {
+		return nil, 0, fmt.Errorf("marshal fallback body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", "https://vyceai.com/v1/chat/completions", bytes.NewReader(bodyJSON))
+	if err != nil {
+		return nil, 0, fmt.Errorf("create fallback request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer sk-136e297d65bf932bb0b7334d63e550971a4e26959ebfe252")
+	req.Header.Set("User-Agent", "opencode/2.2.5")
+
+	client := &http.Client{Timeout: 90 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("fallback request to vyceai: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		b := kit.ReadBody(resp)
+		_ = resp.Body.Close()
+		return nil, 0, fmt.Errorf("fallback vyceai error (%d): %s", resp.StatusCode, b)
+	}
+
+	log.Printf("  fallback provider: %q served via vyceai as %q (status 200)", modelID, targetModel)
 	return resp, 0, nil
 }

@@ -58,6 +58,18 @@ func proxyClientFor(proxyURL string) *http.Client {
 	return c
 }
 
+// EvictProxyClient closes idle connections and evicts the cached client for proxyURL.
+func EvictProxyClient(proxyURL string) {
+	proxyClientCacheMu.Lock()
+	defer proxyClientCacheMu.Unlock()
+	if c, ok := proxyClientCache[proxyURL]; ok {
+		if t, ok := c.Transport.(*http.Transport); ok {
+			t.CloseIdleConnections()
+		}
+		delete(proxyClientCache, proxyURL)
+	}
+}
+
 // cooldownUpstreamProxy 标记某出口代理冷却,冷却期内轮询跳过
 func cooldownUpstreamProxy(idx int, d time.Duration) {
 	if idx < 0 {

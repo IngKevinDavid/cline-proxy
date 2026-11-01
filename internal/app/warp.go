@@ -154,6 +154,8 @@ func RotateWarp() error {
 	// Try tunnel rotate-keys first
 	if out, err := runWarpCli(ctx, "tunnel", "rotate-keys"); err == nil {
 		log.Printf("[warp] rotated tunnel keys: %s", out)
+		cfg := getZenConfig()
+		EvictProxyClient(fmt.Sprintf("socks5://%s:%d", cfg.WarpSocksHost, cfg.WarpSocksPort))
 		time.Sleep(1 * time.Second)
 		return nil
 	}
@@ -164,6 +166,8 @@ func RotateWarp() error {
 	if out, err := runWarpCli(ctx, "connect"); err != nil {
 		return fmt.Errorf("reconnect failed: %w (%s)", err, out)
 	}
+	cfg := getZenConfig()
+	EvictProxyClient(fmt.Sprintf("socks5://%s:%d", cfg.WarpSocksHost, cfg.WarpSocksPort))
 	time.Sleep(1500 * time.Millisecond)
 	return nil
 }

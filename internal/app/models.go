@@ -38,7 +38,7 @@ var (
 )
 
 const (
-	modelsRefreshInterval = 60 * time.Second
+	modelsRefreshInterval = 24 * time.Hour
 	modelsSyncTimeout     = 25 * time.Second
 )
 

@@ -241,7 +241,7 @@ func updateZenClientVersion() string {
 func startZenVersionRefresher() {
 	go func() {
 		updateZenClientVersion()
-		ticker := time.NewTicker(1 * time.Hour)
+		ticker := time.NewTicker(24 * time.Hour)
 		for range ticker.C {
 			cfg := getZenConfig()
 			if cfg != nil && !cfg.Enabled {
@@ -839,15 +839,25 @@ func markZenKeySuccess(key string) {
 // 返回实际生效的冷却时长（0 = 未冷却：空 key，或单 key 池的 public 哨兵）——
 // 调用点的日志必须打印这个值而不是原始解析值，否则"缺头默认 1 分钟 / 24h 上限"
 // 的换算不会体现在日志里。
+func isAllZenKeysCooling() bool {
+	cfg := getZenConfig()
+	if cfg == nil || !cfg.Enabled {
+		return true
+	}
+	for _, k := range cfg.Keys {
+		if k != "" && !zenKeyCooling(k) {
+			return false
+		}
+	}
+	return zenKeyCooling("public")
+}
+
 func cooldownZenKey(key string, d time.Duration) time.Duration {
 	if key == "" {
 		return 0
 	}
-	if key == "public" && len(getZenConfig().Keys) <= 1 {
-		return 0
-	}
 	if d <= 0 {
-		d = time.Minute
+		d = 5 * time.Minute
 	}
 	if d > maxCooldown {
 		d = maxCooldown
@@ -2093,6 +2103,24 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 	retryKey := "" // 非空时重试沿用该 key（保持 key sess_ 一致）
 	useFailoverProxy := false
 
+	if len(opts) == 0 || opts[0].pinKey == "" {
+		if isAllZenKeysCooling() {
+			zenKeyMu.Lock()
+			until := zenKeyCool["public"]
+			zenKeyMu.Unlock()
+			remaining := time.Until(until)
+			if remaining > 0 {
+				log.Printf("  zen upstream in cooldown (%v remaining), skipping doomed request to opencode", formatDuration(remaining))
+				if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
+					if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
+						return dResp, dRL, nil
+					}
+				}
+				return callFallbackProvider(ctx, params, stream)
+			}
+		}
+	}
+
 	for attempt := 0; ; attempt++ {
 		proxyURL, pidx := pickProxyOrFailover(useFailoverProxy)
 		viaProxy := "direct"
@@ -2250,19 +2278,21 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				continue
 			}
 			if key != "public" && (strings.Contains(apiErr.Body, "FreeUsageLimitError") || isZenFreeModel(zm)) {
+				cooldownZenKey(key, 15*time.Minute)
 				log.Printf("  zen responses rate limit: switching from key#%d to anonymous public tier", keyIndex(key))
 				key = "public"
 				retryKey = "public"
 				continue
 			}
 			if strings.Contains(apiErr.Body, "FreeUsageLimitError") {
+				cooldownZenKey(key, 15*time.Minute)
+				cooldownZenKey("public", 15*time.Minute)
+				log.Printf("  zen responses FreeUsageLimitError: cooling down key and public tier for 15m; bridging to fallback")
 				if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
-					log.Printf("  zen responses FreeUsageLimitError: bridging via local opencode daemon")
 					if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
 						return dResp, dRL, nil
 					}
 				}
-				log.Printf("  zen responses FreeUsageLimitError: bridging via high-availability fallback provider")
 				if dResp, dRL, dErr := callFallbackProvider(ctx, params, stream); dErr == nil {
 					return dResp, dRL, nil
 				}
@@ -2382,6 +2412,24 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 	delay := time.Second
 	rateLimited := 0
 	useFailoverProxy := false
+
+	if len(opts) == 0 || opts[0].pinKey == "" {
+		if isAllZenKeysCooling() {
+			zenKeyMu.Lock()
+			until := zenKeyCool["public"]
+			zenKeyMu.Unlock()
+			remaining := time.Until(until)
+			if remaining > 0 {
+				log.Printf("  zen upstream in cooldown (%v remaining), skipping doomed request to opencode", formatDuration(remaining))
+				if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
+					if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
+						return dResp, dRL, nil
+					}
+				}
+				return callFallbackProvider(ctx, params, stream)
+			}
+		}
+	}
 
 	for attempt := 0; ; attempt++ {
 		// 代理轮转（round_robin 默认）: 每次上游尝试显式挑选出口,
@@ -2520,18 +2568,20 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 				continue
 			}
 			if key != "public" && (strings.Contains(apiErr.Body, "FreeUsageLimitError") || (zm != nil && isZenFreeModel(zm))) {
+				cooldownZenKey(key, 15*time.Minute)
 				log.Printf("  zen rate limited: switching from key#%d to anonymous public tier", keyIndex(key))
 				key = "public"
 				continue
 			}
 			if strings.Contains(apiErr.Body, "FreeUsageLimitError") {
+				cooldownZenKey(key, 15*time.Minute)
+				cooldownZenKey("public", 15*time.Minute)
+				log.Printf("  zen edge FreeUsageLimitError: cooling down key and public tier for 15m; bridging to fallback")
 				if isOfficialZen && isLocalOpenCodeDaemonAvailable() {
-					log.Printf("  zen edge FreeUsageLimitError: bridging via local opencode daemon")
 					if dResp, dRL, dErr := callZenViaLocalDaemon(ctx, params, stream, opts...); dErr == nil {
 						return dResp, dRL, nil
 					}
 				}
-				log.Printf("  zen edge FreeUsageLimitError: bridging via high-availability fallback provider")
 				if dResp, dRL, dErr := callFallbackProvider(ctx, params, stream); dErr == nil {
 					return dResp, dRL, nil
 				}
@@ -2930,7 +2980,7 @@ func startZenModelsRefresher() {
 		if _, err := syncZenModels(); err != nil {
 			log.Printf("zen model sync: failed (%v), keeping the current list", err)
 		}
-		ticker := time.NewTicker(10 * time.Minute)
+		ticker := time.NewTicker(12 * time.Hour)
 		for range ticker.C {
 			cfg := getZenConfig()
 			if !cfg.Enabled {

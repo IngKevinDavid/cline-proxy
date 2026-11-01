@@ -83,7 +83,7 @@ func StartProxy(host string, port int) error {
 	startPoolFlusher()
 	loadZenEndpoints()
 	loadClineStreamLearned()
-	startZenHarvester()
+	// startZenHarvester() - disabled to prevent quota exhaustion
 	initStats()
 	LoadRequestLogsFromFile()
 	go cleanupCompactStates()

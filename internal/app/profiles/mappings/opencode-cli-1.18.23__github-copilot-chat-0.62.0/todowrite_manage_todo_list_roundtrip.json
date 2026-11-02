@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "normalization": {
+    "tool_call_id": "call_fixture_todo_001",
+    "result_format": "OpenCode todowrite state reconstructed from the Copilot acknowledgement"
+  },
+  "evidence": {
+    "opencode_cli_capture": {
+      "run": "opencode-todowrite-success-20260826",
+      "initial_body_sha256": "52ff24675a442ef1b705fa46b168590945273a98abb4bcf1e8f4f4386ac9b297",
+      "continuation_body_sha256": "df1abf362b4982c6b943d4227ebb88c0c02d0819c0d827b069d2bbb0458bb612",
+      "observed_tool": "todowrite",
+      "observed_result": "[\n  {\n    \"content\": \"Capture todo fidelity\",\n    \"status\": \"pending\",\n    \"priority\": \"high\"\n  }\n]"
+    },
+    "copilot_capture": {
+      "run": "copilot-todo-roundtrip",
+      "initial_body_sha256": "6f9cc24364707ebb57378890b4a1f17e7dc251e8212d057dcb8e0ae196cf9e97",
+      "continuation_body_sha256": "0e8aa176b219fb6ee466f9709b40bfa817e629b05c738cd775e09e61409cc9fc",
+      "observed_tool": "manage_todo_list",
+      "observed_result": "Successfully wrote todo list\n\nWarning: Small todo list (<3 items). This task might not need a todo list."
+    }
+  },
+  "backend_call": {
+    "id": "call_fixture_todo_001",
+    "type": "function",
+    "function": {
+      "name": "todowrite",
+      "arguments": "{\"todos\":[{\"content\":\"Capture todo fidelity\",\"status\":\"pending\",\"priority\":\"high\"}]}"
+    }
+  },
+  "client_call": {
+    "id": "call_fixture_todo_001",
+    "type": "function",
+    "function": {
+      "name": "manage_todo_list",
+      "arguments": "{\"todoList\":[{\"id\":1,\"status\":\"not-started\",\"title\":\"Capture todo fidelity\"}]}"
+    }
+  },
+  "client_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_todo_001",
+    "content": "Successfully wrote todo list\n\nWarning: Small todo list (<3 items). This task might not need a todo list."
+  },
+  "backend_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_todo_001",
+    "content": "[\n  {\n    \"content\": \"Capture todo fidelity\",\n    \"status\": \"pending\",\n    \"priority\": \"high\"\n  }\n]"
+  }
+}

@@ -75,7 +75,7 @@ func TestShapeZenChatRequest(t *testing.T) {
 		t.Errorf("first message role = %v, want 'system'", sysMsg["role"])
 	}
 	sysContent, _ := sysMsg["content"].(string)
-	if !strings.Contains(sysContent, opencodePromptMarker) {
+	if !strings.Contains(sysContent, opencodePromptMarker) && !strings.Contains(sysContent, "You are an AI agent running in OpenCode") {
 		t.Errorf("system content missing marker %q", opencodePromptMarker)
 	}
 	if !strings.Contains(sysContent, "<env>") {
@@ -180,3 +180,4 @@ func TestNormalizeOpenAIResponseRestoresToolName(t *testing.T) {
 		t.Errorf("normalized stream tool name = %q, want restored %q", streamFn["name"], clientName)
 	}
 }
+

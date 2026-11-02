@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "normalization": {
+    "tool_call_id": "call_fixture_read_001",
+    "workspace_root": "/workspace/project",
+    "file_content": "<FILE_CONTENT_REDACTED>"
+  },
+  "evidence": {
+    "opencode_cli_capture": {
+      "run": "20260826T013433Z",
+      "response_body_bytes": 5448,
+      "response_body_sha256": "7cf1d38da83f7e98da1240ed93b9b281cc438fd285000105e9e6f58427485815",
+      "continuation_body_bytes": 33410,
+      "continuation_body_sha256": "ae545dd0fbfa398c71129889ef228fe8bd874a68bf33eecb10790f740ee9edb6"
+    },
+    "copilot_capture": {
+      "run": "copilot-tool-roundtrip-20260826",
+      "initial_body_bytes": 111668,
+      "initial_body_sha256": "7d26c115470eddda19220561997e8aa858884308360eddc3baca34fdc9d7716e",
+      "continuation_body_bytes": 113269,
+      "continuation_body_sha256": "1f42d231af97b62566c332cf94558660d59e96c9310bb711e4f5c50a7d643d86"
+    }
+  },
+  "backend_call": {
+    "id": "call_fixture_read_001",
+    "type": "function",
+    "function": {
+      "name": "read",
+      "arguments": "{\"filePath\":\"/workspace/project/README.md\"}"
+    }
+  },
+  "client_call": {
+    "id": "call_fixture_read_001",
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "arguments": "{\"endLine\":2000,\"filePath\":\"/workspace/project/README.md\",\"startLine\":1}"
+    }
+  },
+  "client_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_read_001",
+    "content": "<FILE_CONTENT_REDACTED>"
+  },
+  "backend_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_read_001",
+    "content": "<path>/workspace/project/README.md</path>\n<type>file</type>\n<content>\n1: <FILE_CONTENT_REDACTED>\n\n(End of file - total 1 lines)\n</content>"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "version": "2.0.22",
+  "system_base_sha256": "1ffd1d46e14c2699759ad6671aa13aae9d41d31391cdc24b32b97d2007a01cdf",
+  "skills_sha256": "5d2b960789c74e9f9c939b1939719c40cbd289e985540cfc6ae8191115fd3617",
+  "tools_exact_sha256": "8684d58a59a9a817179d6884ccebc6f62d9ef75e477f124c715187227949dffb",
+  "tool_names": [
+    "edit",
+    "glob",
+    "grep",
+    "question",
+    "read",
+    "shell",
+    "skill",
+    "subagent",
+    "webfetch",
+    "websearch",
+    "write",
+    "execute"
+  ],
+  "code_mode_sha256": "1dfc49afb7fdaeb4fa120867489793f35a8b94d2db13b9c3a9efcffbc358c9b8"
+}

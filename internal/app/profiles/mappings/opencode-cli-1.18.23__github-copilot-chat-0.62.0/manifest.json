@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "backend_profile": "opencode-cli/1.18.23",
+  "client_profile": "github-copilot-chat/0.62.0",
+  "client_catalog_normalized_sha256": "54bbec3f34d3d799967b0b6eace6eb94d52ed36a6bbced42d01f331e3d107c3a",
+  "mappings": [
+    {
+      "backend_tool": "read",
+      "client_tool": "read_file",
+      "classification": "conditional",
+      "backend_schema_sha256": "17cde99b4f6e8acfc5233a4975d799eca9c220b2887faff62143cde2f8726cdc",
+      "client_schema_sha256": "2e3820d7ccc3c44a037de8ff0f5a021ecaa1dba7d886a6224ad7ebc23568d41d",
+      "fixture": "read_file_roundtrip.json",
+      "fixture_sha256": "0c944450c61a6d6f83b49bcdf2ee95f27e8d9528710eab3df2913a695abc3c94",
+      "error_fixture": "read_file_error_roundtrip.json",
+      "error_fixture_sha256": "2b117afb1819a4ead990decc38263528a845ae2fe726547f17bf935073b3a001"
+    },
+    {
+      "backend_tool": "glob",
+      "client_tool": "file_search",
+      "classification": "conditional",
+      "backend_schema_sha256": "30767011136642ac2d50b1bc1f001bb55e3050a0d1fb0a12d25ebebc74a8192a",
+      "client_schema_sha256": "9dfa6bc683471d561e24b53963c1a279fcda8f2153cc04eb90b3701368181958",
+      "fixture": "glob_file_search_roundtrip.json",
+      "fixture_sha256": "f892ba6531a61549794b839dae59fc6631e6a8ec5cc517b7cad11b075886be61",
+      "error_fixture": "",
+      "error_fixture_sha256": ""
+    },
+    {
+      "backend_tool": "bash",
+      "client_tool": "run_in_terminal",
+      "classification": "conditional",
+      "backend_schema_sha256": "ed00ab12305d7e91381fa2f3170c607943c67b82cbcd2708e22e34be7ae5d5f7",
+      "client_schema_sha256": "e40918933ec343457a477164d22e78788f5a9cb213b6bd310f50a00f9d91d2e0",
+      "fixture": "bash_run_in_terminal_roundtrip.json",
+      "fixture_sha256": "d9a410af205a40eaf0273acbb91d31678d355ee0b9cbc11127f9b6111f711598",
+      "error_fixture": "",
+      "error_fixture_sha256": ""
+    },
+    {
+      "backend_tool": "edit",
+      "client_tool": "replace_string_in_file",
+      "classification": "conditional",
+      "backend_schema_sha256": "4f665f9e1717fd102239312fb7140b8d19ee80fce7fdabdcd0121146fd08637b",
+      "client_schema_sha256": "de8c41b728630a4645c2fea1c79e1b40466f1b54d540ee675ef8162f340ea6e4",
+      "fixture": "edit_replace_string_in_file_roundtrip.json",
+      "fixture_sha256": "c3e4ffab7d95bc53f5e4702beb42d97e7701251f6f56993898c78053f0bd33bf",
+      "error_fixture": "edit_replace_string_in_file_error_roundtrip.json",
+      "error_fixture_sha256": "4db0e6bfc9127b8f88723bb46fdeb71bfa1936b61fc796189e53512c8f1f38d4"
+    },
+    {
+      "backend_tool": "write",
+      "client_tool": "create_file",
+      "classification": "conditional",
+      "backend_schema_sha256": "8fd99c7a58a1cd2eb63501f3f79f42eaf684f2e7ae9ea2f23ec2ed626b15a87e",
+      "client_schema_sha256": "157da1a911adfac97c4f979076922cd042d44f7161ae79fabdfe5b5330474973",
+      "fixture": "write_create_file_roundtrip.json",
+      "fixture_sha256": "57e176b86f58e5c69776b1266876c77715bb93babb9c0f4b84377c4c6f7d5189",
+      "error_fixture": "",
+      "error_fixture_sha256": ""
+    },
+    {
+      "backend_tool": "webfetch",
+      "client_tool": "fetch_webpage",
+      "classification": "conditional",
+      "backend_schema_sha256": "b26f61ce7611471e0ccfb13fd4e4c6f42020d24b6c9e64a300be6501fe54e1b1",
+      "client_schema_sha256": "8e82393ac90d9c738ef5617e15e64f962ccb7c56b714faf1d2b26624d0ce3ff5",
+      "fixture": "webfetch_fetch_webpage_roundtrip.json",
+      "fixture_sha256": "ceb2903a51c764fb03977538f89684fdaafd674dd7bcf8a8c42a596f95e66ae4",
+      "error_fixture": "",
+      "error_fixture_sha256": ""
+    },
+    {
+      "backend_tool": "grep",
+      "client_tool": "grep_search",
+      "classification": "conditional",
+      "backend_schema_sha256": "f1ba1dc3a8fee05cc5f1dad5004ce5e11f7efb5901d315787468adb756e67039",
+      "client_schema_sha256": "253d18706d9a5a71cc9bb2c9bfb9cde3e46502a8d540fd6a78c3163db46a8399",
+      "fixture": "grep_grep_search_roundtrip.json",
+      "fixture_sha256": "63e2f170443bb9950b9d91ff723cd6203b7e93cceb5ac1fab459ed24295e8d53",
+      "error_fixture": "",
+      "error_fixture_sha256": ""
+    },
+    {
+      "backend_tool": "todowrite",
+      "client_tool": "manage_todo_list",
+      "classification": "conditional",
+      "backend_schema_sha256": "0adc662a3338db20587ec0eb8dc2c057847f940e2cd2e4e6b160abd6a68173d6",
+      "client_schema_sha256": "d6c1840c437155020f29d6891671e9227e5754b90aad2b26957e03d4e94fe1ea",
+      "fixture": "todowrite_manage_todo_list_roundtrip.json",
+      "fixture_sha256": "8a2ff63f45a6f8154afdc63403bcc68b376973d48612a1e36584e16b0e7ca851",
+      "error_fixture": "",
+      "error_fixture_sha256": ""
+    }
+  ]
+}

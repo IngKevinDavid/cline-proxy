@@ -632,6 +632,133 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
     <div class="label">Alternating IP Rotation on 429</div>
     <div style="margin-top:10px;font-size:12px;color:var(--text2)">Strict OpenCode Mode</div>
   </div>
+  <div class="card">
+    <div class="num green" id="ocFidelityBadge" style="font-size:20px">CLI 2.0.22</div>
+    <div class="label" id="ocFidelityStatus">SHA256 Verified (12 tools)</div>
+    <div style="margin-top:10px;font-size:12px;color:var(--accent2)">Active Fidelity Profile</div>
+  </div>
+</div>
+
+<!-- OpenCode Multi-Account Pool & Browser OAuth Login -->
+<div class="section">
+  <div class="section-title">
+    <span class="sec-ico"><svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
+    OpenCode Connected Accounts (OAuth Device Flow & Multi-Account Pool)
+  </div>
+  <div class="section-body">
+    <div class="tabs" id="ocImportTabs" style="margin-bottom:16px">
+      <div class="tab active" id="tabHeadOcOAuth" onclick="switchOcImportTab('oauth')">OAuth Device Login (Browser)</div>
+      <div class="tab" id="tabHeadOcManual" onclick="switchOcImportTab('manual')">Manual Token / Refresh Token</div>
+    </div>
+
+    <!-- Sub-tab 1: OAuth Browser Login -->
+    <div id="ocImport-oauth">
+      <p class="hint" style="margin-top:0">
+        Connect an OpenCode Console account securely via OAuth Device Code. The proxy contacts opencode.ai directly — no CLI or Node.js installation required.
+      </p>
+      <div class="form-row">
+        <div class="field" style="flex:1">
+          <label>Account Label / Name *</label>
+          <input type="text" id="ocDeviceName" placeholder="e.g. Work-Account or dev1">
+        </div>
+        <div class="field" style="flex:1">
+          <label>Egress Route</label>
+          <select id="ocDeviceRoute">
+            <option value="default">Default (Auto-Failover)</option>
+            <option value="warp">Cloudflare WARP</option>
+            <option value="tor">Embedded Tor (:9052)</option>
+            <option value="direct">Direct</option>
+            <option value="proxy">Egress Proxy Pool</option>
+          </select>
+        </div>
+        <div class="field" style="flex:0 0 auto;align-self:flex-end">
+          <button class="btn btn-primary" id="btnStartOcOAuth" onclick="startOcOAuth()">Start OpenCode Login</button>
+        </div>
+      </div>
+      <div id="ocOAuthProgress" style="display:none;margin-top:14px" class="oauth-card">
+        <div style="display:flex;align-items:center;gap:14px">
+          <div class="loading"></div>
+          <div>
+            <div style="font-weight:600" id="ocOAuthStatus">Requesting authorization code from opencode.ai...</div>
+            <div class="hint" id="ocOAuthHint" style="display:none">
+              Open <a href="#" id="ocOAuthUrl" target="_blank" style="color:var(--accent);font-weight:600">OpenCode Verification Link</a>
+              and confirm code: <strong style="color:var(--accent);font-size:16px;letter-spacing:2px" id="ocOAuthUserCode"></strong>
+            </div>
+          </div>
+          <div style="margin-left:auto">
+            <button class="btn btn-sm" onclick="cancelOcOAuth()">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <div id="ocOAuthResult" style="display:none;margin-top:14px"></div>
+    </div>
+
+    <!-- Sub-tab 2: Manual Token -->
+    <div id="ocImport-manual" style="display:none">
+      <p class="hint" style="margin-top:0">
+        Add an existing OpenCode Console token (<code>st_...</code>), Bearer token, or OAuth Refresh Token.
+      </p>
+      <div class="form-row">
+        <div class="field">
+          <label>Account Label / Name *</label>
+          <input type="text" id="ocManualName" placeholder="e.g. Main-Account">
+        </div>
+        <div class="field">
+          <label>Access Token (optional if refresh token provided)</label>
+          <input type="text" id="ocManualToken" placeholder="st_... or Bearer ...">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="field">
+          <label>Refresh Token (optional, enables automatic token renewal)</label>
+          <input type="text" id="ocManualRefreshToken" placeholder="OAuth refresh_token">
+        </div>
+        <div class="field">
+          <label>Organization ID (optional)</label>
+          <input type="text" id="ocManualOrgID" placeholder="org_...">
+        </div>
+        <div class="field">
+          <label>Egress Route</label>
+          <select id="ocManualRoute">
+            <option value="default">Default (Auto-Failover)</option>
+            <option value="warp">Cloudflare WARP</option>
+            <option value="tor">Embedded Tor (:9052)</option>
+            <option value="direct">Direct</option>
+            <option value="proxy">Egress Proxy Pool</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-primary" onclick="submitOcManualAccount()">Add Account</button>
+      </div>
+    </div>
+
+    <!-- Connected Accounts Table -->
+    <div style="margin-top:20px">
+      <div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--text)">Connected Accounts in Pool</div>
+      <div class="table-wrap" style="margin-bottom:10px">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:140px">Account Name</th>
+              <th style="width:120px">Token</th>
+              <th style="width:130px">Egress Route</th>
+              <th style="width:90px">Status</th>
+              <th style="width:100px">Org ID</th>
+              <th style="width:140px">Expires</th>
+              <th style="width:180px">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="ocAccountsBody">
+            <tr><td colspan="7" class="empty">Loading OpenCode accounts...</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="hint" style="margin:0">
+        When accounts are connected, requests automatically round-robin across them with automatic rate-limit cooldown and failover. Each account can have its own independent egress route. If no accounts are configured, requests fall back to the API Keys listed below or the anonymous public tier.
+      </p>
+    </div>
+  </div>
 </div>
 
 <!-- OpenCode Diagnostic Playground & Probe -->
@@ -869,7 +996,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.tab === 'settings') { loadKeys(); loadModels(); loadConfig(); }
     if (el.dataset.tab === 'logs') loadLogs();
     if (el.dataset.tab === 'proxypool') loadProxyPool();
-    if (el.dataset.tab === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); loadOcSessions(); }
+    if (el.dataset.tab === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); loadOcSessions(); loadOcAccounts(); }
     if (el.dataset.tab === 'combos') { loadCombos(); fillComboModels(); }
   });
 });
@@ -885,7 +1012,7 @@ function switchTab(name) {
   if (name === 'settings') { loadKeys(); loadModels(); }
   if (name === 'logs') loadLogs();
   if (name === 'proxypool') loadProxyPool();
-  if (name === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); loadOcSessions(); }
+  if (name === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); loadOcSessions(); loadOcAccounts(); }
   if (name === 'combos') { loadCombos(); fillComboModels(); }
 }
 
@@ -1465,7 +1592,240 @@ async function loadOcConfig() {
         hint.textContent = 'Supports legacy Zen keys (oc_sk_...) and Console OAuth tokens (st_...#org_id).';
       }
     }
+    if (c.fidelity) {
+      _('ocFidelityBadge').textContent = 'CLI ' + (c.fidelity.version || '2.0.22');
+      _('ocFidelityStatus').textContent = c.fidelity.verified ? ('SHA256 Verified (' + c.fidelity.tool_count + ' tools)') : 'Unverified';
+    }
   } catch (e) { /* ignore */ }
+}
+
+// ========== OpenCode Multi-Account Pool & Device Flow ==========
+function switchOcImportTab(tab) {
+  _('ocImport-oauth').style.display = tab === 'oauth' ? 'block' : 'none';
+  _('ocImport-manual').style.display = tab === 'manual' ? 'block' : 'none';
+  _('tabHeadOcOAuth').classList.toggle('active', tab === 'oauth');
+  _('tabHeadOcManual').classList.toggle('active', tab === 'manual');
+}
+
+async function loadOcAccounts() {
+  try {
+    const d = await api('GET', '/opencode/accounts');
+    if (d.data && d.data.fidelity) {
+      const f = d.data.fidelity;
+      _('ocFidelityBadge').textContent = 'CLI ' + (f.version || '2.0.22');
+      _('ocFidelityStatus').textContent = f.verified ? ('SHA256 Verified (' + f.tool_count + ' tools)') : 'Unverified';
+    }
+    renderOcAccounts(d.data && d.data.accounts ? d.data.accounts : []);
+  } catch (e) {
+    _('ocAccountsBody').innerHTML = '<tr><td colspan="7" class="empty">Error loading OpenCode accounts: ' + esc(e.message) + '</td></tr>';
+  }
+}
+
+function renderOcAccounts(accounts) {
+  const tbody = _('ocAccountsBody');
+  if (!accounts || accounts.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No OpenCode accounts connected yet. Connect via browser OAuth or add a token above.</td></tr>';
+    return;
+  }
+  let html = '';
+  accounts.forEach(a => {
+    let statusClass = 'status-active';
+    let statusLabel = 'Active';
+    if (a.status === 'disabled') { statusClass = 'status-expired'; statusLabel = 'Disabled'; }
+    else if (a.status === 'cooldown') { statusClass = 'status-cooldown'; statusLabel = 'Cooldown (429)'; }
+    else if (a.status === 'expired') { statusClass = 'status-expired'; statusLabel = 'Expired'; }
+
+    let expText = 'Permanent';
+    if (a.expires_at > 0) {
+      const diffHours = Math.round((a.expires_at - Date.now()) / (3600 * 1000));
+      expText = diffHours > 0 ? ('In ' + diffHours + 'h') : 'Expired';
+    }
+
+    const curRoute = a.route || 'default';
+    const routeSelect = '<select class="route-select" onchange="changeOcAccountRoute(\'' + esc(a.name) + '\', this.value)" style="padding:2px 6px;font-size:12px;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:4px">' +
+      '<option value="default"' + (curRoute === 'default' ? ' selected' : '') + '>Default (Auto)</option>' +
+      '<option value="warp"' + (curRoute === 'warp' ? ' selected' : '') + '>WARP</option>' +
+      '<option value="tor"' + (curRoute === 'tor' ? ' selected' : '') + '>Tor</option>' +
+      '<option value="direct"' + (curRoute === 'direct' ? ' selected' : '') + '>Direct</option>' +
+      '<option value="proxy"' + (curRoute === 'proxy' ? ' selected' : '') + '>Proxy</option>' +
+      '</select>';
+
+    html += '<tr>' +
+      '<td><strong>' + esc(a.name) + '</strong></td>' +
+      '<td><span class="mono">' + esc(a.token_mask) + '</span></td>' +
+      '<td>' + routeSelect + '</td>' +
+      '<td><span class="status-pill ' + statusClass + '">' + statusLabel + '</span></td>' +
+      '<td>' + esc(a.org_id || '-') + '</td>' +
+      '<td>' + expText + (a.has_refresh ? ' <span title="Auto-refreshing" style="color:var(--accent2);cursor:pointer">🔄</span>' : '') + '</td>' +
+      '<td>' +
+        '<button class="btn btn-sm" onclick="testOcAccount(\'' + esc(a.name) + '\')" title="Send probe request">Test</button> ' +
+        (a.has_refresh ? '<button class="btn btn-sm" onclick="refreshOcAccount(\'' + esc(a.name) + '\')" title="Refresh OAuth token">Refresh</button> ' : '') +
+        '<button class="btn btn-sm" style="color:var(--danger)" onclick="deleteOcAccount(\'' + esc(a.name) + '\')">Delete</button>' +
+      '</td>' +
+      '</tr>';
+  });
+  tbody.innerHTML = html;
+}
+
+let ocOAuthPollInterval = null;
+
+async function startOcOAuth() {
+  const name = _('ocDeviceName').value.trim();
+  const route = _('ocDeviceRoute').value;
+  if (!name) { toast('Please enter an account label/name', 'error'); return; }
+
+  const btn = _('btnStartOcOAuth');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="loading"></span> Starting...';
+  _('ocOAuthProgress').style.display = 'block';
+  _('ocOAuthResult').style.display = 'none';
+  _('ocOAuthStatus').textContent = 'Requesting Device Code from opencode.ai...';
+  _('ocOAuthHint').style.display = 'none';
+
+  try {
+    const res = await api('POST', '/opencode/oauth/start', { name: name, route: route });
+    if (!res.success) {
+      throw new Error(res.error || 'Failed to start login');
+    }
+
+    let pollFails = 0;
+    ocOAuthPollInterval = setInterval(async () => {
+      try {
+        const r = await api('GET', '/opencode/oauth/status');
+        pollFails = 0;
+        const s = r.data;
+        if (s.status === 'pending') {
+          _('ocOAuthStatus').textContent = 'Confirm code in your browser:';
+          _('ocOAuthHint').style.display = 'block';
+          const link = _('ocOAuthUrl');
+          link.href = s.verification_uri || 'https://opencode.ai/auth/device';
+          link.textContent = 'Open OpenCode Login (' + (s.verification_uri || 'opencode.ai') + ')';
+          _('ocOAuthUserCode').textContent = s.user_code;
+        } else if (s.status === 'validating') {
+          _('ocOAuthStatus').textContent = 'Validating OpenCode token...';
+        } else if (s.status === 'completed') {
+          clearInterval(ocOAuthPollInterval);
+          btn.disabled = false;
+          btn.innerHTML = 'Start OpenCode Login';
+          _('ocOAuthProgress').style.display = 'none';
+          _('ocOAuthResult').innerHTML = '<div style="color:var(--accent2);font-weight:600;font-size:14px">✓ Account Connected: ' + esc(name) + '</div>';
+          _('ocOAuthResult').style.display = 'block';
+          _('ocDeviceName').value = '';
+          toast('OpenCode account ' + name + ' connected successfully!', 'success');
+          loadOcAccounts();
+        } else if (s.status === 'failed' || s.status === 'expired' || s.status === 'canceled') {
+          clearInterval(ocOAuthPollInterval);
+          btn.disabled = false;
+          btn.innerHTML = 'Start OpenCode Login';
+          _('ocOAuthProgress').style.display = 'none';
+          toast('OpenCode authorization ' + s.status + (s.error ? ': ' + s.error : ''), 'error');
+        }
+      } catch (e) {
+        if (++pollFails >= 5) {
+          clearInterval(ocOAuthPollInterval);
+          btn.disabled = false;
+          btn.innerHTML = 'Start OpenCode Login';
+          toast('OpenCode login poll failed: ' + e.message, 'error');
+        }
+      }
+    }, 2000);
+  } catch (e) {
+    btn.disabled = false;
+    btn.innerHTML = 'Start OpenCode Login';
+    _('ocOAuthProgress').style.display = 'none';
+    toast('Error: ' + e.message, 'error');
+  }
+}
+
+async function cancelOcOAuth() {
+  if (ocOAuthPollInterval) {
+    clearInterval(ocOAuthPollInterval);
+    ocOAuthPollInterval = null;
+  }
+  await api('POST', '/opencode/oauth/cancel');
+  _('btnStartOcOAuth').disabled = false;
+  _('btnStartOcOAuth').innerHTML = 'Start OpenCode Login';
+  _('ocOAuthProgress').style.display = 'none';
+  toast('OpenCode login canceled', 'info');
+}
+
+async function submitOcManualAccount() {
+  const name = _('ocManualName').value.trim();
+  const token = _('ocManualToken').value.trim();
+  const refreshToken = _('ocManualRefreshToken').value.trim();
+  const orgID = _('ocManualOrgID').value.trim();
+  const route = _('ocManualRoute').value;
+
+  if (!name) { toast('Account name is required', 'error'); return; }
+  if (!token && !refreshToken) { toast('Either token or refresh token is required', 'error'); return; }
+
+  try {
+    const res = await api('POST', '/opencode/accounts/add', {
+      name: name,
+      token: token,
+      refresh_token: refreshToken,
+      org_id: orgID,
+      route: route
+    });
+    if (!res.success) throw new Error(res.error || 'Failed to add');
+    toast('Account ' + name + ' added successfully', 'success');
+    _('ocManualName').value = '';
+    _('ocManualToken').value = '';
+    _('ocManualRefreshToken').value = '';
+    _('ocManualOrgID').value = '';
+    loadOcAccounts();
+  } catch (e) {
+    toast('Add failed: ' + e.message, 'error');
+  }
+}
+
+async function deleteOcAccount(name) {
+  if (!confirm('Delete OpenCode account "' + name + '"?')) return;
+  try {
+    const res = await api('POST', '/opencode/accounts/delete', { name: name });
+    if (!res.success) throw new Error(res.error || 'Failed to delete');
+    toast('Account deleted', 'success');
+    loadOcAccounts();
+  } catch (e) {
+    toast('Delete failed: ' + e.message, 'error');
+  }
+}
+
+async function testOcAccount(name) {
+  toast('Sending probe test for ' + name + '...', 'info');
+  try {
+    const res = await api('POST', '/opencode/accounts/test', { name: name });
+    if (res.success) {
+      toast('Test passed for ' + name + ' (' + (res.data.model || 'ok') + ')', 'success');
+    } else {
+      toast('Test failed for ' + name + ': ' + (res.data ? res.data.reason : res.error), 'error');
+    }
+    loadOcAccounts();
+  } catch (e) {
+    toast('Test error: ' + e.message, 'error');
+  }
+}
+
+async function refreshOcAccount(name) {
+  toast('Refreshing token for ' + name + '...', 'info');
+  try {
+    const res = await api('POST', '/opencode/accounts/refresh', { name: name });
+    if (!res.success) throw new Error(res.error || 'Refresh failed');
+    toast('Token refreshed for ' + name, 'success');
+    loadOcAccounts();
+  } catch (e) {
+    toast('Refresh error: ' + e.message, 'error');
+  }
+}
+
+async function changeOcAccountRoute(name, route) {
+  try {
+    const res = await api('POST', '/opencode/accounts/route', { name: name, route: route });
+    if (!res.success) throw new Error(res.error || 'Route update failed');
+    toast('Route for ' + name + ' set to ' + route, 'success');
+  } catch (e) {
+    toast('Route update failed: ' + e.message, 'error');
+  }
 }
 
 async function saveOcConfig() {

@@ -1,0 +1,4 @@
+# Enforce LF endings on profile fixtures to preserve SHA256 integrity hashes on Windows
+internal/app/profiles/** text eol=lf
+internal/app/profiles/**/*.json text eol=lf
+internal/app/profiles/**/*.txt text eol=lf

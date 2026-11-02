@@ -1,0 +1,7 @@
+{
+  "client": "github-copilot-chat",
+  "version": "0.62.0",
+  "tool_count": 51,
+  "tools_exact_sha256": "64547ba62760df971b3343d2f49cc8bc09e768e3689f2ae22636f715664fa5d6",
+  "tools_normalized_sha256": "54bbec3f34d3d799967b0b6eace6eb94d52ed36a6bbced42d01f331e3d107c3a"
+}

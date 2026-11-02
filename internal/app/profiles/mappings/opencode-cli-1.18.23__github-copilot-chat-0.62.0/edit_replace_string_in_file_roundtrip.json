@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "normalization": {
+    "tool_call_id": "call_fixture_edit_001",
+    "workspace_root": "/workspace/project",
+    "result_format": "OpenCode edit result text"
+  },
+  "evidence": {
+    "opencode_cli_capture": {
+      "run": "opencode-edit-success-20260826",
+      "initial_body_bytes": 2652,
+      "initial_body_sha256": "9e71351b1315215562ef1b810fd67755e8d26f546933eb88c5e8c6cbf2298571",
+      "continuation_body_bytes": 32996,
+      "continuation_body_sha256": "4cc0d5551e74268256cfe4ba471f65d4a0136522452a438881863ed7a00f7c02"
+    },
+    "copilot_capture": {
+      "run": "copilot-edit-roundtrip",
+      "initial_body_bytes": 120013,
+      "initial_body_sha256": "4d704e985d5b9d13e4f0733bbeb811ee4877be809fda61abf384e8fee0ff9d2e",
+      "continuation_body_bytes": 120567,
+      "continuation_body_sha256": "e6edeed66766469d96fe74a82331bcb29703069e9473a589b3db647759ba2bdb"
+    }
+  },
+  "backend_call": {
+    "id": "call_fixture_edit_001",
+    "type": "function",
+    "function": {
+      "name": "edit",
+      "arguments": "{\"filePath\":\"/workspace/project/marker.txt\",\"newString\":\"CAPTURE_FILE_ALPHA_EDITED\",\"oldString\":\"CAPTURE_FILE_ALPHA\"}"
+    }
+  },
+  "client_call": {
+    "id": "call_fixture_edit_001",
+    "type": "function",
+    "function": {
+      "name": "replace_string_in_file",
+      "arguments": "{\"filePath\":\"/workspace/project/marker.txt\",\"newString\":\"CAPTURE_FILE_ALPHA_EDITED\",\"oldString\":\"CAPTURE_FILE_ALPHA\"}"
+    }
+  },
+  "client_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_edit_001",
+    "content": "Edit applied successfully."
+  },
+  "backend_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_edit_001",
+    "content": "Edit applied successfully."
+  }
+}

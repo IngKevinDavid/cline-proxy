@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "normalization": {
+    "tool_call_id": "call_fixture_read_error_001",
+    "workspace_root": "/workspace/project",
+    "remote_authority": "fixture-host"
+  },
+  "evidence": {
+    "opencode_cli_capture": {
+      "run": "opencode-read-error-20260826",
+      "response_body_bytes": 5183,
+      "response_body_sha256": "48d55b8fe0c7e46b54777713d5c3d4d90aa2c455fee3a4252f694ac8e7514045",
+      "continuation_body_bytes": 33380,
+      "continuation_body_sha256": "a3370717ade93af3dda2dc567d5d887f3330063cd28d779bab40406976846b0e"
+    },
+    "copilot_capture": {
+      "run": "copilot-read-error-20260826",
+      "initial_body_bytes": 111643,
+      "initial_body_sha256": "2f72d75606a6b4026d5ed05b2f1658f48991dc848bf3b62c21341406618b6400",
+      "continuation_body_bytes": 112499,
+      "continuation_body_sha256": "51786b5a8655dd4883216dc40e9bff3b6c86d36526b4d06d758c606b80c9b0eb"
+    }
+  },
+  "backend_call": {
+    "id": "call_fixture_read_error_001",
+    "type": "function",
+    "function": {
+      "name": "read",
+      "arguments": "{\"filePath\":\"/workspace/project/definitely-missing.txt\"}"
+    }
+  },
+  "client_call": {
+    "id": "call_fixture_read_error_001",
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "arguments": "{\"endLine\":2000,\"filePath\":\"/workspace/project/definitely-missing.txt\",\"startLine\":1}"
+    }
+  },
+  "client_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_read_error_001",
+    "content": "ERROR while calling tool: cannot open vscode-remote://ssh-remote%2Bfixture-host/workspace/project/definitely-missing.txt. Detail: Não é possível ler o arquivo 'vscode-remote://ssh-remote+fixture-host/workspace/project/definitely-missing.txt' (Error: Não é possível resolver o arquivo inexistente 'vscode-remote://ssh-remote+fixture-host/workspace/project/definitely-missing.txt')\nPlease check your input and try again."
+  },
+  "backend_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_read_error_001",
+    "content": "File not found: /workspace/project/definitely-missing.txt"
+  }
+}

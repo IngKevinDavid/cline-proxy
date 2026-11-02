@@ -1,0 +1,18 @@
+{
+  "version": "2.0.15",
+  "tools_exact_sha256": "154fdee289f73f4ce26d882fdd851e51263a2368b9aadf32808c296ccafe33b6",
+  "tool_names": [
+    "edit",
+    "glob",
+    "grep",
+    "question",
+    "read",
+    "shell",
+    "skill",
+    "subagent",
+    "webfetch",
+    "websearch",
+    "write",
+    "execute"
+  ]
+}

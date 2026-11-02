@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "normalization": {
+    "tool_call_id": "call_fixture_glob_001",
+    "workspace_root": "/workspace/project",
+    "result_count": 40
+  },
+  "evidence": {
+    "opencode_cli_capture": {
+      "run": "20260826T013433Z",
+      "flow": "5c86d462-6b96-457f-95f3-dede06135d3d",
+      "body_bytes": 72685,
+      "body_sha256": "2c8f9d0480430b465a6904ea77f8fb9fde44a77d7f545ffad01b470060ff23c3",
+      "observed_tool": "glob",
+      "observed_result_count": 11
+    },
+    "copilot_capture": {
+      "run": "copilot-file-search-roundtrip-20260826",
+      "initial_body_bytes": 115098,
+      "initial_body_sha256": "c51160f538feab23cd0b0b587953f6a32bf4e93c64ca0f334bc85a32e5a216f8",
+      "continuation_body_bytes": 117738,
+      "continuation_body_sha256": "4199fd4f3ef3a17aaa4fd12414dad2290bdd42c981f6a0d7881bd7ecda630a76",
+      "observed_tool": "file_search",
+      "observed_result_count": 40
+    }
+  },
+  "backend_call": {
+    "id": "call_fixture_glob_001",
+    "type": "function",
+    "function": {
+      "name": "glob",
+      "arguments": "{\"pattern\":\"*.go\"}"
+    }
+  },
+  "client_call": {
+    "id": "call_fixture_glob_001",
+    "type": "function",
+    "function": {
+      "name": "file_search",
+      "arguments": "{\"maxResults\":100,\"query\":\"/workspace/project/*.go\"}"
+    }
+  },
+  "client_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_glob_001",
+    "content": "40 total results\n/workspace/project/main.go\n/workspace/project/opencode_models_test.go\n/workspace/project/opencode_upstream.go\n/workspace/project/cdp.go\n/workspace/project/opencode_tool_response.go\n/workspace/project/opencode_fidelity.go\n/workspace/project/config.go\n/workspace/project/display_contract_test.go\n/workspace/project/opencode_admin_test.go\n/workspace/project/admin.go\n/workspace/project/debug.go\n/workspace/project/opencode_tool_mapping_test.go\n/workspace/project/cdp_test.go\n/workspace/project/opencode_server_standalone.go\n/workspace/project/warp.go\n/workspace/project/opencode_accounts_test.go\n/workspace/project/opencode_models.go\n/workspace/project/tracer.go\n/workspace/project/upstream.go\n/workspace/project/opencode_server_standalone_test.go\n/workspace/project/opencode_buffer.go\n/workspace/project/debug_test.go\n/workspace/project/proxy_manager.go\n/workspace/project/opencode_tools_e2e_test.go\n/workspace/project/opencode_sse.go\n/workspace/project/opencode_accounts.go\n/workspace/project/standalone_helpers.go\n/workspace/project/warp_test.go\n/workspace/project/env.go\n/workspace/project/proxy_manager_test.go\n/workspace/project/browser_lifecycle.go\n/workspace/project/local_proxy_test.go\n/workspace/project/opencode_tool_mapping.go\n/workspace/project/opencode_upstream_test.go\n/workspace/project/opencode_sse_test.go\n/workspace/project/opencode_fidelity_test.go\n/workspace/project/opencode_credentials.go\n/workspace/project/admin_html.go\n/workspace/project/local_proxy.go\n/workspace/project/opencode_fidelity_profile.go"
+  },
+  "backend_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_glob_001",
+    "content": "/workspace/project/main.go\n/workspace/project/opencode_models_test.go\n/workspace/project/opencode_upstream.go\n/workspace/project/cdp.go\n/workspace/project/opencode_tool_response.go\n/workspace/project/opencode_fidelity.go\n/workspace/project/config.go\n/workspace/project/display_contract_test.go\n/workspace/project/opencode_admin_test.go\n/workspace/project/admin.go\n/workspace/project/debug.go\n/workspace/project/opencode_tool_mapping_test.go\n/workspace/project/cdp_test.go\n/workspace/project/opencode_server_standalone.go\n/workspace/project/warp.go\n/workspace/project/opencode_accounts_test.go\n/workspace/project/opencode_models.go\n/workspace/project/tracer.go\n/workspace/project/upstream.go\n/workspace/project/opencode_server_standalone_test.go\n/workspace/project/opencode_buffer.go\n/workspace/project/debug_test.go\n/workspace/project/proxy_manager.go\n/workspace/project/opencode_tools_e2e_test.go\n/workspace/project/opencode_sse.go\n/workspace/project/opencode_accounts.go\n/workspace/project/standalone_helpers.go\n/workspace/project/warp_test.go\n/workspace/project/env.go\n/workspace/project/proxy_manager_test.go\n/workspace/project/browser_lifecycle.go\n/workspace/project/local_proxy_test.go\n/workspace/project/opencode_tool_mapping.go\n/workspace/project/opencode_upstream_test.go\n/workspace/project/opencode_sse_test.go\n/workspace/project/opencode_fidelity_test.go\n/workspace/project/opencode_credentials.go\n/workspace/project/admin_html.go\n/workspace/project/local_proxy.go\n/workspace/project/opencode_fidelity_profile.go"
+  }
+}

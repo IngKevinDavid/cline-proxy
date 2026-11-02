@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "normalization": {
+    "tool_call_id": "call_fixture_edit_error_001",
+    "workspace_root": "/workspace/project",
+    "result_format": "canonical OpenCode edit error text"
+  },
+  "evidence": {
+    "copilot_capture": {
+      "run": "copilot-edit-roundtrip",
+      "initial_body_bytes": 120013,
+      "initial_body_sha256": "4d704e985d5b9d13e4f0733bbeb811ee4877be809fda61abf384e8fee0ff9d2e",
+      "continuation_body_bytes": 120567,
+      "continuation_body_sha256": "e6edeed66766469d96fe74a82331bcb29703069e9473a589b3db647759ba2bdb"
+    },
+    "opencode_cli_contract": {
+      "source": "profiles/opencode-cli/1.18.23/tools.json",
+      "error": "oldString not found in content"
+    }
+  },
+  "backend_call": {
+    "id": "call_fixture_edit_error_001",
+    "type": "function",
+    "function": {
+      "name": "edit",
+      "arguments": "{\"filePath\":\"/workspace/project/marker.txt\",\"newString\":\"CAPTURE_MISSING_NEW\",\"oldString\":\"CAPTURE_MISSING_OLD\"}"
+    }
+  },
+  "client_call": {
+    "id": "call_fixture_edit_error_001",
+    "type": "function",
+    "function": {
+      "name": "replace_string_in_file",
+      "arguments": "{\"filePath\":\"/workspace/project/marker.txt\",\"newString\":\"CAPTURE_MISSING_NEW\",\"oldString\":\"CAPTURE_MISSING_OLD\"}"
+    }
+  },
+  "client_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_edit_error_001",
+    "content": "String replacement failed: Could not find matching text to replace. Try making your search string more specific or checking for whitespace/formatting differences."
+  },
+  "backend_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_edit_error_001",
+    "content": "oldString not found in content"
+  }
+}

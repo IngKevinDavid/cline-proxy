@@ -773,6 +773,25 @@ func resolveZenKeyIdentity(rawKey string) (token string, orgID string, isConsole
 // pickZenKey round-robin 选取一个未冷却的 key；全部冷却时按轮转顺序返回下一个。
 // 返回 "" 表示当前没有配置任何 key。
 func pickZenKey() string {
+	// 优先从 OpenCode Multi-Account Pool 选取可用账号
+	if store := GetOpenCodeAccountStore(); store != nil && store.ActiveAccountCount() > 0 {
+		if acc, err := store.PickAccount(""); err == nil && acc != nil {
+			if acc.RefreshToken != "" && acc.ExpiresAt > 0 && time.Now().UnixMilli() >= acc.ExpiresAt-120_000 {
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				_ = store.RefreshAccountToken(ctx, acc.Name)
+				cancel()
+				if updated, err := store.PickAccount(acc.Name); err == nil && updated != nil {
+					acc = updated
+				}
+			}
+			rawToken := strings.TrimPrefix(acc.Authorization, "Bearer ")
+			if acc.OrgID != "" {
+				return rawToken + "#" + acc.OrgID
+			}
+			return rawToken
+		}
+	}
+
 	keys := getZenConfig().Keys
 	if len(keys) == 0 || (len(keys) == 1 && keys[0] == "public") {
 		if auth, err := GetConsoleAuth(); err == nil && auth != nil && auth.AccessToken != "" {
@@ -2129,6 +2148,19 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 
 		token, orgID, isConsole := resolveZenKeyIdentity(key)
 
+		// Check if key belongs to an OpenCode account with a configured egress route
+		if acc := FindAccountByToken(token); acc != nil && o.pinProxy == "" {
+			if rProxy := resolveRouteProxyURL(acc.Route); rProxy != "" {
+				proxyURL = rProxy
+				pidx = -1
+				viaProxy = acc.Route
+			} else if acc.Route == OpenCodeRouteDirect {
+				proxyURL = ""
+				pidx = -1
+				viaProxy = "direct"
+			}
+		}
+
 		sess := CanonicalSessionID()
 		ua := zenCLIUserAgent()
 		body := buildZenResponsesBody(params, zm.ID, sess)
@@ -2188,6 +2220,9 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 			return nil, rateLimited, fmt.Errorf("zen responses request: %w", err)
 		}
 		if resp.StatusCode == http.StatusOK {
+			if acc := FindAccountByToken(token); acc != nil {
+				GetOpenCodeAccountStore().MarkAccountSuccess(acc.Name)
+			}
 			markZenKeySuccess(key)
 			markZenSuccess()
 			harvestMarkSuccess(key)
@@ -2218,6 +2253,9 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		apiErr := &zenHTTPError{Status: resp.StatusCode, Body: kit.Truncate(bodyBytes, 500)}
 
 		if isRateLimited(resp.StatusCode, bodyBytes) {
+			if acc := FindAccountByToken(token); acc != nil {
+				GetOpenCodeAccountStore().CooldownAccount(acc.Name, 15*time.Minute)
+			}
 			rateLimited++
 			apiErr.RateLimited = true
 			if pidx >= 0 {
@@ -2413,6 +2451,19 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 
 		token, orgID, isConsole := resolveZenKeyIdentity(key)
 
+		// Check if key belongs to an OpenCode account with a configured egress route
+		if acc := FindAccountByToken(token); acc != nil && o.pinProxy == "" {
+			if rProxy := resolveRouteProxyURL(acc.Route); rProxy != "" {
+				proxyURL = rProxy
+				pidx = -1
+				viaProxy = acc.Route
+			} else if acc.Route == OpenCodeRouteDirect {
+				proxyURL = ""
+				pidx = -1
+				viaProxy = "direct"
+			}
+		}
+
 		sess := CanonicalSessionID()
 		ua := zenCLIUserAgent()
 
@@ -2477,6 +2528,9 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 			return nil, rateLimited, fmt.Errorf("zen request: %w", err)
 		}
 		if resp.StatusCode == http.StatusOK {
+			if acc := FindAccountByToken(token); acc != nil {
+				GetOpenCodeAccountStore().MarkAccountSuccess(acc.Name)
+			}
 			markZenKeySuccess(key)
 			markZenSuccess()
 			harvestMarkSuccess(key)
@@ -2489,6 +2543,9 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		apiErr := &zenHTTPError{Status: resp.StatusCode, Body: kit.Truncate(bodyBytes, 500)}
 
 		if isRateLimited(resp.StatusCode, bodyBytes) {
+			if acc := FindAccountByToken(token); acc != nil {
+				GetOpenCodeAccountStore().CooldownAccount(acc.Name, 15*time.Minute)
+			}
 			rateLimited++
 			apiErr.RateLimited = true
 			if pidx >= 0 {

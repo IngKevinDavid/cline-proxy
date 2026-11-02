@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "normalization": {
+    "tool_call_id": "call_fixture_grep_001",
+    "workspace_root": "/workspace/project",
+    "result_format": "OpenCode grep summary and grouped absolute paths reconstructed from Copilot grep_search output"
+  },
+  "evidence": {
+    "opencode_cli_capture": {
+      "run": "opencode-grep-success-20260826",
+      "request_body_sha256": "c32e1284f61301a7ba800ef6880f19c366c680e0ef8c46bcfc09f3bfb7ffcdb2",
+      "observed_tool": "grep",
+      "observed_pattern": "CAPTURE_WORKTREE_ALPHA",
+      "observed_result": "Found 1 matches\n/tmp/grep-worktree/AGENTS.md:\n  Line 4: `CAPTURE_WORKTREE_ALPHA`."
+    },
+    "copilot_capture": {
+      "run": "copilot-grep-roundtrip",
+      "initial_body_sha256": "79e6e4d3c7868765d7385a32462ae370356d959ba6ebb55029a0afbba7d02e77",
+      "continuation_body_sha256": "b571ea9d97dbe30a439eb1d55fdc8c06538274cb05f17c63ae2e5511b79df227",
+      "observed_tool": "grep_search",
+      "observed_query": "CAPTURE_GREP_OK",
+      "observed_result": "Found 2 matches in 2 files for \"CAPTURE_GREP_OK\""
+    }
+  },
+  "backend_call": {
+    "id": "call_fixture_grep_001",
+    "type": "function",
+    "function": {
+      "name": "grep",
+      "arguments": "{\"pattern\":\"CAPTURE_WORKTREE_ALPHA\"}"
+    }
+  },
+  "client_call": {
+    "id": "call_fixture_grep_001",
+    "type": "function",
+    "function": {
+      "name": "grep_search",
+      "arguments": "{\"isRegexp\":true,\"maxResults\":100,\"query\":\"CAPTURE_WORKTREE_ALPHA\"}"
+    }
+  },
+  "client_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_grep_001",
+    "content": "Found 1 matches in 1 files for \"CAPTURE_WORKTREE_ALPHA\"\n\nAGENTS.md\n4:`CAPTURE_WORKTREE_ALPHA`."
+  },
+  "backend_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_grep_001",
+    "content": "Found 1 matches\n/workspace/project/AGENTS.md:\n  Line 4: `CAPTURE_WORKTREE_ALPHA`."
+  }
+}

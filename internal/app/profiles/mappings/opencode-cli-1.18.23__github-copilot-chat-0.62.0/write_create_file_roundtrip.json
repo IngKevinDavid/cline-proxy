@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "normalization": {
+    "tool_call_id": "call_fixture_write_001",
+    "workspace_root": "/workspace/project",
+    "result_format": "OpenCode write result text"
+  },
+  "evidence": {
+    "opencode_cli_capture": {
+      "run": "opencode-write-success-20260826",
+      "initial_body_sha256": "d39f39720fbbb6e0b4fc02b26f792330bab779052424a8477440f380dac7a9f0",
+      "continuation_body_sha256": "384dc92cbfe9aa67850bcb6451f0e76333d2a322e31971f5003c893319a85787"
+    },
+    "copilot_capture": {
+      "run": "copilot-write-roundtrip",
+      "initial_body_bytes": 121510,
+      "initial_body_sha256": "99d57de0838ccf5b34aba8b036f81bb9419c3f1b980a269b09dcaf7c951e6f40",
+      "continuation_body_bytes": 122062,
+      "continuation_body_sha256": "a20739aaf8a55b2757af03a4a06ad41e23f299259d92b7c3f02702da2d19113e"
+    }
+  },
+  "backend_call": {
+    "id": "call_fixture_write_001",
+    "type": "function",
+    "function": {
+      "name": "write",
+      "arguments": "{\"content\":\"CAPTURE_WRITE_CONTENT\",\"filePath\":\"/workspace/project/capture-write.txt\"}"
+    }
+  },
+  "client_call": {
+    "id": "call_fixture_write_001",
+    "type": "function",
+    "function": {
+      "name": "create_file",
+      "arguments": "{\"content\":\"CAPTURE_WRITE_CONTENT\",\"filePath\":\"/workspace/project/capture-write.txt\"}"
+    }
+  },
+  "client_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_write_001",
+    "content": "The following files were successfully edited:\n/workspace/project/capture-write.txt"
+  },
+  "backend_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_write_001",
+    "content": "Wrote file successfully."
+  }
+}

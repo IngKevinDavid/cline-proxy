@@ -1,0 +1,1576 @@
+[
+  {
+    "function": {
+      "description": "Create a new directory structure in the workspace. Will recursively create all directories in the path, like mkdir -p. You do not need to use this tool before using create_file, that tool will automatically create the needed directories.",
+      "name": "create_directory",
+      "parameters": {
+        "properties": {
+          "dirPath": {
+            "description": "The absolute path to the directory to create.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dirPath"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "This is a tool for creating a new file in the workspace. The file will be created with the specified content. The directory will be created if it does not already exist. Never use this tool to edit a file that already exists.",
+      "name": "create_file",
+      "parameters": {
+        "properties": {
+          "content": {
+            "description": "The content to write to the file.",
+            "type": "string"
+          },
+          "filePath": {
+            "description": "The absolute path to the file to create.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filePath",
+          "content"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Generates a new Jupyter Notebook (.ipynb) in VS Code. Jupyter Notebooks are interactive documents commonly used for data exploration, analysis, visualization, and combining code with narrative text. Prefer creating plain Python files or similar unless a user explicitly requests creating a new Jupyter Notebook or already has a Jupyter Notebook opened or exists in the workspace.",
+      "name": "create_new_jupyter_notebook",
+      "parameters": {
+        "properties": {
+          "query": {
+            "description": "The query to use to generate the jupyter notebook. This should be a clear and concise description of the notebook the user wants to create.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Get comprehensive setup steps to help the user create complete project structures in a VS Code workspace. This tool is designed for full project initialization and scaffolding, not for creating individual files.\n\nWhen to use this tool:\n- User wants to create a new complete project from scratch\n- Setting up entire project frameworks (TypeScript projects, React apps, Node.js servers, etc.)\n- Initializing Model Context Protocol (MCP) servers with full structure\n- Creating VS Code extensions with proper scaffolding\n- Setting up Next.js, Vite, or other framework-based projects\n- User asks for \"new project\", \"create a workspace\", \"set up a [framework] project\"\n- Need to establish complete development environment with dependencies, config files, and folder structure\n\nWhen NOT to use this tool:\n- Creating single files or small code snippets\n- Adding individual files to existing projects\n- Making modifications to existing codebases\n- User asks to \"create a file\" or \"add a component\"\n- Simple code examples or demonstrations\n- Debugging or fixing existing code\n\nThis tool provides complete project setup including:\n- Folder structure creation\n- Package.json and dependency management\n- Configuration files (tsconfig, eslint, etc.)\n- Initial boilerplate code\n- Development environment setup\n- Build and run instructions\n\nUse other file creation tools for individual files within existing projects.",
+      "name": "create_new_workspace",
+      "parameters": {
+        "properties": {
+          "query": {
+            "description": "The query to use to generate the new workspace. This should be a clear and concise description of the workspace the user wants to create.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "This is a tool for editing an existing Notebook file in the workspace. Generate the \"explanation\" property first.\nThe system is very smart and can understand how to apply your edits to the notebooks.\nWhen updating the content of an existing cell, ensure newCode preserves whitespace and indentation exactly and does NOT include any code markers such as (...existing code...).",
+      "name": "edit_notebook_file",
+      "parameters": {
+        "properties": {
+          "cellId": {
+            "description": "Id of the cell that needs to be deleted or edited. Use the value `TOP`, `BOTTOM` when inserting a cell at the top or bottom of the notebook, else provide the id of the cell after which a new cell is to be inserted. Remember, if a cellId is provided and editType=insert, then a cell will be inserted after the cell with the provided cellId.",
+            "type": "string"
+          },
+          "editType": {
+            "description": "The operation peformed on the cell, whether `insert`, `delete` or `edit`.\nUse the `editType` field to specify the operation: `insert` to add a new cell, `edit` to modify an existing cell's content, and `delete` to remove a cell.",
+            "enum": [
+              "insert",
+              "delete",
+              "edit"
+            ],
+            "type": "string"
+          },
+          "filePath": {
+            "description": "An absolute path to the notebook file to edit, or the URI of a untitled, not yet named, file, such as `untitled:Untitled-1.",
+            "type": "string"
+          },
+          "language": {
+            "description": "The language of the cell. `markdown`, `python`, `javascript`, `julia`, etc.",
+            "type": "string"
+          },
+          "newCode": {
+            "anyOf": [
+              {
+                "description": "The code for the new or existing cell to be edited. Code should not be wrapped within <VSCode.Cell> tags. Do NOT include code markers such as (...existing code...) to indicate existing code.",
+                "type": "string"
+              },
+              {
+                "items": {
+                  "description": "The code for the new or existing cell to be edited. Code should not be wrapped within <VSCode.Cell> tags",
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ]
+          }
+        },
+        "required": [
+          "filePath",
+          "editType",
+          "cellId"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Fetches the main content from a web page. This tool is useful for summarizing or analyzing the content of a webpage. You should use this tool when you think the user is looking for information from a specific webpage.",
+      "name": "fetch_webpage",
+      "parameters": {
+        "properties": {
+          "query": {
+            "description": "The query to search for in the web page's content. This should be a clear and concise description of the content you want to find.",
+            "type": "string"
+          },
+          "urls": {
+            "description": "An array of URLs to fetch content from.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "urls",
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Search for files in the workspace by glob pattern. This only returns the paths of matching files. Use this tool when you know the exact filename pattern of the files you're searching for. Glob patterns match from the root of the workspace folder. Examples:\n- **/*.{js,ts} to match all js/ts files in the workspace.\n- src/** to match all files under the top-level src folder.\n- **/foo/**/*.js to match all js files under any foo folder in the workspace.\n\nIn a multi-root workspace, you can scope the search to a specific workspace folder by using the absolute path to the folder as the query, e.g. /path/to/folder/**/*.ts.",
+      "name": "file_search",
+      "parameters": {
+        "properties": {
+          "maxResults": {
+            "description": "The maximum number of results to return. Do not use this unless necessary, it can slow things down. By default, only some matches are returned. If you use this and don't see what you're looking for, you can try again with a more specific query or a larger maxResults.",
+            "type": "number"
+          },
+          "query": {
+            "description": "Search for files with names or paths matching this glob pattern. Can also be an absolute path to a workspace folder to scope the search in a multi-root workspace.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Do a fast text search in the workspace. Use this tool when you want to search with an exact string or regex. If you are not sure what words will appear in the workspace, prefer using regex patterns with alternation (|) or character classes to search for multiple potential words at once instead of making separate searches. For example, use 'function|method|procedure' to look for all of those words at once. Use includePattern to search within files matching a specific pattern, or in a specific file, using a relative path. Use 'includeIgnoredFiles' to include files normally ignored by .gitignore, other ignore files, and `files.exclude` and `search.exclude` settings. Warning: using this may cause the search to be slower, only set it when you want to search in ignored folders like node_modules or build outputs. Use this tool when you want to see an overview of a particular file, instead of using read_file many times to look for code within a file.\n\nIn a multi-root workspace, you can scope the search to a specific workspace folder by using the absolute path to the folder as the includePattern, e.g. /path/to/folder.",
+      "name": "grep_search",
+      "parameters": {
+        "properties": {
+          "includeIgnoredFiles": {
+            "description": "Whether to include files that would normally be ignored according to .gitignore, other ignore files and `files.exclude` and `search.exclude` settings. Warning: using this may cause the search to be slower. Only set it when you want to search in ignored folders like node_modules or build outputs.",
+            "type": "boolean"
+          },
+          "includePattern": {
+            "description": "Search files matching this glob pattern. Will be applied to the relative path of files within the workspace. To search recursively inside a folder, use a proper glob pattern like \"src/folder/**\". Do not use | in includePattern. Can also be an absolute path to a workspace folder to scope the search in a multi-root workspace.",
+            "type": "string"
+          },
+          "isRegexp": {
+            "description": "Whether the pattern is a regex.",
+            "type": "boolean"
+          },
+          "maxResults": {
+            "description": "The maximum number of results to return. Do not use this unless necessary, it can slow things down. By default, only some matches are returned. If you use this and don't see what you're looking for, you can try again with a more specific query or a larger maxResults.",
+            "type": "number"
+          },
+          "query": {
+            "description": "The pattern to search for in files in the workspace. Use regex with alternation (e.g., 'word1|word2|word3') or character classes to find multiple potential words in a single search. Be sure to set the isRegexp property properly to declare whether it's a regex or plain text pattern. Is case-insensitive.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "isRegexp"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Get any compile or lint errors in a specific file or across all files. If the user mentions errors or problems in a file, they may be referring to these. Use the tool to see the same errors that the user is seeing. If the user asks you to analyze all errors, or does not specify a file, use this tool to gather errors for all files. Also use this tool after editing a file to validate the change.",
+      "name": "get_errors",
+      "parameters": {
+        "properties": {
+          "filePaths": {
+            "description": "The absolute paths to the files or folders to check for errors. Omit 'filePaths' when retrieving all errors.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "This is a tool returns the list of the Notebook cells along with the id, cell types, line ranges, language, execution information and output mime types for each cell. This is useful to get Cell Ids when executing a notebook or determine what cells have been executed and what order, or what cells have outputs. If required to read contents of a cell use this to determine the line range of a cells, and then use read_file tool to read a specific line range. Requery this tool if the contents of the notebook change.",
+      "name": "copilot_getNotebookSummary",
+      "parameters": {
+        "properties": {
+          "filePath": {
+            "description": "An absolute path to the notebook file with the cell to run, or the URI of a untitled, not yet named, file, such as `untitled:Untitled-1.ipynb",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filePath"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Get comprehensive VS Code API documentation and references for extension development. This tool provides authoritative documentation for VS Code's extensive API surface, including proposed APIs, contribution points, and best practices. Use this tool for understanding complex VS Code API interactions.\n\nWhen to use this tool:\n- User asks about specific VS Code APIs, interfaces, or extension capabilities\n- Need documentation for VS Code extension contribution points (commands, views, settings, etc.)\n- Questions about proposed APIs and their usage patterns\n- Understanding VS Code extension lifecycle, activation events, and packaging\n- Best practices for VS Code extension development architecture\n- API examples and code patterns for extension features\n- Troubleshooting extension-specific issues or API limitations\n\nWhen NOT to use this tool:\n- Creating simple standalone files or scripts unrelated to VS Code extensions\n- General programming questions not specific to VS Code extension development\n- Questions about using VS Code as an editor (user-facing features)\n- Non-extension related development tasks\n- File creation or editing that doesn't involve VS Code extension APIs\n\nCRITICAL usage guidelines:\n1. Always include specific API names, interfaces, or concepts in your query\n2. Mention the extension feature you're trying to implement\n3. Include context about proposed vs stable APIs when relevant\n4. Reference specific contribution points when asking about extension manifest\n5. Be specific about the VS Code version or API version when known\n\nScope: This tool is for EXTENSION DEVELOPMENT ONLY - building tools that extend VS Code itself, not for general file creation or non-extension programming tasks.",
+      "name": "get_vscode_api",
+      "parameters": {
+        "properties": {
+          "query": {
+            "description": "The query to search vscode documentation for. Should contain all relevant context.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Searches a GitHub repository for relevant source code snippets. Only use this tool if the user is very clearly asking for code snippets from a specific GitHub repository. Do not use this tool for Github repos that the user has open in their workspace.",
+      "name": "github_repo",
+      "parameters": {
+        "properties": {
+          "query": {
+            "description": "The query to search for repo. Should contain all relevant context.",
+            "type": "string"
+          },
+          "repo": {
+            "description": "The name of the Github repository to search for code in. Should must be formatted as '<owner>/<repo>'.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Lexically searches a GitHub repository or organization for files containing specific keywords or code patterns. Use this when looking for exact strings, function names, or identifiers in a GitHub repo or org. Unlike the semantic search tool, this uses keyword matching rather than meaning-based search.",
+      "name": "github_text_search",
+      "parameters": {
+        "properties": {
+          "maxResults": {
+            "description": "Optional. The maximum number of search results to return. Defaults to 100.",
+            "type": "number"
+          },
+          "query": {
+            "description": "The keyword search query. Supports GitHub code search syntax such as 'language:typescript', 'extension:ts', 'path:src/', etc.",
+            "type": "string"
+          },
+          "scope": {
+            "description": "The GitHub scope to search. Use 'owner/repo' to search a single repository, or an org name (no slash) to search across an entire organization.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "query"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Insert new code into an existing file in the workspace. Use this tool once per file that needs to be modified, even if there are multiple changes for a file. Generate the \"explanation\" property first.\nThe system is very smart and can understand how to apply your edits to the files, you just need to provide minimal hints.\nAvoid repeating existing code, instead use comments to represent regions of unchanged code. Be as concise as possible. For example:\n// ...existing code...\n{ changed code }\n// ...existing code...\n{ changed code }\n// ...existing code...\n\nHere is an example of how you should use format an edit to an existing Person class:\nclass Person {\n\t// ...existing code...\n\tage: number;\n\t// ...existing code...\n\tgetAge() {\n\treturn this.age;\n\t}\n}",
+      "name": "insert_edit_into_file",
+      "parameters": {
+        "properties": {
+          "code": {
+            "description": "The code change to apply to the file.\nThe system is very smart and can understand how to apply your edits to the files, you just need to provide minimal hints.\nAvoid repeating existing code, instead use comments to represent regions of unchanged code. Be as concise as possible. For example:\n// ...existing code...\n{ changed code }\n// ...existing code...\n{ changed code }\n// ...existing code...\n\nHere is an example of how you should use format an edit to an existing Person class:\nclass Person {\n\t// ...existing code...\n\tage: number;\n\t// ...existing code...\n\tgetAge() {\n\t\treturn this.age;\n\t}\n}",
+            "type": "string"
+          },
+          "explanation": {
+            "description": "A short explanation of the edit being made.",
+            "type": "string"
+          },
+          "filePath": {
+            "description": "An absolute path to the file to edit.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "explanation",
+          "filePath",
+          "code"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Install an extension in VS Code. Use this tool to install an extension in Visual Studio Code as part of a new workspace creation process only.",
+      "name": "install_extension",
+      "parameters": {
+        "properties": {
+          "id": {
+            "description": "The ID of the extension to install. This should be in the format <publisher>.<extension>.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The name of the extension to install. This should be a clear and concise description of the extension.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "List the contents of a directory. Result will have the name of the child. If the name ends in /, it's a folder, otherwise a file",
+      "name": "list_dir",
+      "parameters": {
+        "properties": {
+          "path": {
+            "description": "The absolute path to the directory to list.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Manage a persistent memory system with three scopes for storing notes and information across conversations.\n\nMemory is organized under /memories/ with three tiers:\n- `/memories/` — User memory: persistent notes that survive across all workspaces and conversations. Store preferences, patterns, and general insights here.\n- `/memories/session/` — Session memory: notes scoped to the current conversation. Store task-specific context and in-progress notes here. Cleared after the conversation ends.\n- `/memories/repo/` — Repository memory: repository-scoped notes stored locally in the workspace. Store codebase conventions, build commands, project structure facts, and verified practices here.\n\nIMPORTANT: Before creating new memory files, first view the /memories/ directory to understand what already exists. This helps avoid duplicates and maintain organized notes.\n\nCommands:\n- `view`: View contents of a file or list directory contents. Can be used on files or directories (e.g., \"/memories/\" to see all top-level items).\n- `create`: Create a new file at the specified path with the given content. Fails if the file already exists.\n- `str_replace`: Replace an exact string in a file with a new string. The old_str must appear exactly once in the file.\n- `insert`: Insert text at a specific line number in a file. Line 0 inserts at the beginning.\n- `delete`: Delete a file or directory (and all its contents).\n- `rename`: Rename or move a file or directory from path to new_path. Cannot rename across scopes.",
+      "name": "memory",
+      "parameters": {
+        "properties": {
+          "command": {
+            "description": "The operation to perform on the memory file system.",
+            "enum": [
+              "view",
+              "create",
+              "str_replace",
+              "insert",
+              "delete",
+              "rename"
+            ],
+            "type": "string"
+          },
+          "file_text": {
+            "description": "Required for `create`. The content of the file to create.",
+            "type": "string"
+          },
+          "insert_line": {
+            "description": "Required for `insert`. The 0-based line number to insert text at. 0 inserts before the first line.",
+            "type": "number"
+          },
+          "insert_text": {
+            "description": "Required for `insert`. The text to insert at the specified line.",
+            "type": "string"
+          },
+          "new_path": {
+            "description": "Required for `rename`. The new path for the file or directory.",
+            "type": "string"
+          },
+          "new_str": {
+            "description": "Required for `str_replace`. The new string to replace old_str with.",
+            "type": "string"
+          },
+          "old_path": {
+            "description": "Required for `rename`. The current path of the file or directory to rename.",
+            "type": "string"
+          },
+          "old_str": {
+            "description": "Required for `str_replace`. The exact string in the file to replace. Must appear exactly once.",
+            "type": "string"
+          },
+          "path": {
+            "description": "The absolute path to the file or directory inside /memories/, e.g. \"/memories/notes.md\". Used by all commands except `rename`.",
+            "type": "string"
+          },
+          "view_range": {
+            "description": "Optional for `view`. A two-element array [start_line, end_line] (1-indexed) to view a specific range of lines.",
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Read the contents of a file.\n\nYou must specify the line range you're interested in. Line numbers are 1-indexed. If the file contents returned are insufficient for your task, you may call this tool again to retrieve more content. Prefer reading larger ranges over doing many small reads. Binary files use startLine/endLine as byte offsets.",
+      "name": "read_file",
+      "parameters": {
+        "properties": {
+          "endLine": {
+            "description": "The inclusive line number to end reading at, 1-based.",
+            "type": "number"
+          },
+          "filePath": {
+            "description": "The absolute path of the file to read.",
+            "type": "string"
+          },
+          "startLine": {
+            "description": "The line number to start reading from, 1-based.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "filePath",
+          "startLine",
+          "endLine"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "This tool will retrieve the output for a notebook cell from its most recent execution or restored from disk. The cell may have output even when it has not been run in the current kernel session. This tool has a higher token limit for output length than the runNotebookCell tool.",
+      "name": "read_notebook_cell_output",
+      "parameters": {
+        "properties": {
+          "cellId": {
+            "description": "The ID of the cell for which output should be retrieved.",
+            "type": "string"
+          },
+          "filePath": {
+            "description": "An absolute path to the notebook file with the cell to run, or the URI of a untitled, not yet named, file, such as `untitled:Untitled-1.ipynb",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filePath",
+          "cellId"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "This is a tool for making edits in an existing file in the workspace. For moving or renaming files, use run in terminal tool with the 'mv' command instead. For larger edits, split them into smaller edits and call the edit tool multiple times to ensure accuracy. Before editing, always ensure you have the context to understand the file's contents and context. To edit a file, provide: 1) filePath (absolute path), 2) oldString (MUST be the exact literal text to replace including all whitespace, indentation, newlines, and surrounding code etc), and 3) newString (MUST be the exact literal text to replace \\`oldString\\` with (also including all whitespace, indentation, newlines, and surrounding code etc.). Ensure the resulting code is correct and idiomatic.). Each use of this tool replaces exactly ONE occurrence of oldString.\n\nCRITICAL for \\`oldString\\`: Must uniquely identify the single instance to change. Include at least 3 lines of context BEFORE and AFTER the target text, matching whitespace and indentation precisely. If this string matches multiple locations, or does not match exactly, the tool will fail. Never use 'Lines 123-456 omitted' from summarized documents or ...existing code... comments in the oldString or newString.",
+      "name": "replace_string_in_file",
+      "parameters": {
+        "properties": {
+          "filePath": {
+            "description": "An absolute path to the file to edit.",
+            "type": "string"
+          },
+          "newString": {
+            "description": "The exact literal text to replace `old_string` with, preferably unescaped. Provide the EXACT text. Ensure the resulting code is correct and idiomatic.",
+            "type": "string"
+          },
+          "oldString": {
+            "description": "The exact literal text to replace, preferably unescaped. For single replacements (default), include at least 3 lines of context BEFORE and AFTER the target text, matching whitespace and indentation precisely. For multiple replacements, specify expected_replacements parameter. If this string is not the exact literal text (i.e. you escaped it) or does not match exactly, the tool will fail.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filePath",
+          "oldString",
+          "newString"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Resolve a memory file path (like /memories/session/plan.md or /memories/repo/notes.md) to its fully qualified URI. Use this when you need the actual URI for a memory file, for example to pass it to setArtifacts. The path must start with /memories/.",
+      "name": "resolve_memory_file_uri",
+      "parameters": {
+        "properties": {
+          "path": {
+            "description": "The memory file path to resolve (e.g. /memories/session/plan.md).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "This is a tool for running a code cell in a notebook file directly in the notebook editor. The output from the execution will be returned. Code cells should be run as they are added or edited when working through a problem to bring the kernel state up to date and ensure the code executes successfully. Code cells are ready to run and don't require any pre-processing. If asked to run the first cell in a notebook, you should run the first code cell since markdown cells cannot be executed. NOTE: Avoid executing Markdown cells or providing Markdown cell IDs, as Markdown cells cannot be  executed.",
+      "name": "run_notebook_cell",
+      "parameters": {
+        "properties": {
+          "cellId": {
+            "description": "The ID for the code cell to execute. Avoid providing markdown cell IDs as nothing will be executed.",
+            "type": "string"
+          },
+          "continueOnError": {
+            "description": "Whether or not execution should continue for remaining cells if an error is encountered. Default to false unless instructed otherwise.",
+            "type": "boolean"
+          },
+          "filePath": {
+            "description": "An absolute path to the notebook file with the cell to run, or the URI of a untitled, not yet named, file, such as `untitled:Untitled-1.ipynb",
+            "type": "string"
+          },
+          "reason": {
+            "description": "An optional explanation of why the cell is being run. This will be shown to the user before the tool is run and is not necessary if it's self-explanatory.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filePath",
+          "cellId"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Run a command in VS Code. Use this tool to run a command in Visual Studio Code as part of a new workspace creation process only.",
+      "name": "run_vscode_command",
+      "parameters": {
+        "properties": {
+          "args": {
+            "description": "The arguments to pass to the command. This should be an array of strings.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "commandId": {
+            "description": "The ID of the command to execute. This should be in the format <command>.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The name of the command to execute. This should be a clear and concise description of the command.",
+            "type": "string"
+          },
+          "skipCheck": {
+            "description": "If true, skip checking whether the command exists before executing it.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "commandId",
+          "name"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Query the local session store containing history from past coding sessions. Uses SQLite syntax (NOT DuckDB or Postgres). SQL queries are read-only — only SELECT and WITH are allowed. Use `datetime('now', '-1 day')` for date math (NOT `now() - INTERVAL '1 day'`), FTS5 `MATCH` for text search.\n\nTables: `sessions`, `turns`, `session_files`, `session_refs`, `checkpoints`, `search_index`. For column details and query patterns, use the **chronicle** skill.\n\nActions: 'query' (execute SQL — supports JOINs, FTS5 MATCH, aggregations), 'reindex' (rebuild index from debug logs).",
+      "name": "session_store_sql",
+      "parameters": {
+        "properties": {
+          "action": {
+            "description": "The action to perform. 'query' (default) executes a SQL query. 'reindex' rebuilds the local session index and syncs to cloud if enabled.",
+            "enum": [
+              "query",
+              "reindex"
+            ],
+            "type": "string"
+          },
+          "description": {
+            "description": "A 2-5 word summary of what this call does (e.g. 'Recent sessions overview', 'Generate standup', 'Reindex sessions').",
+            "type": "string"
+          },
+          "force": {
+            "description": "When true with action 'reindex', re-processes all sessions including already-indexed ones. Default false (skips already-indexed sessions).",
+            "type": "boolean"
+          },
+          "query": {
+            "description": "A single read-only SQL query to execute. Required when action is 'query'. Supports SELECT, WITH, JOINs, aggregations, and FTS5 MATCH. Only one statement per call — do not combine multiple queries with semicolons.",
+            "type": "string"
+          },
+          "subcommand": {
+            "description": "The chronicle subcommand that triggered this call (e.g. 'tips' for /chronicle tips). Used for telemetry attribution only — pass this whenever the call originates from a /chronicle slash command.",
+            "enum": [
+              "standup",
+              "tips",
+              "cost-tips",
+              "search",
+              "improve",
+              "reindex"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "description"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "View the contents of an image file. Use this instead of read_file for supported image files such as png, jpg, jpeg, gif, and webp. The tool returns the image directly to multimodal models and does not take line ranges or offsets.",
+      "name": "view_image",
+      "parameters": {
+        "properties": {
+          "filePath": {
+            "description": "The absolute path of the image file to view.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "filePath"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Use this tool to ask the user a small number of clarifying questions before proceeding. Provide the questions array with concise headers and prompts. Use options for fixed choices, set multiSelect when multiple selections are allowed. Users can always provide a freeform text answer alongside options unless you set allowFreeformInput to false.",
+      "name": "vscode_askQuestions",
+      "parameters": {
+        "properties": {
+          "questions": {
+            "description": "List of questions to ask the user. Order is preserved.",
+            "items": {
+              "properties": {
+                "allowFreeformInput": {
+                  "description": "Allow freeform text answers in addition to option selection. Defaults to true; set to false to restrict to predefined options only.",
+                  "type": "boolean"
+                },
+                "header": {
+                  "description": "Short identifier for the question. Must be unique so answers can be mapped back to the question. Maximum 50 characters.",
+                  "maxLength": 50,
+                  "type": "string"
+                },
+                "message": {
+                  "description": "Optional markdown message to display below the question text, providing additional context or details.",
+                  "type": "string"
+                },
+                "multiSelect": {
+                  "description": "Allow selecting multiple options when options are provided.",
+                  "type": "boolean"
+                },
+                "options": {
+                  "description": "Optional list of selectable answers. If omitted, the question is free text.",
+                  "items": {
+                    "properties": {
+                      "description": {
+                        "description": "Optional secondary text shown with the option.",
+                        "type": "string"
+                      },
+                      "label": {
+                        "description": "Display label and value for the option.",
+                        "type": "string"
+                      },
+                      "recommended": {
+                        "description": "Mark this option as the recommended default.",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "label"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "question": {
+                  "description": "The question text to display to the user. Keep it concise, ideally one sentence. Maximum 200 characters.",
+                  "maxLength": 200,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "header",
+                "question"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "questions"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Find all usages (references, definitions, and implementations) of a code symbol across the workspace. This tool locates where a symbol is referenced, defined, or implemented.\n\nInput:\n- \"symbol\": The exact name of the symbol to search for (function, class, method, variable, type, etc.).\n- \"uri\": A full URI (e.g. \"file:///path/to/file.ts\") of a file where the symbol appears. Provide either \"uri\" or \"filePath\".\n- \"filePath\": A workspace-relative file path (e.g. \"src/utils/helpers.ts\") of a file where the symbol appears. Provide either \"uri\" or \"filePath\".\n- \"lineContent\": A substring of the line of code where the symbol appears. This is used to locate the exact position in the file. Must be the actual text from the file - do NOT fabricate it.\n\nIMPORTANT: The file and line do NOT need to be the definition of the symbol. Any occurrence works - a usage, an import, a call site, etc. You can pick whichever occurrence is most convenient.\n\nIf the tool returns an error, retry with corrected input - ensure the file path is correct, the line content matches the actual file content, and the symbol name appears in that line.\n\nIf the file's language has no reference provider registered, the tool returns an error.",
+      "name": "vscode_listCodeUsages",
+      "parameters": {
+        "properties": {
+          "filePath": {
+            "description": "A workspace-relative file path where the symbol appears (e.g. \"src/utils/helpers.ts\"). Provide either \"uri\" or \"filePath\".",
+            "type": "string"
+          },
+          "lineContent": {
+            "description": "A substring of the line of code where the symbol appears. Used to locate the exact position. Must be actual text from the file.",
+            "type": "string"
+          },
+          "symbol": {
+            "description": "The exact name of the symbol (function, class, method, variable, type, etc.) to find usages of.",
+            "type": "string"
+          },
+          "uri": {
+            "description": "A full URI of a file where the symbol appears (e.g. \"file:///path/to/file.ts\"). Provide either \"uri\" or \"filePath\".",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "lineContent"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Rename a code symbol across the workspace using the language server's rename functionality. This performs a precise, semantics-aware rename that updates all references.\n\nInput:\n- \"symbol\": The exact current name of the symbol to rename.\n- \"newName\": The new name for the symbol.\n- \"uri\": A full URI (e.g. \"file:///path/to/file.ts\") of a file where the symbol appears. Provide either \"uri\" or \"filePath\".\n- \"filePath\": A workspace-relative file path (e.g. \"src/utils/helpers.ts\") of a file where the symbol appears. Provide either \"uri\" or \"filePath\".\n- \"lineContent\": A substring of the line of code where the symbol appears. This is used to locate the exact position in the file. Must be the actual text from the file - do NOT fabricate it.\n\nIMPORTANT: The file and line do NOT need to be the definition of the symbol. Any occurrence works - a usage, an import, a call site, etc. You can pick whichever occurrence is most convenient.\n\nIf the tool returns an error, retry with corrected input - ensure the file path is correct, the line content matches the actual file content, and the symbol name appears in that line.\n\nIf the file's language has no rename provider registered, the tool returns an error.",
+      "name": "vscode_renameSymbol",
+      "parameters": {
+        "properties": {
+          "filePath": {
+            "description": "A workspace-relative file path where the symbol appears (e.g. \"src/utils/helpers.ts\"). Provide either \"uri\" or \"filePath\".",
+            "type": "string"
+          },
+          "lineContent": {
+            "description": "A substring of the line of code where the symbol appears. Used to locate the exact position. Must be actual text from the file.",
+            "type": "string"
+          },
+          "newName": {
+            "description": "The new name for the symbol.",
+            "type": "string"
+          },
+          "symbol": {
+            "description": "The exact current name of the symbol to rename.",
+            "type": "string"
+          },
+          "uri": {
+            "description": "A full URI of a file where the symbol appears (e.g. \"file:///path/to/file.ts\"). Provide either \"uri\" or \"filePath\".",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "newName",
+          "lineContent"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "This is a tool for browsing Visual Studio Code Extensions Marketplace. It allows the model to search for extensions and retrieve detailed information about them. The model should use this tool whenever it needs to discover extensions or resolve information about known ones. To use the tool, the model has to provide the category of the extensions, relevant search keywords, or known extension IDs. Note that search results may include false positives, so reviewing and filtering is recommended.",
+      "name": "vscode_searchExtensions_internal",
+      "parameters": {
+        "properties": {
+          "category": {
+            "description": "The category of extensions to search for",
+            "enum": [
+              "AI",
+              "Azure",
+              "Chat",
+              "Data Science",
+              "Debuggers",
+              "Extension Packs",
+              "Education",
+              "Formatters",
+              "Keymaps",
+              "Language Packs",
+              "Linters",
+              "Machine Learning",
+              "Notebooks",
+              "Programming Languages",
+              "SCM Providers",
+              "Snippets",
+              "Testing",
+              "Themes",
+              "Visualization",
+              "Other"
+            ],
+            "type": "string"
+          },
+          "ids": {
+            "description": "The ids of the extensions to search for",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "keywords": {
+            "description": "The keywords to search for",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Click on an element in a browser page.",
+      "name": "click_element",
+      "parameters": {
+        "$comment": "One of \"ref\" or \"selector\" is required.",
+        "properties": {
+          "button": {
+            "description": "Mouse button to click with. Default is \"left\".",
+            "enum": [
+              "left",
+              "right",
+              "middle"
+            ],
+            "type": "string"
+          },
+          "dblClick": {
+            "description": "Set to true for double clicks. Default is false.",
+            "type": "boolean"
+          },
+          "element": {
+            "description": "Human-readable description of the element to click (e.g., \"submit button\", \"search icon\").",
+            "type": "string"
+          },
+          "pageId": {
+            "description": "The browser page ID, acquired from context or the open tool.",
+            "type": "string"
+          },
+          "ref": {
+            "description": "Element reference to click.",
+            "type": "string"
+          },
+          "selector": {
+            "description": "Playwright selector of the element to click when \"ref\" is not available.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pageId",
+          "element"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Gets the configuration the user has set for the container and container orchestrator (compose) CLIs, including the correct base commands to use and any environment variables that will be set. This tool **MUST** be called before generating or running any container or container orchestrator CLI commands, to ensure the correct base command is used.",
+      "name": "container-tools_get-config",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Creates and runs a build, run, or custom task for the workspace by generating or adding to a tasks.json file based on the project structure (such as package.json or README.md). If the user asks to build, run, launch and they have no tasks.json file, use this tool. If they ask to create or add a task, use this tool.",
+      "name": "create_and_run_task",
+      "parameters": {
+        "properties": {
+          "task": {
+            "description": "The task to add to the new tasks.json file.",
+            "properties": {
+              "args": {
+                "description": "The arguments to pass to the command.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "command": {
+                "description": "The shell command to run for the task. Use this to specify commands for building or running the application.",
+                "type": "string"
+              },
+              "group": {
+                "description": "The group to which the task belongs.",
+                "type": "string"
+              },
+              "isBackground": {
+                "description": "Whether the task runs in the background without blocking the UI or other tasks. Set to true for long-running processes like watch tasks or servers that should continue executing without requiring user attention. When false, the task will block the terminal until completion.",
+                "type": "boolean"
+              },
+              "label": {
+                "description": "The label of the task.",
+                "type": "string"
+              },
+              "problemMatcher": {
+                "description": "The problem matcher to use to parse task output for errors and warnings. Can be a predefined matcher like '$tsc' (TypeScript), '$eslint - stylish', '$gcc', etc., or a custom pattern defined in tasks.json. This helps VS Code display errors in the Problems panel and enables quick navigation to error locations.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": {
+                "description": "The type of the task. The only supported value is 'shell'.",
+                "enum": [
+                  "shell"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "label",
+              "type",
+              "command"
+            ],
+            "type": "object"
+          },
+          "workspaceFolder": {
+            "description": "The absolute path of the workspace folder where the tasks.json file will be created.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task",
+          "workspaceFolder"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Drag an element over another element in a browser page.",
+      "name": "drag_element",
+      "parameters": {
+        "$comment": "One of \"fromRef\" or \"fromSelector\" is required, and one of \"toRef\" or \"toSelector\" is required.",
+        "properties": {
+          "fromElement": {
+            "description": "Human-readable description of the element to drag (e.g., \"file item\", \"draggable card\").",
+            "type": "string"
+          },
+          "fromRef": {
+            "description": "Element reference of the element to drag.",
+            "type": "string"
+          },
+          "fromSelector": {
+            "description": "Playwright selector of the element to drag when \"fromRef\" is not available.",
+            "type": "string"
+          },
+          "pageId": {
+            "description": "The browser page ID, acquired from context or the open tool.",
+            "type": "string"
+          },
+          "toElement": {
+            "description": "Human-readable description of the element to drop onto (e.g., \"drop zone\", \"target folder\").",
+            "type": "string"
+          },
+          "toRef": {
+            "description": "Element reference of the element to drop onto.",
+            "type": "string"
+          },
+          "toSelector": {
+            "description": "Playwright selector of the element to drop onto when \"toRef\" is not available.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pageId",
+          "fromElement",
+          "toElement"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Get the output of a task",
+      "name": "get_task_output",
+      "parameters": {
+        "properties": {
+          "id": {
+            "description": "The task ID for which to get the output.",
+            "type": "string"
+          },
+          "workspaceFolder": {
+            "description": "The workspace folder path containing the task",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workspaceFolder"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Get output from a terminal execution that was moved to background (identified by the `id` returned from run_in_terminal). Use this ONLY when the run_in_terminal result explicitly says the command was moved to background, timed out, or needs input. Do NOT call this after a sync command that completed normally — sync commands return full output inline. If a background command has not yet completed, you will be automatically notified when it finishes — do NOT poll; end your turn and wait.",
+      "name": "get_terminal_output",
+      "parameters": {
+        "properties": {
+          "id": {
+            "description": "The ID of an active terminal execution to check (returned by run_in_terminal for async executions, or for sync executions that timed out and were moved to the background). This must be the exact opaque UUID returned by that tool; terminal names, labels, or integers are invalid.",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Respond to a pending modal (alert, confirm, prompt) or file chooser dialog on a browser page.",
+      "name": "handle_dialog",
+      "parameters": {
+        "properties": {
+          "acceptModal": {
+            "description": "Whether to accept (true) or dismiss (false) a modal dialog.",
+            "type": "boolean"
+          },
+          "pageId": {
+            "description": "The browser page ID, acquired from context or the open tool.",
+            "type": "string"
+          },
+          "promptText": {
+            "description": "Text to enter into a prompt dialog.",
+            "type": "string"
+          },
+          "selectFiles": {
+            "description": "Absolute paths of files to select, or empty to dismiss. Required for file chooser dialogs.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "pageId"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Hover over an element in a browser page. Provide either a Playwright selector or an element reference.",
+      "name": "hover_element",
+      "parameters": {
+        "$comment": "One of \"ref\" or \"selector\" is required.",
+        "properties": {
+          "element": {
+            "description": "Human-readable description of the element to hover over (e.g., \"navigation menu\", \"tooltip trigger\").",
+            "type": "string"
+          },
+          "pageId": {
+            "description": "The browser page ID, acquired from context or the open tool.",
+            "type": "string"
+          },
+          "ref": {
+            "description": "Element reference to hover over.",
+            "type": "string"
+          },
+          "selector": {
+            "description": "Playwright selector of the element to hover over when \"ref\" is not available.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pageId",
+          "element"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Kill a terminal by its ID. Use this to clean up terminals that are no longer needed (e.g., after stopping a server or when a long-running task completes). The terminal ID is returned by run_in_terminal in async mode (legacy: isBackground=true).",
+      "name": "kill_terminal",
+      "parameters": {
+        "properties": {
+          "id": {
+            "description": "The ID of the persistent terminal to kill (returned by run_in_terminal in async mode).",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Manage a structured todo list to track progress and plan tasks throughout your coding session. Use this tool VERY frequently to ensure task visibility and proper planning.\n\nWhen to use this tool:\n- Complex multi-step work requiring planning and tracking\n- When user provides multiple tasks or requests (numbered/comma-separated)\n- After receiving new instructions that require multiple steps\n- BEFORE starting work on any todo (mark as in-progress)\n- IMMEDIATELY after completing each todo (mark completed individually)\n- When breaking down larger tasks into smaller actionable steps\n- To give users visibility into your progress and planning\n\nWhen NOT to use:\n- Single, trivial tasks that can be completed in one step\n- Purely conversational/informational requests\n- When just reading files or performing simple searches\n\nCRITICAL workflow:\n1. Plan tasks by writing todo list with specific, actionable items\n2. Mark ONE todo as in-progress before starting work\n3. Complete the work for that specific todo\n4. Mark that todo as completed IMMEDIATELY\n5. Move to next todo and repeat\n\nTodo states:\n- not-started: Todo not yet begun\n- in-progress: Currently working (limit ONE at a time)\n- completed: Finished successfully\n\nIMPORTANT: Mark todos completed as soon as they are done. Do not batch completions.",
+      "name": "manage_todo_list",
+      "parameters": {
+        "properties": {
+          "todoList": {
+            "description": "Complete array of all todo items. Must include ALL items - both existing and new.",
+            "items": {
+              "properties": {
+                "id": {
+                  "description": "Unique identifier for the todo. Use sequential numbers starting from 1.",
+                  "type": "number"
+                },
+                "status": {
+                  "description": "not-started: Not begun | in-progress: Currently working (max 1) | completed: Fully finished with no blockers",
+                  "enum": [
+                    "not-started",
+                    "in-progress",
+                    "completed"
+                  ],
+                  "type": "string"
+                },
+                "title": {
+                  "description": "Concise action-oriented todo label (3-7 words). Displayed in UI.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "title",
+                "status"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "todoList"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Navigate a browser page by URL, history, or reload.",
+      "name": "navigate_page",
+      "parameters": {
+        "properties": {
+          "pageId": {
+            "description": "The browser page ID to navigate, acquired from context or the open tool.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Navigation type: \"url\" to navigate to a URL (default, requires \"url\" param), \"back\" or \"forward\" for history, \"reload\" to refresh.",
+            "enum": [
+              "url",
+              "back",
+              "forward",
+              "reload"
+            ],
+            "type": "string"
+          },
+          "url": {
+            "description": "The URL to navigate to. Required when type is \"url\".",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pageId"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Open a new browser page in the integrated browser at the given URL.\nMay prompt the user to share a page if there is a similar one already open, unless \"forceNew\" is true.\nReturns a page ID that must be used with other browser tools to interact with the page, as well as an accessibility snapshot of the page.\n\nImportant: Prefer to reuse existing pages whenever possible and only call this tool if you do not already have access to a tab you can reuse.",
+      "name": "open_browser_page",
+      "parameters": {
+        "$comment": "If you omit \"url\", the user will be prompted to share an existing page instead. Use this if there are unshared pages that the user may be interested in sharing with you.",
+        "properties": {
+          "forceNew": {
+            "description": "Whether to force opening a new page even if a page with the same host already exists. Default is false.",
+            "type": "boolean"
+          },
+          "url": {
+            "description": "The URL to open in the browser. Must be an absolute URI with a scheme such as file:, http:, or https:. For local files, use the canonical absolute form, for example file:///path/to/file.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Get a snapshot of the current browser page state. This is better than screenshot.",
+      "name": "read_page",
+      "parameters": {
+        "properties": {
+          "pageId": {
+            "description": "The browser page ID to read, acquired from context or the open tool.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pageId"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "This tool allows you to execute shell commands in a persistent bash terminal session, preserving environment variables, working directory, and other context across multiple commands.\n\nCommand Execution:\n- Use && to chain simple commands on one line\n- Prefer pipelines | over temporary files for data flow\n- Never create a sub-shell (eg. bash -c \"command\") unless explicitly asked\n\nDirectory Management:\n- Prefer relative paths when navigating directories, only use absolute when the path is far away or the current cwd is not expected\n- By default (mode=sync), shell and cwd are reused by subsequent sync commands\n- Use $PWD for current directory references\n- Consider using pushd/popd for directory stack management\n- Supports directory shortcuts like ~ and -\n\nProgram Execution:\n- Supports Python, Node.js, and other executables\n- Install packages via package managers (brew, apt, etc.)\n- Use which or command -v to verify command availability\n\nExecution Mode:\n- For ALL one-shot commands (builds, tests, installs, compilation, linting, downloads, scripts), use mode='sync' and omit timeout. The tool waits for the command to complete and returns full output inline. This is the default and strongly preferred mode.\n- Use mode='async' ONLY for processes that must keep running indefinitely while you do other work (servers, watchers, dev daemons). Async waits for an initial idle/output signal, then returns a terminal ID and output snapshot while the process continues running.\n- In sync mode, the full output is returned when the command completes — you do NOT need to call get_terminal_output afterward. Only use get_terminal_output if the tool result explicitly says the command was moved to background, timed out, or needs input.\n\nUse send_to_terminal to send commands or input to a terminal session.\n\nOutput Management:\n- Output exceeding 20KB is saved to a temp file; the result includes the file path so you can read the full output with readFile or search it with grep\n- Use head, tail, grep, awk to filter and limit output size\n- For pager commands, disable paging: git --no-pager or add | cat\n- Use wc -l to count lines before displaying large outputs\n\nBest Practices:\n- Quote variables: \"$var\" instead of $var to handle spaces\n- Use find with -exec or xargs for file operations\n- Be specific with commands to avoid excessive output\n- Avoid printing credentials unless absolutely required\n- Avoid commands that require interactive privilege escalation, such as sudo/su/doas without a non-interactive flag (e.g. sudo -n). They block on a password prompt that cannot be answered in this mode, and secrets must never be routed through the model. If a command needs elevated privileges, tell the user to run it themselves in the terminal and stop — do NOT retry the command with variations.\n- NEVER run sleep or similar wait commands in a terminal. You will be automatically notified on your next turn when async terminal commands or timed-out sync commands complete or need input. Do NOT poll for completion.\n- NEVER pipe interactive commands through tail, head, grep, or other filters — this hides prompts and prevents the terminal from detecting when input is needed. Run interactive commands without pipes.\n\nInteractive Input Handling:\n- When a terminal command is waiting for interactive input, do NOT suggest alternatives or ask the user whether to proceed. Instead, use the vscode_askQuestions tool to collect the needed values from the user, then send them.\n- NEVER use vscode_askQuestions to request sensitive input such as passwords, passphrases, API keys, tokens, or other secrets — answers to that tool are sent through the model. If the prompt requires a secret, tell the user to type it directly into the terminal and stop; do not call vscode_askQuestions or send_to_terminal for that prompt.\n- Send exactly one answer per prompt using send_to_terminal. Never send multiple answers in a single send.\n- After each send, call get_terminal_output to read the next prompt before sending the next answer.\n- Continue one prompt at a time until the command finishes.\n- Use [[ ]] for conditional tests instead of [ ]\n- Prefer $() over backticks for command substitution\n\nExecution mode:\n- mode='sync' (strongly preferred): waits for the command to complete and returns full output inline. Use for ALL one-shot commands (builds, tests, installs, compilation, scripts). Omit timeout to let the command run to completion — the tool handles idle detection and input prompts automatically.\n- mode='async': waits for an initial idle/output signal from the command, then returns a terminal ID and output snapshot while the process continues running. Use ONLY for processes that must keep running indefinitely (servers, watchers, daemons). Timeout caps how long to wait for the initial idle/output signal.\n\nTimeout parameter: Usually omit timeout entirely for sync commands — the tool returns automatically on completion, input-needed, or cancellation. Only set a timeout as a safety net for commands you suspect might hang. Use 0 to explicitly indicate no timeout.\n\nSync output is final: When a sync command completes, the full output is returned inline — do NOT call get_terminal_output afterward. Only use get_terminal_output if the tool result explicitly indicates the command was moved to background, timed out, or needs input. Do NOT tell the user to check the terminal panel — all command output is already included in the tool result.\n\nTerminal notifications: When an async command finishes or a sync command times out, you will be automatically notified on your next turn with the exit code and terminal output. You will also be notified if the terminal needs input. Do NOT poll or sleep to wait for completion.",
+      "name": "run_in_terminal",
+      "parameters": {
+        "properties": {
+          "command": {
+            "description": "The command to run in the terminal.",
+            "type": "string"
+          },
+          "explanation": {
+            "description": "A one-sentence description of what the command does. This will be shown to the user before the command is run.",
+            "type": "string"
+          },
+          "goal": {
+            "description": "A short description of the goal or purpose of the command (e.g., \"Install dependencies\", \"Start development server\").",
+            "type": "string"
+          },
+          "isBackground": {
+            "description": "Legacy execution mode flag. Deprecated in favor of \"mode\". If true, equivalent to mode=async. If false, equivalent to mode=sync.",
+            "type": "boolean"
+          },
+          "mode": {
+            "description": "Execution mode for this command. Use sync (default) for nearly all commands.",
+            "enum": [
+              "sync",
+              "async"
+            ],
+            "enumDescriptions": [
+              "Wait for command completion and return full output inline. Strongly preferred for all one-shot commands (builds, tests, installs, scripts).",
+              "Wait for an initial idle/output signal, then return a terminal ID and output snapshot while the process continues running. Timeout caps how long to wait for the initial signal. Use ONLY for processes that must keep running indefinitely (servers, watchers, daemons)."
+            ],
+            "type": "string"
+          },
+          "timeout": {
+            "description": "Optional. Usually omit entirely for sync commands — the tool waits for completion automatically. Only set a timeout (in milliseconds) as a safety net if you suspect the command might hang. If the timeout elapses, the command continues in the background and you get a terminal ID to check output later. Use 0 to explicitly indicate no timeout.",
+            "type": "number"
+          }
+        },
+        "required": [
+          "command",
+          "explanation",
+          "goal",
+          "mode"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Run a Playwright code snippet to control a browser page. Only use this if other browser tools are insufficient.",
+      "name": "run_playwright_code",
+      "parameters": {
+        "$comment": "Either \"code\" or \"deferredResultId\" must be provided.",
+        "properties": {
+          "code": {
+            "description": "The Playwright code to execute. The code must be concise, serve one clear purpose, and be self-contained. You **must not** directly access `document` or `window` using this tool. You must access it via the provided `page` object, e.g. \"return page.evaluate(() => document.title)\". Omit this when resuming a deferred execution via deferredResultId.",
+            "type": "string"
+          },
+          "deferredResultId": {
+            "description": "If a previous call returned a deferredResultId, pass it here to continue waiting for that execution to complete.",
+            "type": "string"
+          },
+          "pageId": {
+            "description": "The browser page ID, acquired from context or the open tool.",
+            "type": "string"
+          },
+          "timeoutMs": {
+            "description": "Maximum time in milliseconds to wait for the code to complete. Defaults to 5000 (5 seconds).",
+            "type": "number"
+          }
+        },
+        "required": [
+          "pageId"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Launch a new agent to handle complex, multi-step tasks autonomously. This tool is good at researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries, use this agent to perform the search for you.\n\n- Agents do not run async or in the background, you will wait for the agent's result.\n- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.\n- Each agent invocation is stateless. You will not be able to send additional messages to the agent, nor will the agent be able to communicate with you outside of its final report. Therefore, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.\n- The agent's outputs should generally be trusted\n- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent\n- If the user asks for a certain agent, you MUST provide that EXACT agent name (case-sensitive) to invoke that specific agent.",
+      "name": "runSubagent",
+      "parameters": {
+        "properties": {
+          "agentName": {
+            "description": "Optional name of a specific agent to invoke. If not provided, uses the current agent.",
+            "type": "string"
+          },
+          "description": {
+            "description": "A short (3-5 word) description of the task",
+            "type": "string"
+          },
+          "model": {
+            "description": "Optional model for the subagent. Format: \"Model Name (Vendor)\", vendor is usually \"copilot\". Only use to enforce a specific model.",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "A detailed description of the task for the agent to perform",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt",
+          "description"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Capture a screenshot of the current browser page. You can't perform actions based on the screenshot; use read_page for actions.",
+      "name": "screenshot_page",
+      "parameters": {
+        "properties": {
+          "element": {
+            "description": "Human-readable description of the element to capture (e.g., \"chart diagram\", \"product image\").",
+            "type": "string"
+          },
+          "pageId": {
+            "description": "The browser page ID to capture, acquired from context or the open tool.",
+            "type": "string"
+          },
+          "ref": {
+            "description": "Element reference to capture. If omitted, captures the whole viewport.",
+            "type": "string"
+          },
+          "scrollIntoViewIfNeeded": {
+            "description": "Whether to scroll the element into view before capturing. Defaults to false.",
+            "type": "boolean"
+          },
+          "selector": {
+            "description": "Playwright selector of an element to capture when \"ref\" is not available. If omitted, captures the whole viewport.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pageId"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Send input text to an active terminal execution (identified by the `id` returned from run_in_terminal). The 'command' field may be empty or whitespace to press Enter (useful for interactive prompts). By default, returns the last 20 lines of terminal output captured shortly after sending. Set 'waitForOutput' to true for interactive programs (games, REPLs, etc.) to wait until the terminal becomes idle before returning output — this gives you the program's response to your input.",
+      "name": "send_to_terminal",
+      "parameters": {
+        "properties": {
+          "command": {
+            "description": "The input text to send to the terminal. The text is sent followed by Enter. Provide an empty or whitespace string to send just Enter (for interactive prompts).",
+            "type": "string"
+          },
+          "id": {
+            "description": "The ID of an active terminal execution to send a command to (returned by run_in_terminal for async executions, or for sync executions that timed out and were moved to the background).",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$",
+            "type": "string"
+          },
+          "waitForOutput": {
+            "description": "When true, waits for the terminal to become idle (no new output for a short period) before returning, instead of returning immediately. Use this for interactive programs where you need to see the full response to your input. Defaults to false.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "command"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Get the last command run in the active terminal.",
+      "name": "terminal_last_command",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Get the current selection in the active terminal.",
+      "name": "terminal_selection",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Includes test failure information in the prompt. Use this tool to get the details of test failures from the most recent test run. If there are no failures yet, suggest running tests first.",
+      "name": "testFailure",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      }
+    },
+    "type": "function"
+  },
+  {
+    "function": {
+      "description": "Type text or press keys in a browser page.",
+      "name": "type_in_page",
+      "parameters": {
+        "properties": {
+          "element": {
+            "description": "Human-readable description of the element to type into (e.g., \"search box\", \"comment field\"). Required when \"ref\" or \"selector\" is specified.",
+            "type": "string"
+          },
+          "key": {
+            "description": "A key or key combination to press (e.g., \"Enter\", \"Tab\", \"Control+c\"). One of \"text\" or \"key\" must be provided.",
+            "type": "string"
+          },
+          "pageId": {
+            "description": "The browser page ID, acquired from context or the open tool.",
+            "type": "string"
+          },
+          "ref": {
+            "description": "Element reference to focus and type into. If omitted, types into the focused element.",
+            "type": "string"
+          },
+          "selector": {
+            "description": "Playwright selector of element to focus and type into. Use if \"ref\" is not available. If omitted, types into the focused element.",
+            "type": "string"
+          },
+          "submit": {
+            "description": "Whether to press Enter after typing text. Ignored when \"key\" is provided. Default is false.",
+            "type": "boolean"
+          },
+          "text": {
+            "description": "The text to type. One of \"text\" or \"key\" must be provided.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pageId"
+        ],
+        "type": "object"
+      }
+    },
+    "type": "function"
+  }
+]

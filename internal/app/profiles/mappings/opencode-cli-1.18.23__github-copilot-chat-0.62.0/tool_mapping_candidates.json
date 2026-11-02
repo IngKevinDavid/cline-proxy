@@ -1,0 +1,2155 @@
+{
+  "version": 1,
+  "policy": {
+    "purpose": "offline_candidate_discovery",
+    "runtime_activation": "forbidden_from_similarity",
+    "roundtrip_required": true,
+    "top_k": 5,
+    "minimum_score": 0.1
+  },
+  "backend": {
+    "tool_count": 11,
+    "tools_sha256": "deb7306da0658c94abbf281ea10f37423f381e5736d629b682096b65f23601df"
+  },
+  "client": {
+    "tool_count": 51,
+    "tools_sha256": "1f4de53ec0a126b0bb6d9c3241c8b48e8ac661aba548b7fe0ddcf687a1488e33"
+  },
+  "candidates": [
+    {
+      "backend_tool": "bash",
+      "client_tool": "run_in_terminal",
+      "score": 0.435833,
+      "ranking_score": 0.414042,
+      "confidence": "review",
+      "signals": {
+        "name": 0.0,
+        "description": 0.25,
+        "concept": 1.0,
+        "properties": 0.444444,
+        "required": 0.4
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "command",
+          "timeout",
+          "workdir"
+        ],
+        "client_properties": [
+          "command",
+          "explanation",
+          "goal",
+          "isBackground",
+          "mode",
+          "timeout"
+        ],
+        "shared_properties": [
+          "command",
+          "timeout"
+        ],
+        "same_type_properties": [
+          "command",
+          "timeout"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": [
+          "explanation",
+          "goal",
+          "mode"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "bash",
+      "client_tool": "send_to_terminal",
+      "score": 0.352381,
+      "ranking_score": 0.334762,
+      "confidence": "review",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 1.0,
+        "properties": 0.285714,
+        "required": 0.666667
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "command",
+          "timeout",
+          "workdir"
+        ],
+        "client_properties": [
+          "command",
+          "id",
+          "waitForOutput"
+        ],
+        "shared_properties": [
+          "command"
+        ],
+        "same_type_properties": [
+          "command"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": [
+          "id"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "bash",
+      "client_tool": "run_vscode_command",
+      "score": 0.294444,
+      "ranking_score": 0.191389,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.111111,
+        "concept": 1.0,
+        "properties": 0.222222,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "command",
+          "timeout",
+          "workdir"
+        ],
+        "client_properties": [
+          "args",
+          "commandId",
+          "name",
+          "skipCheck"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "command"
+        ],
+        "client_only_required": [
+          "commandId",
+          "name"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "bash",
+      "client_tool": "get_terminal_output",
+      "score": 0.2,
+      "ranking_score": 0.19,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 1.0,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "command",
+          "timeout",
+          "workdir"
+        ],
+        "client_properties": [
+          "id"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "command"
+        ],
+        "client_only_required": [
+          "id"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "bash",
+      "client_tool": "kill_terminal",
+      "score": 0.2,
+      "ranking_score": 0.19,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 1.0,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "command",
+          "timeout",
+          "workdir"
+        ],
+        "client_properties": [
+          "id"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "command"
+        ],
+        "client_only_required": [
+          "id"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "edit",
+      "client_tool": "replace_string_in_file",
+      "score": 0.55,
+      "ranking_score": 0.5225,
+      "confidence": "review",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 1.0,
+        "properties": 0.833333,
+        "required": 1.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "filePath",
+          "newString",
+          "oldString",
+          "replaceAll"
+        ],
+        "client_properties": [
+          "filePath",
+          "newString",
+          "oldString"
+        ],
+        "shared_properties": [
+          "filePath",
+          "newString",
+          "oldString"
+        ],
+        "same_type_properties": [
+          "filePath",
+          "newString",
+          "oldString"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": []
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "edit",
+      "client_tool": "edit_notebook_file",
+      "score": 0.420833,
+      "ranking_score": 0.399792,
+      "confidence": "review",
+      "signals": {
+        "name": 0.5,
+        "description": 0.0,
+        "concept": 1.0,
+        "properties": 0.375,
+        "required": 0.333333
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "filePath",
+          "newString",
+          "oldString",
+          "replaceAll"
+        ],
+        "client_properties": [
+          "cellId",
+          "editType",
+          "filePath",
+          "language",
+          "newCode"
+        ],
+        "shared_properties": [
+          "filePath"
+        ],
+        "same_type_properties": [
+          "filePath"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "newString",
+          "oldString"
+        ],
+        "client_only_required": [
+          "cellId",
+          "editType"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "edit",
+      "client_tool": "insert_edit_into_file",
+      "score": 0.402424,
+      "ranking_score": 0.382303,
+      "confidence": "review",
+      "signals": {
+        "name": 0.4,
+        "description": 0.0,
+        "concept": 1.0,
+        "properties": 0.363636,
+        "required": 0.333333
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "filePath",
+          "newString",
+          "oldString",
+          "replaceAll"
+        ],
+        "client_properties": [
+          "code",
+          "explanation",
+          "filePath"
+        ],
+        "shared_properties": [
+          "filePath"
+        ],
+        "same_type_properties": [
+          "filePath"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "newString",
+          "oldString"
+        ],
+        "client_only_required": [
+          "code",
+          "explanation"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "edit",
+      "client_tool": "read_file",
+      "score": 0.133333,
+      "ranking_score": 0.126667,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.0,
+        "properties": 0.333333,
+        "required": 0.333333
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "filePath",
+          "newString",
+          "oldString",
+          "replaceAll"
+        ],
+        "client_properties": [
+          "endLine",
+          "filePath",
+          "startLine"
+        ],
+        "shared_properties": [
+          "filePath"
+        ],
+        "same_type_properties": [
+          "filePath"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "newString",
+          "oldString"
+        ],
+        "client_only_required": [
+          "endLine",
+          "startLine"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "edit",
+      "client_tool": "copilot_getNotebookSummary",
+      "score": 0.183333,
+      "ranking_score": 0.119167,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.0,
+        "properties": 0.444444,
+        "required": 0.5
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "filePath",
+          "newString",
+          "oldString",
+          "replaceAll"
+        ],
+        "client_properties": [
+          "filePath"
+        ],
+        "shared_properties": [
+          "filePath"
+        ],
+        "same_type_properties": [
+          "filePath"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "newString",
+          "oldString"
+        ],
+        "client_only_required": []
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "glob",
+      "client_tool": "file_search",
+      "score": 0.235714,
+      "ranking_score": 0.223929,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.142857,
+        "concept": 1.0,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "path",
+          "pattern"
+        ],
+        "client_properties": [
+          "maxResults",
+          "query"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "pattern"
+        ],
+        "client_only_required": [
+          "query"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "glob",
+      "client_tool": "resolve_memory_file_uri",
+      "score": 0.220833,
+      "ranking_score": 0.209792,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.083333,
+        "concept": 0.0,
+        "properties": 0.666667,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "path",
+          "pattern"
+        ],
+        "client_properties": [
+          "path"
+        ],
+        "shared_properties": [
+          "path"
+        ],
+        "same_type_properties": [
+          "path"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "pattern"
+        ],
+        "client_only_required": []
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "glob",
+      "client_tool": "grep_search",
+      "score": 0.298462,
+      "ranking_score": 0.194,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.153846,
+        "concept": 1.0,
+        "properties": 0.2,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "path",
+          "pattern"
+        ],
+        "client_properties": [
+          "includeIgnoredFiles",
+          "includePattern",
+          "isRegexp",
+          "maxResults",
+          "query"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "pattern"
+        ],
+        "client_only_required": [
+          "isRegexp",
+          "query"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "glob",
+      "client_tool": "list_dir",
+      "score": 0.2,
+      "ranking_score": 0.19,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.0,
+        "properties": 0.666667,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "path",
+          "pattern"
+        ],
+        "client_properties": [
+          "path"
+        ],
+        "shared_properties": [
+          "path"
+        ],
+        "same_type_properties": [
+          "path"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "pattern"
+        ],
+        "client_only_required": []
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "glob",
+      "client_tool": "view_image",
+      "score": 0.188462,
+      "ranking_score": 0.179038,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.153846,
+        "concept": 0.0,
+        "properties": 0.5,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "path",
+          "pattern"
+        ],
+        "client_properties": [
+          "filePath"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "pattern"
+        ],
+        "client_only_required": [
+          "filePath"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "grep",
+      "client_tool": "grep_search",
+      "score": 0.425758,
+      "ranking_score": 0.276742,
+      "confidence": "low",
+      "signals": {
+        "name": 0.666667,
+        "description": 0.333333,
+        "concept": 0.666667,
+        "properties": 0.363636,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "include",
+          "path",
+          "pattern"
+        ],
+        "client_properties": [
+          "includeIgnoredFiles",
+          "includePattern",
+          "isRegexp",
+          "maxResults",
+          "query"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "pattern"
+        ],
+        "client_only_required": [
+          "isRegexp",
+          "query"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "grep",
+      "client_tool": "create_directory",
+      "score": 0.253333,
+      "ranking_score": 0.240667,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.666667,
+        "properties": 0.4,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "include",
+          "path",
+          "pattern"
+        ],
+        "client_properties": [
+          "dirPath"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "pattern"
+        ],
+        "client_only_required": [
+          "dirPath"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "grep",
+      "client_tool": "file_search",
+      "score": 0.171795,
+      "ranking_score": 0.163205,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.153846,
+        "concept": 0.666667,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "include",
+          "path",
+          "pattern"
+        ],
+        "client_properties": [
+          "maxResults",
+          "query"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "pattern"
+        ],
+        "client_only_required": [
+          "query"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "grep",
+      "client_tool": "create_file",
+      "score": 0.233333,
+      "ranking_score": 0.151667,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.666667,
+        "properties": 0.333333,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "include",
+          "path",
+          "pattern"
+        ],
+        "client_properties": [
+          "content",
+          "filePath"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "pattern"
+        ],
+        "client_only_required": [
+          "content",
+          "filePath"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "grep",
+      "client_tool": "list_dir",
+      "score": 0.15,
+      "ranking_score": 0.1425,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.0,
+        "properties": 0.5,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "include",
+          "path",
+          "pattern"
+        ],
+        "client_properties": [
+          "path"
+        ],
+        "shared_properties": [
+          "path"
+        ],
+        "same_type_properties": [
+          "path"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "pattern"
+        ],
+        "client_only_required": []
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "read",
+      "client_tool": "read_file",
+      "score": 0.608333,
+      "ranking_score": 0.577917,
+      "confidence": "review",
+      "signals": {
+        "name": 0.666667,
+        "description": 0.5,
+        "concept": 1.0,
+        "properties": 0.444444,
+        "required": 0.5
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "filePath",
+          "limit",
+          "offset"
+        ],
+        "client_properties": [
+          "endLine",
+          "filePath",
+          "startLine"
+        ],
+        "shared_properties": [
+          "filePath"
+        ],
+        "same_type_properties": [
+          "filePath"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": [
+          "endLine",
+          "startLine"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "read",
+      "client_tool": "view_image",
+      "score": 0.555556,
+      "ranking_score": 0.527778,
+      "confidence": "review",
+      "signals": {
+        "name": 0.0,
+        "description": 0.222222,
+        "concept": 1.0,
+        "properties": 0.666667,
+        "required": 1.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "filePath",
+          "limit",
+          "offset"
+        ],
+        "client_properties": [
+          "filePath"
+        ],
+        "shared_properties": [
+          "filePath"
+        ],
+        "same_type_properties": [
+          "filePath"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": []
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "read",
+      "client_tool": "read_notebook_cell_output",
+      "score": 0.476667,
+      "ranking_score": 0.452833,
+      "confidence": "review",
+      "signals": {
+        "name": 0.4,
+        "description": 0.0,
+        "concept": 1.0,
+        "properties": 0.5,
+        "required": 0.666667
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "filePath",
+          "limit",
+          "offset"
+        ],
+        "client_properties": [
+          "cellId",
+          "filePath"
+        ],
+        "shared_properties": [
+          "filePath"
+        ],
+        "same_type_properties": [
+          "filePath"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": [
+          "cellId"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "read",
+      "client_tool": "list_dir",
+      "score": 0.3825,
+      "ranking_score": 0.363375,
+      "confidence": "review",
+      "signals": {
+        "name": 0.0,
+        "description": 0.25,
+        "concept": 1.0,
+        "properties": 0.4,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "filePath",
+          "limit",
+          "offset"
+        ],
+        "client_properties": [
+          "path"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "filePath"
+        ],
+        "client_only_required": [
+          "path"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "read",
+      "client_tool": "copilot_getNotebookSummary",
+      "score": 0.3,
+      "ranking_score": 0.285,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.0,
+        "properties": 0.666667,
+        "required": 1.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "filePath",
+          "limit",
+          "offset"
+        ],
+        "client_properties": [
+          "filePath"
+        ],
+        "shared_properties": [
+          "filePath"
+        ],
+        "same_type_properties": [
+          "filePath"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": []
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "skill",
+      "client_tool": "install_extension",
+      "score": 0.266667,
+      "ranking_score": 0.253333,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.0,
+        "properties": 0.666667,
+        "required": 0.666667
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "name"
+        ],
+        "client_properties": [
+          "id",
+          "name"
+        ],
+        "shared_properties": [
+          "name"
+        ],
+        "same_type_properties": [
+          "name"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": [
+          "id"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "skill",
+      "client_tool": "runSubagent",
+      "score": 0.233333,
+      "ranking_score": 0.151667,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.666667,
+        "properties": 0.333333,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "name"
+        ],
+        "client_properties": [
+          "agentName",
+          "description",
+          "model",
+          "prompt"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "name"
+        ],
+        "client_only_required": [
+          "description",
+          "prompt"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "skill",
+      "client_tool": "run_vscode_command",
+      "score": 0.152381,
+      "ranking_score": 0.144762,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.0,
+        "properties": 0.285714,
+        "required": 0.666667
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "name"
+        ],
+        "client_properties": [
+          "args",
+          "commandId",
+          "name",
+          "skipCheck"
+        ],
+        "shared_properties": [
+          "name"
+        ],
+        "same_type_properties": [
+          "name"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": [
+          "commandId"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "skill",
+      "client_tool": "list_dir",
+      "score": 0.133333,
+      "ranking_score": 0.126667,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.666667,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "name"
+        ],
+        "client_properties": [
+          "path"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "name"
+        ],
+        "client_only_required": [
+          "path"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "skill",
+      "client_tool": "manage_todo_list",
+      "score": 0.133333,
+      "ranking_score": 0.126667,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.666667,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "name"
+        ],
+        "client_properties": [
+          "todoList"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "name"
+        ],
+        "client_only_required": [
+          "todoList"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "task",
+      "client_tool": "runSubagent",
+      "score": 0.585882,
+      "ranking_score": 0.380824,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.823529,
+        "concept": 1.0,
+        "properties": 0.333333,
+        "required": 0.8
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "command",
+          "description",
+          "prompt",
+          "subagent_type",
+          "task_id"
+        ],
+        "client_properties": [
+          "agentName",
+          "description",
+          "model",
+          "prompt"
+        ],
+        "shared_properties": [
+          "description",
+          "prompt"
+        ],
+        "same_type_properties": [
+          "description",
+          "prompt"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "subagent_type"
+        ],
+        "client_only_required": []
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "task",
+      "client_tool": "get_task_output",
+      "score": 0.335,
+      "ranking_score": 0.21775,
+      "confidence": "low",
+      "signals": {
+        "name": 0.5,
+        "description": 0.0,
+        "concept": 1.0,
+        "properties": 0.2,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "command",
+          "description",
+          "prompt",
+          "subagent_type",
+          "task_id"
+        ],
+        "client_properties": [
+          "id",
+          "workspaceFolder"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "description",
+          "prompt",
+          "subagent_type"
+        ],
+        "client_only_required": [
+          "id",
+          "workspaceFolder"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "task",
+      "client_tool": "create_and_run_task",
+      "score": 0.28619,
+      "ranking_score": 0.186024,
+      "confidence": "low",
+      "signals": {
+        "name": 0.5,
+        "description": 0.071429,
+        "concept": 0.666667,
+        "properties": 0.2,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "command",
+          "description",
+          "prompt",
+          "subagent_type",
+          "task_id"
+        ],
+        "client_properties": [
+          "task",
+          "workspaceFolder"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "description",
+          "prompt",
+          "subagent_type"
+        ],
+        "client_only_required": [
+          "task",
+          "workspaceFolder"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "task",
+      "client_tool": "manage_todo_list",
+      "score": 0.225,
+      "ranking_score": 0.14625,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.1,
+        "concept": 1.0,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "command",
+          "description",
+          "prompt",
+          "subagent_type",
+          "task_id"
+        ],
+        "client_properties": [
+          "todoList"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "description",
+          "prompt",
+          "subagent_type"
+        ],
+        "client_only_required": [
+          "todoList"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "task",
+      "client_tool": "navigate_page",
+      "score": 0.109091,
+      "ranking_score": 0.070909,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.0,
+        "properties": 0.363636,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "command",
+          "description",
+          "prompt",
+          "subagent_type",
+          "task_id"
+        ],
+        "client_properties": [
+          "pageId",
+          "type",
+          "url"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "description",
+          "prompt",
+          "subagent_type"
+        ],
+        "client_only_required": [
+          "pageId"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "todowrite",
+      "client_tool": "manage_todo_list",
+      "score": 0.233333,
+      "ranking_score": 0.221667,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.4,
+        "concept": 0.666667,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "todos"
+        ],
+        "client_properties": [
+          "todoList"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "todos"
+        ],
+        "client_only_required": [
+          "todoList"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "todowrite",
+      "client_tool": "create_directory",
+      "score": 0.171795,
+      "ranking_score": 0.163205,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.153846,
+        "concept": 0.666667,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "todos"
+        ],
+        "client_properties": [
+          "dirPath"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "todos"
+        ],
+        "client_only_required": [
+          "dirPath"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "todowrite",
+      "client_tool": "create_new_workspace",
+      "score": 0.157143,
+      "ranking_score": 0.149286,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.095238,
+        "concept": 0.666667,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "todos"
+        ],
+        "client_properties": [
+          "query"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "todos"
+        ],
+        "client_only_required": [
+          "query"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "todowrite",
+      "client_tool": "create_and_run_task",
+      "score": 0.217857,
+      "ranking_score": 0.141607,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.071429,
+        "concept": 1.0,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "todos"
+        ],
+        "client_properties": [
+          "task",
+          "workspaceFolder"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "todos"
+        ],
+        "client_only_required": [
+          "task",
+          "workspaceFolder"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "todowrite",
+      "client_tool": "create_new_jupyter_notebook",
+      "score": 0.133333,
+      "ranking_score": 0.126667,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.666667,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "todos"
+        ],
+        "client_properties": [
+          "query"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "todos"
+        ],
+        "client_only_required": [
+          "query"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "webfetch",
+      "client_tool": "navigate_page",
+      "score": 0.269048,
+      "ranking_score": 0.255595,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.2,
+        "concept": 0.666667,
+        "properties": 0.285714,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "format",
+          "timeout",
+          "url"
+        ],
+        "client_properties": [
+          "pageId",
+          "type",
+          "url"
+        ],
+        "shared_properties": [
+          "url"
+        ],
+        "same_type_properties": [
+          "url"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": [
+          "pageId"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "webfetch",
+      "client_tool": "open_browser_page",
+      "score": 0.241667,
+      "ranking_score": 0.229583,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.166667,
+        "concept": 0.5,
+        "properties": 0.333333,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "format",
+          "timeout",
+          "url"
+        ],
+        "client_properties": [
+          "forceNew",
+          "url"
+        ],
+        "shared_properties": [
+          "url"
+        ],
+        "same_type_properties": [
+          "url"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": []
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "webfetch",
+      "client_tool": "fetch_webpage",
+      "score": 0.311111,
+      "ranking_score": 0.202222,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.444444,
+        "concept": 1.0,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "format",
+          "timeout",
+          "url"
+        ],
+        "client_properties": [
+          "query",
+          "urls"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "url"
+        ],
+        "client_only_required": [
+          "query",
+          "urls"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "webfetch",
+      "client_tool": "run_playwright_code",
+      "score": 0.193333,
+      "ranking_score": 0.183667,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.666667,
+        "properties": 0.2,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "format",
+          "timeout",
+          "url"
+        ],
+        "client_properties": [
+          "code",
+          "deferredResultId",
+          "pageId",
+          "timeoutMs"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "url"
+        ],
+        "client_only_required": [
+          "pageId"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "webfetch",
+      "client_tool": "create_directory",
+      "score": 0.133333,
+      "ranking_score": 0.126667,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.666667,
+        "properties": 0.0,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "format",
+          "timeout",
+          "url"
+        ],
+        "client_properties": [
+          "dirPath"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "url"
+        ],
+        "client_only_required": [
+          "dirPath"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "websearch",
+      "client_tool": "file_search",
+      "score": 0.391414,
+      "ranking_score": 0.371843,
+      "confidence": "review",
+      "signals": {
+        "name": 0.0,
+        "description": 0.111111,
+        "concept": 0.5,
+        "properties": 0.545455,
+        "required": 1.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "contextMaxCharacters",
+          "livecrawl",
+          "numResults",
+          "query",
+          "type"
+        ],
+        "client_properties": [
+          "maxResults",
+          "query"
+        ],
+        "shared_properties": [
+          "query"
+        ],
+        "same_type_properties": [
+          "query"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": []
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "websearch",
+      "client_tool": "github_text_search",
+      "score": 0.356667,
+      "ranking_score": 0.338833,
+      "confidence": "review",
+      "signals": {
+        "name": 0.0,
+        "description": 0.16,
+        "concept": 0.5,
+        "properties": 0.5,
+        "required": 0.666667
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "contextMaxCharacters",
+          "livecrawl",
+          "numResults",
+          "query",
+          "type"
+        ],
+        "client_properties": [
+          "maxResults",
+          "query",
+          "scope"
+        ],
+        "shared_properties": [
+          "query"
+        ],
+        "same_type_properties": [
+          "query"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": [
+          "scope"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "websearch",
+      "client_tool": "fetch_webpage",
+      "score": 0.342222,
+      "ranking_score": 0.325111,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.222222,
+        "concept": 0.8,
+        "properties": 0.2,
+        "required": 0.666667
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "contextMaxCharacters",
+          "livecrawl",
+          "numResults",
+          "query",
+          "type"
+        ],
+        "client_properties": [
+          "query",
+          "urls"
+        ],
+        "shared_properties": [
+          "query"
+        ],
+        "same_type_properties": [
+          "query"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": [
+          "urls"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "websearch",
+      "client_tool": "grep_search",
+      "score": 0.308578,
+      "ranking_score": 0.29315,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.117647,
+        "concept": 0.5,
+        "properties": 0.375,
+        "required": 0.666667
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "contextMaxCharacters",
+          "livecrawl",
+          "numResults",
+          "query",
+          "type"
+        ],
+        "client_properties": [
+          "includeIgnoredFiles",
+          "includePattern",
+          "isRegexp",
+          "maxResults",
+          "query"
+        ],
+        "shared_properties": [
+          "query"
+        ],
+        "same_type_properties": [
+          "query"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": [
+          "isRegexp"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "websearch",
+      "client_tool": "create_new_jupyter_notebook",
+      "score": 0.266667,
+      "ranking_score": 0.253333,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.5,
+        "properties": 0.222222,
+        "required": 1.0
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "contextMaxCharacters",
+          "livecrawl",
+          "numResults",
+          "query",
+          "type"
+        ],
+        "client_properties": [
+          "query"
+        ],
+        "shared_properties": [
+          "query"
+        ],
+        "same_type_properties": [
+          "query"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": []
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "write",
+      "client_tool": "create_file",
+      "score": 0.6625,
+      "ranking_score": 0.6625,
+      "confidence": "review",
+      "signals": {
+        "name": 0.0,
+        "description": 0.25,
+        "concept": 1.0,
+        "properties": 1.0,
+        "required": 1.0
+      },
+      "arguments": {
+        "status": "schema-compatible",
+        "backend_properties": [
+          "content",
+          "filePath"
+        ],
+        "client_properties": [
+          "content",
+          "filePath"
+        ],
+        "shared_properties": [
+          "content",
+          "filePath"
+        ],
+        "same_type_properties": [
+          "content",
+          "filePath"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [],
+        "client_only_required": []
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "write",
+      "client_tool": "view_image",
+      "score": 0.369167,
+      "ranking_score": 0.239958,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.25,
+        "concept": 0.0,
+        "properties": 0.8,
+        "required": 0.666667
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "content",
+          "filePath"
+        ],
+        "client_properties": [
+          "filePath"
+        ],
+        "shared_properties": [
+          "filePath"
+        ],
+        "same_type_properties": [
+          "filePath"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "content"
+        ],
+        "client_only_required": []
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "write",
+      "client_tool": "read_notebook_cell_output",
+      "score": 0.221429,
+      "ranking_score": 0.210357,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 0.0,
+        "properties": 0.571429,
+        "required": 0.5
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "content",
+          "filePath"
+        ],
+        "client_properties": [
+          "cellId",
+          "filePath"
+        ],
+        "shared_properties": [
+          "filePath"
+        ],
+        "same_type_properties": [
+          "filePath"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "content"
+        ],
+        "client_only_required": [
+          "cellId"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "write",
+      "client_tool": "create_directory",
+      "score": 0.32,
+      "ranking_score": 0.208,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.0,
+        "concept": 1.0,
+        "properties": 0.4,
+        "required": 0.0
+      },
+      "arguments": {
+        "status": "incompatible",
+        "backend_properties": [
+          "content",
+          "filePath"
+        ],
+        "client_properties": [
+          "dirPath"
+        ],
+        "shared_properties": [],
+        "same_type_properties": [],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "content",
+          "filePath"
+        ],
+        "client_only_required": [
+          "dirPath"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    },
+    {
+      "backend_tool": "write",
+      "client_tool": "run_notebook_cell",
+      "score": 0.215455,
+      "ranking_score": 0.204682,
+      "confidence": "low",
+      "signals": {
+        "name": 0.0,
+        "description": 0.181818,
+        "concept": 0.0,
+        "properties": 0.4,
+        "required": 0.5
+      },
+      "arguments": {
+        "status": "requires-transform",
+        "backend_properties": [
+          "content",
+          "filePath"
+        ],
+        "client_properties": [
+          "cellId",
+          "continueOnError",
+          "filePath",
+          "reason"
+        ],
+        "shared_properties": [
+          "filePath"
+        ],
+        "same_type_properties": [
+          "filePath"
+        ],
+        "different_type_properties": [],
+        "backend_required_missing_in_client": [
+          "content"
+        ],
+        "client_only_required": [
+          "cellId"
+        ]
+      },
+      "requires_roundtrip": true,
+      "runtime_activation": "forbidden_from_similarity"
+    }
+  ],
+  "backend_tools_without_candidates": []
+}

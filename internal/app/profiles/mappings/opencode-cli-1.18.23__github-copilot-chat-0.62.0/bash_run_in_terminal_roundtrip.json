@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "normalization": {
+    "tool_call_id": "call_fixture_bash_001",
+    "command": "printf 'CAPTURE_BASH_OK\\n'",
+    "client_required_synthesized": [
+      "explanation",
+      "goal",
+      "mode"
+    ],
+    "result_format": "raw_terminal_output"
+  },
+  "evidence": {
+    "opencode_cli_capture": {
+      "run": "opencode-bash-roundtrip-20260826",
+      "flow": "42bf58e5-973c-4495-8a3a-9dda0b35d0f4",
+      "body_bytes": 33276,
+      "body_sha256": "57dc89ac0685c63edc54fcf3033c38a4077e3deb6aa739007cf57d48bd7fe525",
+      "observed_tool": "bash",
+      "observed_result": "CAPTURE_BASH_OK\\n"
+    },
+    "copilot_capture": {
+      "run": "copilot-terminal-roundtrip",
+      "initial_body_bytes": 118582,
+      "initial_body_sha256": "bcbd76a8eabc7a69b7aed4f20010c313c66585e6663766ab14203ec1ac42452c",
+      "continuation_body_bytes": 119059,
+      "continuation_body_sha256": "a78c2f22d1975f521d695b553b9254497d86e3dd3328a4cf9bade7dcc67db423",
+      "observed_tool": "run_in_terminal",
+      "observed_result": "CAPTURE_TERMINAL_OK"
+    }
+  },
+  "backend_call": {
+    "id": "call_fixture_bash_001",
+    "type": "function",
+    "function": {
+      "name": "bash",
+      "arguments": "{\"command\":\"printf 'CAPTURE_BASH_OK\\\\n'\"}"
+    }
+  },
+  "client_call": {
+    "id": "call_fixture_bash_001",
+    "type": "function",
+    "function": {
+      "name": "run_in_terminal",
+      "arguments": "{\"command\":\"printf 'CAPTURE_BASH_OK\\\\n'\",\"explanation\":\"Execute the requested terminal command.\",\"goal\":\"Run the requested command.\",\"mode\":\"sync\"}"
+    }
+  },
+  "client_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_bash_001",
+    "content": "CAPTURE_BASH_OK\n"
+  },
+  "backend_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_bash_001",
+    "content": "CAPTURE_BASH_OK\n"
+  }
+}

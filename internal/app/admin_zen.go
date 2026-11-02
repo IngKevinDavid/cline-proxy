@@ -49,6 +49,9 @@ func handleZenConfig(w http.ResponseWriter, r *http.Request) {
 			"orgID":     auth.ActiveOrgID,
 		}
 	}
+	store := GetOpenCodeAccountStore()
+	data["accounts"] = store.ListAccounts()
+	data["fidelity"] = GetFidelityProfileInfo()
 	writeAPI(w, http.StatusOK, apiResponse{Success: true, Data: data})
 }
 

@@ -276,6 +276,13 @@ func opencodeEnvironment() string {
 
 func opencodeFullPrompt() string {
 	env := opencodeEnvironment()
+	if profile, err := LoadOpenCodeCLI2022Profile(); err == nil && profile.Verified {
+		prompt := profile.SystemBase + "\n\n" + env + "\n\n" + profile.Skills
+		if profile.CodeMode != "" {
+			prompt += "\n\n" + profile.CodeMode
+		}
+		return prompt
+	}
 	return opencodePromptV2 + "\n\n" + env + "\n\n" + opencodeSkills
 }
 
@@ -575,3 +582,4 @@ func RestoreToolNameInChoice(choice map[string]any, renames *ToolRenames) {
 		}
 	}
 }
+

@@ -1,0 +1,19 @@
+{
+  "version": "1.18.23",
+  "system_base_sha256": "962fbf3cb3ec659c9a5244425ee2e7bb141ad4428f489a630a7738566880dc6a",
+  "skills_sha256": "fd1c3232df580309914fb9faa4690b28c2e9de2fa1db93452d02c2a20db86e29",
+  "tools_exact_sha256": "35ce91d1be976e36064cfac2a785bf417cbd620311d3a43feda9f5f6e23ab50b",
+  "tool_names": [
+    "bash",
+    "edit",
+    "glob",
+    "grep",
+    "read",
+    "skill",
+    "task",
+    "todowrite",
+    "webfetch",
+    "websearch",
+    "write"
+  ]
+}

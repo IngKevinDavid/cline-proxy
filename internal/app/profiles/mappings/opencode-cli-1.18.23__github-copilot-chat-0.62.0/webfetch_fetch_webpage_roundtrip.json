@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "normalization": {
+    "tool_call_id": "call_fixture_webfetch_001",
+    "workspace_root": "/workspace/project",
+    "result_format": "OpenCode markdown body without Copilot context envelope"
+  },
+  "evidence": {
+    "opencode_cli_capture": {
+      "run": "opencode-webfetch-success-20260826",
+      "initial_body_sha256": "d44b07dfc879eddd646001f4f2c4ebdfd0d66b06c373462a743b1244f7b3eff9",
+      "continuation_body_sha256": "b322f040002b19bbb6f8b180535dad161edab95ac9dbaeb88ef85b36400ebdb8"
+    },
+    "copilot_capture": {
+      "run": "copilot-webfetch-roundtrip",
+      "initial_body_bytes": 123007,
+      "initial_body_sha256": "1f2b9cf51cdfefc489b1196e80b88f208255bb0796dc881bdb4ac0e80ff3d84c",
+      "continuation_body_bytes": 123551,
+      "continuation_body_sha256": "05d0fee9fbe81932a2807cea8da67570cabde0742d3dabb7389077a2ea66d0fb"
+    }
+  },
+  "backend_call": {
+    "id": "call_fixture_webfetch_001",
+    "type": "function",
+    "function": {
+      "name": "webfetch",
+      "arguments": "{\"format\":\"markdown\",\"url\":\"https://example.com\"}"
+    }
+  },
+  "client_call": {
+    "id": "call_fixture_webfetch_001",
+    "type": "function",
+    "function": {
+      "name": "fetch_webpage",
+      "arguments": "{\"query\":\"Fetch the main content from the page.\",\"urls\":[\"https://example.com\"]}"
+    }
+  },
+  "client_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_webfetch_001",
+    "content": "Here is some relevant context from the web page https://example.com/:\n\n# Example Domain\n\nThis domain is for use in documentation examples without needing permission.\nAvoid use in operations.\n\n[Learn more](https://iana.org/domains/example)"
+  },
+  "backend_result": {
+    "role": "tool",
+    "tool_call_id": "call_fixture_webfetch_001",
+    "content": "# Example Domain\n\nThis domain is for use in documentation examples without needing permission.\nAvoid use in operations.\n\n[Learn more](https://iana.org/domains/example)"
+  }
+}

@@ -20,16 +20,85 @@ func handleOpenCodeAccountsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	store := GetOpenCodeAccountStore()
+	state, _ := store.Load()
 	accounts := store.ListAccounts()
 	fidelity := GetFidelityProfileInfo()
 	writeAPI(w, http.StatusOK, apiResponse{
 		Success: true,
 		Data: map[string]any{
-			"accounts": accounts,
-			"total":    len(accounts),
-			"fidelity": fidelity,
+			"accounts":         accounts,
+			"total":            len(accounts),
+			"active":           state.Active,
+			"routing_strategy": state.RoutingStrategy,
+			"fidelity":         fidelity,
 		},
 	})
+}
+
+// POST /admin/api/opencode/accounts/active
+func handleOpenCodeAccountSetActive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		return
+	}
+
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "account name is required"})
+		return
+	}
+
+	store := GetOpenCodeAccountStore()
+	if err := store.SetActive(req.Name); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "active account updated"})
+}
+
+// POST /admin/api/opencode/accounts/strategy
+func handleOpenCodeAccountSetStrategy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeAPI(w, http.StatusMethodNotAllowed, apiResponse{Error: "method not allowed"})
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+	defer r.Body.Close()
+
+	var req struct {
+		Strategy string `json:"strategy"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: "invalid JSON"})
+		return
+	}
+
+	store := GetOpenCodeAccountStore()
+	if err := store.SetStrategy(req.Strategy); err != nil {
+		writeAPI(w, http.StatusBadRequest, apiResponse{Error: err.Error()})
+		return
+	}
+
+	writeAPI(w, http.StatusOK, apiResponse{Success: true, Message: "routing strategy updated"})
 }
 
 // POST /admin/api/opencode/accounts/add
@@ -345,3 +414,4 @@ func isRateLimitedError(err error) bool {
 	s := strings.ToLower(err.Error())
 	return strings.Contains(s, "429") || strings.Contains(s, "rate limit") || strings.Contains(s, "freeusagelimit")
 }
+

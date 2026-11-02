@@ -109,6 +109,8 @@ func registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/opencode/accounts/route", adminCORS(auth(handleOpenCodeAccountRoute)))
 	mux.HandleFunc("/admin/api/opencode/accounts/refresh", adminCORS(auth(handleOpenCodeAccountRefresh)))
 	mux.HandleFunc("/admin/api/opencode/accounts/test", adminCORS(auth(handleOpenCodeAccountTest)))
+	mux.HandleFunc("/admin/api/opencode/accounts/active", adminCORS(auth(handleOpenCodeAccountSetActive)))
+	mux.HandleFunc("/admin/api/opencode/accounts/strategy", adminCORS(auth(handleOpenCodeAccountSetStrategy)))
 	mux.HandleFunc("/admin/api/opencode/oauth/start", adminCORS(auth(handleOpenCodeOAuthStart)))
 	mux.HandleFunc("/admin/api/opencode/oauth/status", adminCORS(auth(handleOpenCodeOAuthStatus)))
 	mux.HandleFunc("/admin/api/opencode/oauth/cancel", adminCORS(auth(handleOpenCodeOAuthCancel)))

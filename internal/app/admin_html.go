@@ -735,18 +735,27 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 
     <!-- Connected Accounts Table -->
     <div style="margin-top:20px">
-      <div style="font-weight:600;font-size:13px;margin-bottom:8px;color:var(--text)">Connected Accounts in Pool</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:10px">
+        <div style="font-weight:600;font-size:13px;color:var(--text)">Connected Accounts in Pool</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <label style="font-size:12px;color:var(--text2);margin:0">Pool Strategy:</label>
+          <select id="ocPoolStrategy" onchange="changeOcStrategy(this.value)" style="padding:3px 8px;font-size:12px;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:4px">
+            <option value="fill">Fill / Sticky (Use account until exhausted)</option>
+            <option value="round-robin">Round-Robin (Rotate each turn)</option>
+          </select>
+        </div>
+      </div>
       <div class="table-wrap" style="margin-bottom:10px">
         <table>
           <thead>
             <tr>
-              <th style="width:140px">Account Name</th>
+              <th style="width:150px">Account Name</th>
               <th style="width:120px">Token</th>
               <th style="width:130px">Egress Route</th>
               <th style="width:90px">Status</th>
               <th style="width:100px">Org ID</th>
-              <th style="width:140px">Expires</th>
-              <th style="width:180px">Actions</th>
+              <th style="width:120px">Expires</th>
+              <th style="width:210px">Actions</th>
             </tr>
           </thead>
           <tbody id="ocAccountsBody">
@@ -755,7 +764,7 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
         </table>
       </div>
       <p class="hint" style="margin:0">
-        When accounts are connected, requests automatically round-robin across them with automatic rate-limit cooldown and failover. Each account can have its own independent egress route. If no accounts are configured, requests fall back to the API Keys listed below or the anonymous public tier.
+        In <b>Fill / Sticky</b> mode (recommended), requests stick to the active account until its quota is exhausted (429 / cooldown), then automatically transition to the next account. In <b>Round-Robin</b> mode, requests rotate across all active accounts on every turn.
       </p>
     </div>
   </div>
@@ -808,95 +817,29 @@ body:not([data-theme="dark"]) .theme-toggle .dark-label{display:none}
 </div>
 
 <div class="section">
-  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14.5 14.5 0 0 1 0 18 14.5 14.5 0 0 1 0-18z"/></svg></span> Upstream config</div>
+  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14.5 14.5 0 0 1 0 18 14.5 14.5 0 0 1 0-18z"/></svg></span> OpenCode Gateway Settings</div>
   <div class="section-body">
     <div class="form-row">
-      <div class="field"><label>Enable opencode upstream</label>
+      <div class="field" style="flex:1">
+        <label>Enable OpenCode Gateway</label>
         <select id="ocEnabled"><option value="true">On</option><option value="false">Off</option></select>
       </div>
-      <div class="field" style="flex:2"><label>API keys / Console OAuth Tokens (one per line, supports <code>token#org_id</code> for multi-accounts)</label><textarea id="ocKeys" rows="3" placeholder="public"></textarea><small id="ocConsoleHint" style="color:var(--text2);display:block;margin-top:4px"></small></div>
-    </div>
-    <div class="flex" style="gap:10px;margin-bottom:8px;align-items:center;flex-wrap:wrap">
-      <label class="hint" style="margin:0">Probe model (used by the Test buttons):</label>
-      <select id="ocProbeModel" style="max-width:360px"><option value="">auto — big-pickle first, then live models</option></select>
-    </div>
-    <div class="table-wrap" style="margin-bottom:10px">
-      <table>
-        <thead><tr><th style="width:50px">#</th><th style="width:110px">Key</th><th style="width:70px">Usage</th><th style="width:110px">Session</th><th>Cooldown</th><th style="width:90px"></th></tr></thead>
-        <tbody id="ocKeysBody"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody>
-      </table>
-    </div>
-    <div class="form-row">
-      <div class="field"><label>Base URL</label><input type="text" id="ocBaseURL" placeholder="https://opencode.ai/zen/v1"></div>
-      <div class="field">
-        <label>Egress proxies</label>
-        <div class="hint" style="margin-top:6px" id="ocProxyState">-</div>
-        <div class="hint">Managed on the <a href="#" onclick="switchTab('proxypool');return false" style="color:var(--accent);cursor:pointer">Proxy pool</a> page — shared with the Cline upstream.</div>
+      <div class="field" style="flex:2">
+        <label>Upstream Base URL</label>
+        <input type="text" id="ocBaseURL" placeholder="https://opencode.ai/zen/v1">
+      </div>
+      <div class="field" style="flex:1">
+        <label>Max Concurrency</label>
+        <input type="text" id="ocMaxConc" placeholder="8">
+      </div>
+      <div class="field" style="flex:1">
+        <label>Rate-Limit Retries</label>
+        <input type="text" id="ocRetries" placeholder="3">
+      </div>
+      <div class="field" style="flex:0 0 auto;align-self:flex-end">
+        <button class="btn btn-primary" onclick="saveOcConfig()">Save Gateway Settings</button>
       </div>
     </div>
-    <div class="form-actions"><button class="btn btn-primary" onclick="saveOcConfig()">Save config</button></div>
-  </div>
-</div>
-
-<div class="section">
-  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span> Rate-limit defense</div>
-  <div class="section-body">
-    <div class="form-row">
-      <div class="field"><label>Max concurrency</label><input type="text" id="ocMaxConc" placeholder="8"></div>
-      <div class="field"><label>Rate-limit retries</label><input type="text" id="ocRetries" placeholder="3"></div>
-    </div>
-    <div class="form-row">
-      <div class="field"><label>Failover</label>
-        <select id="ocFailover"><option value="true">On (switch to cline pool)</option><option value="false">Off</option></select>
-      </div>
-      <div class="field"><label>Failure threshold</label><input type="text" id="ocFailoverCount" placeholder="3"></div>
-    </div>
-    <div class="form-row">
-      <div class="field"><label>Failover window (min)</label><input type="text" id="ocFailoverMinutes" placeholder="5"></div>
-      <div class="field"><label>Current status</label><span id="ocFailoverInfo" class="stat-mini" style="align-self:center">-</span></div>
-    </div>
-    <div class="form-actions"><button class="btn btn-primary" onclick="saveOcConfig()">Save rate-limit config</button></div>
-  </div>
-</div>
-
-<div class="section">
-  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><path d="M4 8V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v2M4 8v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M4 8h16"/><path d="M10 12h4"/></svg></span> Context compaction (opencode official mechanism)</div>
-  <div class="section-body">
-    <div class="form-row">
-      <div class="field"><label>Auto-compaction</label>
-        <select id="ocCompactAuto"><option value="true">On</option><option value="false">Off</option></select>
-      </div>
-      <div class="field"><label>Reserved buffer</label><input type="text" id="ocCompactBuffer" placeholder="20000"></div>
-    </div>
-    <div class="form-row">
-      <div class="field"><label>Tail tokens kept</label><input type="text" id="ocKeepTokens" placeholder="8000"></div>
-      <div class="field"><label>Summary model</label><input type="text" id="ocSummaryModel" placeholder="empty = same as request model"></div>
-    </div>
-    <div class="form-row">
-      <div class="field"><label>Summary cap</label><input type="text" id="ocMaxSummary" placeholder="4096"></div>
-    </div>
-    <div class="form-actions"><button class="btn btn-primary" onclick="saveOcConfig()">Save compaction config</button></div>
-  </div>
-</div>
-
-<div class="section">
-  <div class="section-title"><span class="sec-ico"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span> Live session IDs (zen FreeTier gate)
-    <span id="ocSessSummary" class="probe-pill" style="font-weight:normal;margin-left:auto"></span>
-  </div>
-  <div class="section-body">
-    <p class="hint" style="margin-top:0" id="ocSessHint">The free tier only accepts session IDs the upstream has actually seen, minted by the opencode CLI. A key without a live session <b>always</b> fails with 403 — normally the harvester mints one on startup, on repeated 403s, and every few hours; use the buttons below to mint immediately (e.g. right after a fresh deploy with many keys).</p>
-    <div class="flex" style="gap:10px;margin-bottom:10px;flex-wrap:wrap">
-      <button class="btn btn-primary" id="ocSessBtnMissing" onclick="mintZenSessions(false)">Mint missing sessions</button>
-      <button class="btn" id="ocSessBtnForce" onclick="mintZenSessions(true)">Force mint / refresh all</button>
-      <span class="hint" style="margin:0" id="ocSessTimer"></span>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th style="width:70px">Key</th><th style="width:130px">Session</th><th style="width:150px">State</th><th>Last minted</th></tr></thead>
-        <tbody id="ocSessBody"><tr><td colspan="4" class="empty">Loading...</td></tr></tbody>
-      </table>
-    </div>
-    <div id="ocSessResult" style="margin-top:10px"></div>
   </div>
 </div>
 
@@ -996,7 +939,7 @@ document.querySelectorAll('.nav-item').forEach(el => {
     if (el.dataset.tab === 'settings') { loadKeys(); loadModels(); loadConfig(); }
     if (el.dataset.tab === 'logs') loadLogs();
     if (el.dataset.tab === 'proxypool') loadProxyPool();
-    if (el.dataset.tab === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); loadOcSessions(); loadOcAccounts(); }
+    if (el.dataset.tab === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); loadOcAccounts(); }
     if (el.dataset.tab === 'combos') { loadCombos(); fillComboModels(); }
   });
 });
@@ -1012,7 +955,7 @@ function switchTab(name) {
   if (name === 'settings') { loadKeys(); loadModels(); }
   if (name === 'logs') loadLogs();
   if (name === 'proxypool') loadProxyPool();
-  if (name === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); loadOcSessions(); loadOcAccounts(); }
+  if (name === 'opencode') { loadOcConfig(); loadOcModels(); loadOcStats(); loadOcAccounts(); }
   if (name === 'combos') { loadCombos(); fillComboModels(); }
 }
 
@@ -1562,37 +1505,11 @@ async function loadOcConfig() {
     const d = await api('GET', '/opencode/config');
     const c = d.data;
     ocCfgCache = c;
-    _('ocEnabled').value = String(c.enabled);
-    _('ocKeys').value = (c.keys && c.keys.length ? c.keys : [c.key || 'public']).join('\n');
-    const ks = c.keyStates || [];
-    renderOcKeyStates(ks);
-    _('ocBaseURL').value = c.baseURL || '';
-    _('ocProxyState').textContent = (c.proxies && c.proxies.length)
-      ? c.proxies.length + ' prox' + (c.proxies.length === 1 ? 'y' : 'ies') + ' configured (' + (c.proxyStrategy || 'round_robin') + ')'
-      : 'none configured';
-    _('ocMaxConc').value = c.maxConcurrency || 8;
-    _('ocRetries').value = c.retries || 3;
-    _('ocFailover').value = String(c.failover);
-    _('ocFailoverCount').value = c.failoverCount || 3;
-    _('ocFailoverMinutes').value = c.failoverMinutes || 5;
-    _('ocCompactAuto').value = String(c.compaction ? c.compaction.auto : true);
-    _('ocCompactBuffer').value = c.compaction ? c.compaction.buffer : 20000;
-    _('ocKeepTokens').value = c.compaction ? c.compaction.keepTokens : 8000;
-    _('ocSummaryModel').value = c.compaction ? (c.compaction.summaryModel || '') : '';
-    _('ocMaxSummary').value = c.compaction ? c.compaction.maxSummary : 4096;
-    const rt = c.runtime || {};
-    _('ocFailoverInfo').innerHTML = rt.failoverActive
-      ? '<span style="color:var(--danger)">Failover active (opencode unavailable, requests go to the cline pool)</span>'
-      : '<span style="color:var(--accent2)">Normal</span>';
-    const hint = _('ocConsoleHint');
-    if (hint) {
-      if (c.consoleAuth && c.consoleAuth.available) {
-        hint.innerHTML = '<span style="color:var(--accent2)">✓ Local OpenCode Console login detected</span> (' + esc(c.consoleAuth.tokenMask) + (c.consoleAuth.orgID ? ' · org: ' + esc(c.consoleAuth.orgID) : '') + '). Active if keys is "public", or enter multiple tokens above (format: <code>token#org_id</code>) to pool accounts.';
-      } else {
-        hint.textContent = 'Supports legacy Zen keys (oc_sk_...) and Console OAuth tokens (st_...#org_id).';
-      }
-    }
-    if (c.fidelity) {
+    if (_('ocEnabled')) _('ocEnabled').value = String(c.enabled);
+    if (_('ocBaseURL')) _('ocBaseURL').value = c.baseURL || '';
+    if (_('ocMaxConc')) _('ocMaxConc').value = c.maxConcurrency || 8;
+    if (_('ocRetries')) _('ocRetries').value = c.retries || 3;
+    if (c.fidelity && _('ocFidelityBadge')) {
       _('ocFidelityBadge').textContent = 'CLI ' + (c.fidelity.version || '2.0.22');
       _('ocFidelityStatus').textContent = c.fidelity.verified ? ('SHA256 Verified (' + c.fidelity.tool_count + ' tools)') : 'Unverified';
     }
@@ -1610,18 +1527,22 @@ function switchOcImportTab(tab) {
 async function loadOcAccounts() {
   try {
     const d = await api('GET', '/opencode/accounts');
-    if (d.data && d.data.fidelity) {
-      const f = d.data.fidelity;
+    const data = d.data || {};
+    if (data.fidelity && _('ocFidelityBadge')) {
+      const f = data.fidelity;
       _('ocFidelityBadge').textContent = 'CLI ' + (f.version || '2.0.22');
       _('ocFidelityStatus').textContent = f.verified ? ('SHA256 Verified (' + f.tool_count + ' tools)') : 'Unverified';
     }
-    renderOcAccounts(d.data && d.data.accounts ? d.data.accounts : []);
+    if (data.routing_strategy && _('ocPoolStrategy')) {
+      _('ocPoolStrategy').value = data.routing_strategy;
+    }
+    renderOcAccounts(data.accounts || [], data.active, data.routing_strategy);
   } catch (e) {
     _('ocAccountsBody').innerHTML = '<tr><td colspan="7" class="empty">Error loading OpenCode accounts: ' + esc(e.message) + '</td></tr>';
   }
 }
 
-function renderOcAccounts(accounts) {
+function renderOcAccounts(accounts, activeName, strategy) {
   const tbody = _('ocAccountsBody');
   if (!accounts || accounts.length === 0) {
     tbody.innerHTML = '<tr><td colspan="7" class="empty">No OpenCode accounts connected yet. Connect via browser OAuth or add a token above.</td></tr>';
@@ -1641,6 +1562,9 @@ function renderOcAccounts(accounts) {
       expText = diffHours > 0 ? ('In ' + diffHours + 'h') : 'Expired';
     }
 
+    const isSticky = a.is_active || (activeName && a.name.toLowerCase() === activeName.toLowerCase());
+    const activeBadge = isSticky ? ' <span class="status-pill status-active" style="font-size:10px;padding:2px 6px;margin-left:4px" title="Currently active account in Fill/Sticky pool">ACTIVE</span>' : '';
+
     const curRoute = a.route || 'default';
     const routeSelect = '<select class="route-select" onchange="changeOcAccountRoute(\'' + esc(a.name) + '\', this.value)" style="padding:2px 6px;font-size:12px;background:var(--bg2);color:var(--text);border:1px solid var(--border);border-radius:4px">' +
       '<option value="default"' + (curRoute === 'default' ? ' selected' : '') + '>Default (Auto)</option>' +
@@ -1651,7 +1575,7 @@ function renderOcAccounts(accounts) {
       '</select>';
 
     html += '<tr>' +
-      '<td><strong>' + esc(a.name) + '</strong></td>' +
+      '<td><strong>' + esc(a.name) + '</strong>' + activeBadge + '</td>' +
       '<td><span class="mono">' + esc(a.token_mask) + '</span></td>' +
       '<td>' + routeSelect + '</td>' +
       '<td><span class="status-pill ' + statusClass + '">' + statusLabel + '</span></td>' +
@@ -1660,11 +1584,34 @@ function renderOcAccounts(accounts) {
       '<td>' +
         '<button class="btn btn-sm" onclick="testOcAccount(\'' + esc(a.name) + '\')" title="Send probe request">Test</button> ' +
         (a.has_refresh ? '<button class="btn btn-sm" onclick="refreshOcAccount(\'' + esc(a.name) + '\')" title="Refresh OAuth token">Refresh</button> ' : '') +
+        (!isSticky ? '<button class="btn btn-sm" onclick="setActiveOcAccount(\'' + esc(a.name) + '\')" title="Set as current active account">Set Active</button> ' : '') +
         '<button class="btn btn-sm" style="color:var(--danger)" onclick="deleteOcAccount(\'' + esc(a.name) + '\')">Delete</button>' +
       '</td>' +
       '</tr>';
   });
   tbody.innerHTML = html;
+}
+
+async function setActiveOcAccount(name) {
+  try {
+    const res = await api('POST', '/opencode/accounts/active', { name: name });
+    if (!res.success) throw new Error(res.error || 'Failed to set active account');
+    toast('Active account set to ' + name, 'success');
+    loadOcAccounts();
+  } catch (e) {
+    toast('Failed: ' + e.message, 'error');
+  }
+}
+
+async function changeOcStrategy(strat) {
+  try {
+    const res = await api('POST', '/opencode/accounts/strategy', { strategy: strat });
+    if (!res.success) throw new Error(res.error || 'Failed to update strategy');
+    toast('Routing strategy set to ' + strat, 'success');
+    loadOcAccounts();
+  } catch (e) {
+    toast('Failed: ' + e.message, 'error');
+  }
 }
 
 let ocOAuthPollInterval = null;
@@ -1829,87 +1776,23 @@ async function changeOcAccountRoute(name, route) {
 }
 
 async function saveOcConfig() {
-  const keys = _('ocKeys').value.split('\n').map(s => s.trim()).filter(Boolean);
-  if (!keys.length) { toast('API keys must not be empty (use "public" if you have no key)', 'error'); return; }
   const body = {
-    enabled: _('ocEnabled').value === 'true',
-    keys: keys,
-    baseURL: _('ocBaseURL').value.trim(),
+    enabled: _('ocEnabled') ? _('ocEnabled').value === 'true' : true,
+    baseURL: _('ocBaseURL') ? _('ocBaseURL').value.trim() : 'https://opencode.ai/zen/v1',
+    maxConcurrency: _('ocMaxConc') ? parseInt(_('ocMaxConc').value) || 8 : 8,
+    retries: _('ocRetries') ? parseInt(_('ocRetries').value) || 3 : 3,
     proxies: ocCfgCache.proxies || [],
-    proxyStrategy: ocCfgCache.proxyStrategy || 'round_robin',
-    maxConcurrency: parseInt(_('ocMaxConc').value) || 8,
-    retries: parseInt(_('ocRetries').value) || 3,
-    failover: _('ocFailover').value === 'true',
-    failoverCount: parseInt(_('ocFailoverCount').value) || 3,
-    failoverMinutes: parseInt(_('ocFailoverMinutes').value) || 5,
-    compaction: {
-      auto: _('ocCompactAuto').value === 'true',
-      buffer: parseInt(_('ocCompactBuffer').value) || 20000,
-      keepTokens: parseInt(_('ocKeepTokens').value) || 8000,
-      summaryModel: _('ocSummaryModel').value.trim(),
-      maxSummary: parseInt(_('ocMaxSummary').value) || 4096
-    }
+    proxyStrategy: ocCfgCache.proxyStrategy || 'round_robin'
   };
   try {
-    const d = await api('POST', '/opencode/config/update', body);
-    toast('opencode config saved', 'success');
+    await api('POST', '/opencode/config/update', body);
+    toast('OpenCode gateway settings saved', 'success');
     loadOcConfig();
   } catch (e) { toast('Save failed: ' + e.message, 'error'); }
 }
 
-// per-key 状态表：key 掩码 / 用量 / 会话 / 冷却（含预计恢复时刻）/ Test 按钮。
-// Test 与 cline 账号的同语义：真实探测，成功即复位该 key 的冷却。
-function renderOcKeyStates(ks) {
-  const tb = _('ocKeysBody');
-  if (!tb) return;
-  tb.innerHTML = ks.length
-    ? ks.map(k => {
-        const st = k.sessionLive
-          ? '<span style="color:var(--accent2)">live</span>'
-          : (k.sessionMinted ? '<span style="color:var(--danger)">stale</span>' : '<span style="color:var(--danger)">not minted</span>');
-        const cool = k.cooling
-          ? '<span style="color:var(--danger)">cooling' + (k.cooldownUntil ? ' · until ' + esc(fmtWhen(k.cooldownUntil)) : '') + '</span>'
-          : '<span style="color:var(--text2)">-</span>';
-        return '<tr><td>#' + (k.index + 1) + (k.current ? ' <span style="color:var(--accent)" title="next in rotation">●</span>' : '') + '</td>' +
-          '<td style="font-family:monospace;font-size:11px">' + esc(k.keyMask) + '</td>' +
-          '<td>' + (k.usage || 0) + '</td>' +
-          '<td>' + st + '</td>' +
-          '<td>' + cool + '</td>' +
-          '<td>' + (k.keyMask === 'public (no key)' ? '' : '<button class="btn btn-sm" data-zk="' + k.index + '">Test</button>') + '</td></tr>';
-      }).join('')
-    : '<tr><td colspan="6" class="empty">No zen keys configured</td></tr>';
-  tb.onclick = e => {
-    const b = e.target.closest('button[data-zk]');
-    if (b) testZenKey(parseInt(b.dataset.zk, 10), b);
-  };
-}
-
-async function testZenKey(index, btn) {
-  const original = btn ? btn.innerHTML : '';
-  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="loading"></span>Testing'; }
-  try {
-    const d = await api('POST', '/zen/keys/test', {
-      index: index,
-      // 下拉里的探测模型；空串 = 后端自动选（big-pickle → live → 种子）
-      model: (_('ocProbeModel') ? _('ocProbeModel').value : '')
-    });
-    const r = d.data || {};
-    const label = { active: 'OK', cooldown: 'Cooldown', error: 'Error' }[r.status] || r.status;
-    let msg = 'Key #' + (index + 1) + ' (' + (r.keyMask || '') + ') — ' + label;
-    if (r.model) msg += ' via ' + r.model;
-    if (r.latencyMs != null) msg += ' (' + r.latencyMs + 'ms)';
-    if (r.status === 'active') msg += ' — cooldown cleared';
-    if (r.cooldownUntil) msg += '\nEstimated recovery: ' + fmtWhen(r.cooldownUntil) + (r.remaining ? ' (remaining ' + r.remaining + ')' : '');
-    if (r.reason && r.reason !== 'ok') msg += '\n' + r.reason;
-    const type = r.status === 'active' ? 'success' : (r.status === 'cooldown' ? 'warning' : 'error');
-    toast(msg, type, 6000);
-  } catch (e) {
-    toast('Test failed: ' + e.message, 'error');
-  } finally {
-    if (btn) { btn.disabled = false; btn.innerHTML = original; }
-    loadOcConfig();  // 冷却被清除/新设置，立即刷新状态表
-  }
-}
+function renderOcKeyStates() {}
+async function testZenKey() {}
 
 // ========== Proxy pool ==========
 async function loadEgressStatus(force) {
@@ -2137,112 +2020,12 @@ function probeSpecificModel(modelId, upstream) {
   runPlaygroundProbe();
 }
 
-// ========== Live session IDs (zen FreeTier gate) ==========
-// 未 mint 的 key 必 403；表格让"哪些 key 还是空会话"一眼可见，按钮给手动补收口。
+// Obsolete session harvester stubs
 let ocSessPoll = null;
-
-async function loadOcSessions() {
-  try {
-    const d = await api('GET', '/opencode/sessions');
-    renderOcSessions(d.data);
-    return d.data;
-  } catch (e) { return null; }
-}
-
-function renderOcSessions(s) {
-  const rows = s.sessions || [];
-  _('ocSessSummary').innerHTML = rows.length
-    ? '<span style="color:' + (s.liveCount === s.total ? 'var(--accent2)' : 'var(--danger)') + '">' +
-      s.liveCount + '/' + s.total + ' live</span>'
-    : '';
-  // 刷新节奏与并发写进提示行：用户据此判断"自动维护是否够用"，以及
-  // 调 ZEN_HARVEST_INTERVAL_HOURS / ZEN_HARVEST_CONCURRENCY 要不要改。
-  const h = _('ocSessHint');
-  if (h) {
-    const base = 'The free tier only accepts session IDs the upstream has actually seen, minted by the opencode CLI. A key without a live session <b>always</b> fails with 403.';
-    h.innerHTML = base + (s.harvestEnabled
-      ? ' Auto-refresh every <b>' + (s.intervalHours || 4) + 'h</b> (kept below the 5h quota window), minting <b>' +
-        (s.concurrency || 1) + '</b> key(s) at a time' +
-        ((s.concurrency || 1) === 1 ? ' (one after another — safest on small instances, the CLI is CPU/RAM hungry)' : '') + '.'
-      : ' <b>Harvester unavailable</b> — no opencode CLI in this container (ZEN_HARVEST_BIN).');
-  }
-  // CLI 不在时后端会以 400 拒绝 mint，按钮先禁用，避免点了才发现。
-  const usable = !!s.harvestEnabled;
-  ['ocSessBtnMissing', 'ocSessBtnForce'].forEach(id => {
-    const b = _(id);
-    if (b) { b.disabled = !usable; b.title = usable ? '' : 'opencode CLI not available in this container'; }
-  });
-  _('ocSessBody').innerHTML = rows.length
-    ? rows.map(k => {
-        const state = k.noKey
-          ? '<span style="color:var(--text2)">no key</span>'
-          : (k.live
-              ? '<span style="color:var(--accent2)">live</span>'
-              : (k.minted ? '<span style="color:var(--danger)">stale</span>' : '<span style="color:var(--danger)">not minted</span>'));
-        return '<tr><td>#' + (k.index + 1) + '</td>' +
-          '<td style="font-family:monospace;font-size:11px">' + (k.session ? esc(k.session) + '…' : '-') + '</td>' +
-          '<td>' + state + '</td>' +
-          '<td style="font-size:12px">' + (k.harvested ? esc(fmtWhen(k.harvested)) : '-') + '</td></tr>';
-      }).join('')
-    : '<tr><td colspan="4" class="empty">No zen keys configured</td></tr>';
-
-  const j = s.job;
-  if (!j) { _('ocSessTimer').textContent = ''; return; }
-  if (j.running) {
-    _('ocSessTimer').innerHTML = '<span style="color:var(--accent)">minting ' + (j.done || 0) + '/' + (j.total || 0) + '…</span>';
-    renderOcMintResults(j.results || [], true);
-  } else {
-    _('ocSessTimer').textContent = 'last mint ' + fmtWhen(j.startedAt) + (j.force ? ' (force)' : '');
-    renderOcMintResults(j.results || [], false);
-  }
-}
-
-function renderOcMintResults(results, running) {
-  if (!results.length) { _('ocSessResult').innerHTML = ''; return; }
-  const ok = results.filter(r => r.ok).length;
-  const skipped = results.filter(r => r.skipped).length;
-  const fail = results.filter(r => r.done && !r.ok && !r.skipped).length;
-  const pending = results.filter(r => !r.done).length;
-  const head = running
-    ? '<span style="color:var(--accent)">Running — ' + ok + ' minted, ' + fail + ' failed, ' + pending + ' pending</span>'
-    : (fail
-        ? '<span style="color:var(--danger)">Done — ' + ok + ' minted, ' + fail + ' failed' + (skipped ? ', ' + skipped + ' skipped (already live)' : '') + '</span>'
-        : '<span style="color:var(--accent2)">Done — ' + ok + ' minted' + (skipped ? ', ' + skipped + ' already live' : '') + '</span>');
-  const details = results.filter(r => r.done && !r.ok && !r.skipped)
-    .map(r => '#' + (r.index + 1) + ': ' + esc(r.error || 'failed')).join(' | ');
-  _('ocSessResult').innerHTML = '<div style="font-size:12px">' + head + '</div>' +
-    (details ? '<div class="hint" style="margin-top:4px">' + details + '</div>' : '');
-}
-
-async function mintZenSessions(force) {
-  try {
-    await api('POST', '/opencode/sessions/mint', { force: force });
-    toast(force ? 'Force minting all sessions…' : 'Minting missing sessions…', 'success');
-    // 任务在后端跑（串行 mint 时一批是 key 数 × 每 key 预算），按 2s 轮询进度。
-    // 上限按后端批次预算推算：并发默认为 1 后 11 个 key 的批次上限可达几十分钟，
-    // 写死 450 次（15 分钟）会让轮询提前停掉、进度条卡住不再更新。
-    if (ocSessPoll) { clearInterval(ocSessPoll); ocSessPoll = null; }
-    let ticks = 0;
-    const s0 = await loadOcSessions();
-    // 提前返回前必须把 ocSessPoll 置空：可见标签页的 20s 轮询用 !ocSessPoll
-    // 判断"是否已有轮询在跑"，留一个已 clear 的非空句柄会让它永久停摆。
-    if (!s0 || !s0.job || !s0.job.running) { ocSessPoll = null; return; }
-    const j0 = s0.job;
-    const workers = Math.max(1, s0.concurrency || 1);
-    const perKey = s0.keyTimeoutSeconds || 150;
-    // 下限 15 分钟与后端 harvestBatchTimeout 的下限对齐：key 少时后端照样跑满
-    // 15 分钟，而 ceil(total/workers)×perKey 只有几分钟，不夹下限轮询会在后端
-    // 放弃之前就停掉（之后只剩 20s 的可见标签页轮询，进度更新变粗）。
-    const batchSeconds = Math.max(900, Math.ceil((j0.total || 1) / workers) * perKey + 120);
-    const maxTicks = Math.min(1800, Math.ceil(batchSeconds / 2) + 30);
-    ocSessPoll = setInterval(async () => {
-      const s = await loadOcSessions();
-      if (!s || !s.job || !s.job.running || ++ticks >= maxTicks) {
-        clearInterval(ocSessPoll); ocSessPoll = null; loadOcConfig();
-      }
-    }, 2000);
-  } catch (e) { toast('Mint failed: ' + e.message, 'error'); }
-}
+async function loadOcSessions() { return null; }
+function renderOcSessions() {}
+function renderOcMintResults() {}
+async function mintZenSessions() {}
 
 // ========== Combos (alias models) ==========
 const comboModels = { cline: [], zen: [] };
@@ -2343,11 +2126,10 @@ loadModels();
 loadConfig();
 setInterval(() => { loadStats(); }, 10000);
 setInterval(() => { loadOcStats(); }, 15000);
-// live 会话状态：只在 opencode 页可见时轮询（与日志页同样的省流约定）。
-// mint 任务进行中由 mintZenSessions 自己的 2s 轮询接管。
+// Poll OpenCode accounts when OpenCode tab is visible
 setInterval(() => {
-  if (_('tab-opencode').style.display !== 'none' && !ocSessPoll) loadOcSessions();
-}, 20000);
+  if (_('tab-opencode').style.display !== 'none') loadOcAccounts();
+}, 15000);
 setInterval(() => { if (logsAuto && _('tab-logs').style.display !== 'none') loadLogs(); }, 8000);
 </script>
 </body>

@@ -883,22 +883,36 @@ func cooldownZenKey(key string, d time.Duration) time.Duration {
 	zenKeyMu.Lock()
 	zenKeyCool[key] = time.Now().Add(d)
 	zenKeyMu.Unlock()
+
+	token, _, _ := resolveZenKeyIdentity(key)
+	if acc := FindAccountByToken(token); acc != nil {
+		if store := GetOpenCodeAccountStore(); store != nil {
+			store.CooldownAccount(acc.Name, d)
+		}
+	}
 	return d
 }
 
 // zenKeyCooling 查询 key 是否处于冷却期。
 func zenKeyCooling(key string) bool {
 	zenKeyMu.Lock()
-	defer zenKeyMu.Unlock()
 	until, ok := zenKeyCool[key]
-	if !ok {
-		return false
-	}
-	if time.Now().After(until) {
+	zenKeyMu.Unlock()
+	if ok {
+		if time.Now().Before(until) {
+			return true
+		}
+		zenKeyMu.Lock()
 		delete(zenKeyCool, key)
-		return false
+		zenKeyMu.Unlock()
 	}
-	return true
+	token, _, _ := resolveZenKeyIdentity(key)
+	if acc := FindAccountByToken(token); acc != nil && acc.RateLimitedUntil != "" {
+		if t, err := time.Parse(time.RFC3339, acc.RateLimitedUntil); err == nil && t.After(time.Now()) {
+			return true
+		}
+	}
+	return false
 }
 
 // zenKeyCooldownUntil 只读查询冷却截止时刻（不清理过期项）。

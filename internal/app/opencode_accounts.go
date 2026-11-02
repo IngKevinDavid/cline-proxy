@@ -80,7 +80,7 @@ func (s *OpenCodeAccountStore) Load() (OpenCodeAccountsState, error) {
 
 func (s *OpenCodeAccountStore) loadUnlocked() (OpenCodeAccountsState, error) {
 	state := OpenCodeAccountsState{
-		RoutingStrategy: "round-robin",
+		RoutingStrategy: "fill",
 	}
 	if s == nil || s.path == "" {
 		return state, nil
@@ -97,6 +97,9 @@ func (s *OpenCodeAccountStore) loadUnlocked() (OpenCodeAccountsState, error) {
 	}
 	if err := json.Unmarshal(data, &state); err != nil {
 		return state, fmt.Errorf("invalid opencode accounts json: %w", err)
+	}
+	if state.RoutingStrategy == "" {
+		state.RoutingStrategy = "fill"
 	}
 	sort.Slice(state.Accounts, func(i, j int) bool {
 		return strings.ToLower(state.Accounts[i].Name) < strings.ToLower(state.Accounts[j].Name)
@@ -158,6 +161,7 @@ func (s *OpenCodeAccountStore) ListAccounts() []map[string]any {
 
 		res = append(res, map[string]any{
 			"name":               acc.Name,
+			"is_active":          strings.EqualFold(acc.Name, state.Active),
 			"token_mask":         tokenMask,
 			"route":              route,
 			"status":             status,
@@ -290,28 +294,117 @@ func (s *OpenCodeAccountStore) PickAccount(pinName string) (*OpenCodeAccountReco
 		return nil, fmt.Errorf("pinned account %q not found", pinName)
 	}
 
-	// Filter available accounts (not disabled, not in cooldown)
-	available := make([]OpenCodeAccountRecord, 0, len(state.Accounts))
-	for _, a := range state.Accounts {
+	isAvailable := func(a OpenCodeAccountRecord) bool {
 		if a.Disabled {
-			continue
+			return false
 		}
 		if a.RateLimitedUntil != "" {
 			if t, err := time.Parse(time.RFC3339, a.RateLimitedUntil); err == nil && t.After(now) {
-				continue
+				return false
 			}
 		}
-		available = append(available, a)
+		return true
+	}
+
+	// Filter available accounts (not disabled, not in cooldown)
+	available := make([]OpenCodeAccountRecord, 0, len(state.Accounts))
+	for _, a := range state.Accounts {
+		if isAvailable(a) {
+			available = append(available, a)
+		}
 	}
 
 	if len(available) == 0 {
 		return nil, errors.New("all opencode accounts in pool are in cooldown or disabled")
 	}
 
-	idx := s.rrCursor % len(available)
-	s.rrCursor++
-	picked := available[idx]
+	strategy := strings.ToLower(strings.TrimSpace(state.RoutingStrategy))
+	if strategy == "round-robin" {
+		idx := s.rrCursor % len(available)
+		s.rrCursor++
+		picked := available[idx]
+		return &picked, nil
+	}
+
+	// Strategy: "fill" / "sticky" (default)
+	// 1. If currently active account is available, keep using it (sticky)
+	if state.Active != "" {
+		for _, a := range available {
+			if strings.EqualFold(a.Name, state.Active) {
+				picked := a
+				return &picked, nil
+			}
+		}
+	}
+
+	// 2. Active account is either unset or not available (cooling/disabled).
+	// Advance to the next available account in circular sequence starting after state.Active.
+	activeIdx := -1
+	if state.Active != "" {
+		for i, a := range state.Accounts {
+			if strings.EqualFold(a.Name, state.Active) {
+				activeIdx = i
+				break
+			}
+		}
+	}
+
+	for i := 1; i <= len(state.Accounts); i++ {
+		candidateIdx := (activeIdx + i) % len(state.Accounts)
+		candidate := state.Accounts[candidateIdx]
+		if isAvailable(candidate) {
+			state.Active = candidate.Name
+			_ = s.saveUnlocked(state)
+			return &candidate, nil
+		}
+	}
+
+	// Fallback to first available account
+	picked := available[0]
+	state.Active = picked.Name
+	_ = s.saveUnlocked(state)
 	return &picked, nil
+}
+
+// SetActive manually sets the sticky active account
+func (s *OpenCodeAccountStore) SetActive(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.loadUnlocked()
+	if err != nil {
+		return err
+	}
+	found := false
+	for _, a := range state.Accounts {
+		if strings.EqualFold(a.Name, name) {
+			found = true
+			state.Active = a.Name
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("account %q not found in pool", name)
+	}
+	return s.saveUnlocked(state)
+}
+
+// SetStrategy updates the account selection strategy ("fill" or "round-robin")
+func (s *OpenCodeAccountStore) SetStrategy(strategy string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.loadUnlocked()
+	if err != nil {
+		return err
+	}
+	norm := strings.ToLower(strings.TrimSpace(strategy))
+	if norm == "sticky" {
+		norm = "fill"
+	}
+	if norm != "fill" && norm != "round-robin" {
+		return fmt.Errorf("invalid routing strategy %q (allowed: fill, round-robin)", strategy)
+	}
+	state.RoutingStrategy = norm
+	return s.saveUnlocked(state)
 }
 
 func (s *OpenCodeAccountStore) CooldownAccount(name string, d time.Duration) {

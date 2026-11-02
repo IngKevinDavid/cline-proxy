@@ -69,7 +69,7 @@ func TestOpenCodeAccountStore(t *testing.T) {
 		t.Fatalf("AddAccount 2 failed: %v", err)
 	}
 
-	// 6. Pick Account round-robin
+	// 6. Pick Account: default is "fill" / "sticky" strategy
 	p1, err := store.PickAccount("")
 	if err != nil {
 		t.Fatalf("PickAccount 1 failed: %v", err)
@@ -78,11 +78,50 @@ func TestOpenCodeAccountStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PickAccount 2 failed: %v", err)
 	}
-	if p1.Name == p2.Name {
-		t.Errorf("expected different accounts in round-robin, got both %s", p1.Name)
+	// In fill/sticky mode, it MUST stick to the active account
+	if p1.Name != p2.Name {
+		t.Errorf("expected same account in fill/sticky strategy, got %s and %s", p1.Name, p2.Name)
 	}
 
-	// 7. Pinned Pick
+	// 7. Cooldown active account -> must automatically advance to next available account
+	store.CooldownAccount(p1.Name, 10*time.Minute)
+	p3, err := store.PickAccount("")
+	if err != nil {
+		t.Fatalf("PickAccount after cooldown failed: %v", err)
+	}
+	if p3.Name == p1.Name {
+		t.Errorf("expected failover to next account after cooldown, but still got cooling account %s", p3.Name)
+	}
+	// Subsequent calls must stick to the new active account
+	p4, err := store.PickAccount("")
+	if err != nil {
+		t.Fatalf("PickAccount 4 failed: %v", err)
+	}
+	if p4.Name != p3.Name {
+		t.Errorf("expected to stick to %s, got %s", p3.Name, p4.Name)
+	}
+
+	// 8. Test round-robin strategy
+	store.MarkAccountSuccess(p1.Name) // clear cooldown
+	if err := store.SetStrategy("round-robin"); err != nil {
+		t.Fatalf("SetStrategy failed: %v", err)
+	}
+	rr1, err := store.PickAccount("")
+	if err != nil {
+		t.Fatalf("Round-robin pick 1 failed: %v", err)
+	}
+	rr2, err := store.PickAccount("")
+	if err != nil {
+		t.Fatalf("Round-robin pick 2 failed: %v", err)
+	}
+	if rr1.Name == rr2.Name {
+		t.Errorf("expected different accounts in round-robin, got both %s", rr1.Name)
+	}
+
+	// Reset strategy back to fill
+	_ = store.SetStrategy("fill")
+
+	// 9. Pinned Pick
 	pinned, err := store.PickAccount("dev-account-1")
 	if err != nil {
 		t.Fatalf("PickAccount pinned failed: %v", err)
@@ -91,7 +130,7 @@ func TestOpenCodeAccountStore(t *testing.T) {
 		t.Errorf("expected dev-account-1, got %s", pinned.Name)
 	}
 
-	// 8. Delete Account
+	// 10. Delete Account
 	if err := store.DeleteAccount("dev-account-1"); err != nil {
 		t.Fatalf("DeleteAccount failed: %v", err)
 	}
@@ -100,3 +139,4 @@ func TestOpenCodeAccountStore(t *testing.T) {
 		t.Errorf("expected 1 account after delete, got %d", len(listAfter))
 	}
 }
+

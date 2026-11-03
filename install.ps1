@@ -1,4 +1,4 @@
-# ==============================================================================
+﻿# ==============================================================================
 # Installer and Builder for cline-proxy-foxy (Go)
 # Author: Ing. Kevin David Condori / Pair Programming Assistant
 # Windows PowerShell 5.1+ / PowerShell Core
@@ -123,8 +123,8 @@ if (-not (Test-Path $DataDir)) {
 # 6. Start Service (if requested)
 # ------------------------------------------------------------------------------
 if ($StartService) {
-    Write-Step "Launching cline-proxy via server-proxy.ps1..."
-    & .\server-proxy.ps1 -Background
+    Write-Step "Launching cline-proxy via server-proxy.bat..."
+    cmd.exe /c "server-proxy.bat bg"
 }
 
 Write-Host "`n============================================================" -ForegroundColor Cyan
@@ -132,11 +132,10 @@ Write-Host "                     SETUP FINISHED                         " -Foreg
 Write-Host "============================================================" -ForegroundColor Cyan
 Write-Host "Binary:         $OutputBinary"
 Write-Host "Data Dir:       $DataDir"
-Write-Host "Start Server:   .\server-proxy.ps1"
-Write-Host "Background:     .\server-proxy.ps1 -Background"
-Write-Host "Stop Server:    .\server-proxy.ps1 -Stop"
-Write-Host "Check Status:   .\server-proxy.ps1 -Status"
-Write-Host "Open Admin:     .\server-proxy.ps1 -OpenBrowser"
+Write-Host "Start Server:   .\server-proxy.bat"
+Write-Host "Background:     .\server-proxy.bat bg"
+Write-Host "Stop Server:    .\server-proxy.bat stop"
+Write-Host "Check Status:   .\server-proxy.bat status"
 Write-Host "Admin Panel:    http://127.0.0.1:3457/admin/"
 Write-Host "API Endpoint:   http://127.0.0.1:3457/v1"
 Write-Host "============================================================`n"

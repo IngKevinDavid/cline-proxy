@@ -5,8 +5,8 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
-	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -73,20 +73,35 @@ func getOpencodeTools() map[string]opencodeToolDef {
 // ToolRenames tracks bidirectional name mappings between client tool names
 // and wire names (clint_<hash12>).
 type ToolRenames struct {
-	mu       sync.RWMutex
-	toWire   map[string]string
-	toClient map[string]string
-	byCase   map[string]string
-	byShape  map[string]string
+	mu              sync.RWMutex
+	toWire          map[string]string
+	toClient        map[string]string
+	byCase          map[string]string
+	byShape         map[string]string
+	officialAliases map[string]string
 }
 
 func NewToolRenames() *ToolRenames {
 	return &ToolRenames{
-		toWire:   make(map[string]string),
-		toClient: make(map[string]string),
-		byCase:   make(map[string]string),
-		byShape:  make(map[string]string),
+		toWire:          make(map[string]string),
+		toClient:        make(map[string]string),
+		byCase:          make(map[string]string),
+		byShape:         make(map[string]string),
+		officialAliases: make(map[string]string),
 	}
+}
+
+func (r *ToolRenames) AddOfficialAlias(official, client string) {
+	if r == nil || official == "" || client == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.officialAliases == nil {
+		r.officialAliases = make(map[string]string)
+	}
+	r.officialAliases[official] = client
+	globalRenames.Store(official, client)
 }
 
 func (r *ToolRenames) Empty() bool {
@@ -169,6 +184,13 @@ func (r *ToolRenames) Resolve(wire string) (string, bool) {
 	if client, ok := r.Client(wire); ok {
 		return client, client != wire
 	}
+	r.mu.RLock()
+	if alias, ok := r.officialAliases[wire]; ok && alias != "" {
+		r.mu.RUnlock()
+		return alias, true
+	}
+	r.mu.RUnlock()
+
 	client := wire
 	if rest, ok := strings.CutPrefix(wire, ClientToolPrefix); ok && rest != "" {
 		client = rest
@@ -250,19 +272,48 @@ func RememberToolRename(wire, client string) {
 	}
 }
 
-func opencodeEnvironment() string {
-	opencodeEnvOnce.Do(func() {
-		dir, err := os.Getwd()
-		if err != nil || dir == "" {
-			dir = "/workspace"
+var clientWorkDirRe = regexp.MustCompile(`(?i)(?:working directory|current directory|workspace root|workspace directory|cwd)[:=]\s*([A-Za-z]:[\\/][^\s\r\n<>"\']+|/[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)+)|<cwd>([^<]+)</cwd>|cd\s+([A-Za-z]:[\\/][^\s&|;]+|/[a-zA-Z0-9_.-]+(?:/[a-zA-Z0-9_.-]+)+)`)
+
+func detectClientWorkDir(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	for _, key := range []string{"cwd", "working_directory", "workspace_root", "workspace_folder"} {
+		if v, ok := payload[key].(string); ok && strings.TrimSpace(v) != "" {
+			return filepath.ToSlash(strings.TrimSpace(v))
 		}
-		opencodeWorkDir = filepath.ToSlash(dir)
-	})
+	}
+	if msgs, ok := payload["messages"].([]any); ok {
+		for _, raw := range msgs {
+			if m, ok := raw.(map[string]any); ok {
+				if content, ok := m["content"].(string); ok {
+					if match := clientWorkDirRe.FindStringSubmatch(content); match != nil {
+						for i := 1; i < len(match); i++ {
+							if match[i] != "" {
+								return filepath.ToSlash(strings.TrimSpace(match[i]))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func opencodeEnvironment(payload ...map[string]any) string {
+	workDir := ""
+	if len(payload) > 0 && payload[0] != nil {
+		workDir = detectClientWorkDir(payload[0])
+	}
+	if workDir == "" {
+		workDir = "/workspace"
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	var builder strings.Builder
 	builder.WriteString("<env>\n")
 	builder.WriteString("  Working directory: ")
-	builder.WriteString(opencodeWorkDir)
+	builder.WriteString(workDir)
 	builder.WriteString("\n")
 	builder.WriteString("  Platform: ")
 	builder.WriteString(runtime.GOOS)
@@ -274,8 +325,8 @@ func opencodeEnvironment() string {
 	return builder.String()
 }
 
-func opencodeFullPrompt() string {
-	env := opencodeEnvironment()
+func opencodeFullPrompt(payload ...map[string]any) string {
+	env := opencodeEnvironment(payload...)
 	if profile, err := LoadOpenCodeCLI2022Profile(); err == nil && profile.Verified {
 		prompt := profile.SystemBase + "\n\n" + env + "\n\n" + profile.Skills
 		if profile.CodeMode != "" {
@@ -409,7 +460,7 @@ func injectOfficialChatPrompt(payload map[string]any) {
 		}
 	}
 
-	system := opencodeFullPrompt()
+	system := opencodeFullPrompt(payload)
 	if len(instructions) > 0 {
 		system += "\n\n" + strings.Join(instructions, "\n\n")
 	}
@@ -457,6 +508,7 @@ func ShapeZenChatRequest(payload map[string]any) *ToolRenames {
 		delete(payload, "function_call")
 	}
 
+	clientDeclared := make(map[string]bool)
 	shapedTools := make([]any, 0, len(clientTools)+len(v2OfficialToolOrder))
 	for _, item := range clientTools {
 		entry, ok := item.(map[string]any)
@@ -474,12 +526,16 @@ func ShapeZenChatRequest(payload map[string]any) *ToolRenames {
 			shapedTools = append(shapedTools, item)
 			continue
 		}
+		clientDeclared[name] = true
 		wireName := ClientToolWireName(name, used)
 		renames.Add(name, wireName)
 		fn["name"] = wireName
 		fn["strict"] = false
 		shapedTools = append(shapedTools, entry)
 	}
+
+	// Register official tool aliases for missing client tools
+	registerOfficialToolAliases(renames, clientDeclared)
 
 	// Append official 13 tools
 	shapedTools = append(shapedTools, officialV2ToolsChat()...)
@@ -535,6 +591,7 @@ func ShapeZenResponsesRequest(payload map[string]any) *ToolRenames {
 		clientTools = raw
 	}
 
+	clientDeclared := make(map[string]bool)
 	shapedTools := make([]any, 0, len(clientTools)+len(v2OfficialToolOrder))
 	for _, item := range clientTools {
 		entry, ok := item.(map[string]any)
@@ -547,6 +604,7 @@ func ShapeZenResponsesRequest(payload map[string]any) *ToolRenames {
 			shapedTools = append(shapedTools, item)
 			continue
 		}
+		clientDeclared[name] = true
 		wireName := ClientToolWireName(name, used)
 		renames.Add(name, wireName)
 		entry["name"] = wireName
@@ -554,10 +612,76 @@ func ShapeZenResponsesRequest(payload map[string]any) *ToolRenames {
 		shapedTools = append(shapedTools, entry)
 	}
 
+	// Register official tool aliases for missing client tools
+	registerOfficialToolAliases(renames, clientDeclared)
+
 	shapedTools = append(shapedTools, officialV2ToolsResponses()...)
 	payload["tools"] = shapedTools
 
 	return renames
+}
+
+func registerOfficialToolAliases(renames *ToolRenames, clientDeclared map[string]bool) {
+	if renames == nil || len(clientDeclared) == 0 {
+		return
+	}
+	// 1. Command execution: shell / execute -> bash, sh, terminal, run_command, exec, command
+	if !clientDeclared["shell"] {
+		for _, target := range []string{"bash", "sh", "terminal", "run_command", "exec", "command"} {
+			if clientDeclared[target] {
+				renames.AddOfficialAlias("shell", target)
+				break
+			}
+		}
+	}
+	if !clientDeclared["execute"] {
+		for _, target := range []string{"bash", "sh", "terminal", "run_command", "exec", "command"} {
+			if clientDeclared[target] {
+				renames.AddOfficialAlias("execute", target)
+				break
+			}
+		}
+	}
+
+	// 2. File editing: patch / edit -> edit, str_replace_editor, edit_file, file_editor
+	if !clientDeclared["patch"] {
+		for _, target := range []string{"edit", "str_replace_editor", "edit_file", "file_editor"} {
+			if clientDeclared[target] {
+				renames.AddOfficialAlias("patch", target)
+				break
+			}
+		}
+	}
+
+	// 3. File search: glob / grep -> find, file_search, search, find_in_files
+	if !clientDeclared["glob"] {
+		for _, target := range []string{"find", "file_search", "search"} {
+			if clientDeclared[target] {
+				renames.AddOfficialAlias("glob", target)
+				break
+			}
+		}
+	}
+	if !clientDeclared["grep"] {
+		for _, target := range []string{"search", "find_in_files"} {
+			if clientDeclared[target] {
+				renames.AddOfficialAlias("grep", target)
+				break
+			}
+		}
+	}
+
+	// 4. File read / write
+	if !clientDeclared["read"] && clientDeclared["read_file"] {
+		renames.AddOfficialAlias("read", "read_file")
+	}
+	if !clientDeclared["write"] {
+		if clientDeclared["write_file"] {
+			renames.AddOfficialAlias("write", "write_file")
+		} else if clientDeclared["new_file"] {
+			renames.AddOfficialAlias("write", "new_file")
+		}
+	}
 }
 
 // RestoreToolNameInChoice restores obfuscated tool names in choices/deltas.

@@ -181,3 +181,173 @@ func TestNormalizeOpenAIResponseRestoresToolName(t *testing.T) {
 	}
 }
 
+func TestOfficialToolAliasMapping(t *testing.T) {
+	// Client declares "bash" and "edit"
+	payload := map[string]any{
+		"model": "deepseek-v4.1-flash-free",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Run tests"},
+		},
+		"tools": []any{
+			map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "bash",
+					"description": "Run shell commands",
+					"parameters":  map[string]any{"type": "object"},
+				},
+			},
+			map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "edit",
+					"description": "Edit file",
+					"parameters":  map[string]any{"type": "object"},
+				},
+			},
+		},
+	}
+
+	renames := ShapeZenChatRequest(payload)
+
+	// Verify "shell" maps to "bash"
+	if got := renames.Restore("shell"); got != "bash" {
+		t.Errorf("renames.Restore('shell') = %q, want 'bash'", got)
+	}
+	if got := GlobalRestoreToolName("shell"); got != "bash" {
+		t.Errorf("GlobalRestoreToolName('shell') = %q, want 'bash'", got)
+	}
+
+	// Verify "patch" maps to "edit"
+	if got := renames.Restore("patch"); got != "edit" {
+		t.Errorf("renames.Restore('patch') = %q, want 'edit'", got)
+	}
+	if got := GlobalRestoreToolName("patch"); got != "edit" {
+		t.Errorf("GlobalRestoreToolName('patch') = %q, want 'edit'", got)
+	}
+
+	// Verify normalizeOpenAIResponse restores "shell" tool call back to "bash"
+	rawResp := map[string]any{
+		"choices": []any{
+			map[string]any{
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []any{
+						map[string]any{
+							"id":   "call_shell_1",
+							"type": "function",
+							"function": map[string]any{
+								"name":      "shell",
+								"arguments": `{"command":"pytest"}`,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	normalized := normalizeOpenAIResponse(rawResp)
+	ch := normalized["choices"].([]any)[0].(map[string]any)
+	fn := ch["message"].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if fn["name"] != "bash" {
+		t.Errorf("normalizeOpenAIResponse tool name = %q, want 'bash'", fn["name"])
+	}
+}
+
+func TestDeterministicSessionDerivation(t *testing.T) {
+	// Turn 1
+	paramsTurn1 := map[string]any{
+		"messages": []any{
+			map[string]any{"role": "system", "content": "You are a helpful assistant"},
+			map[string]any{"role": "user", "content": "First turn instructions"},
+		},
+	}
+	sid1 := DeriveRequestSessionID(paramsTurn1, nil)
+
+	// Turn 2: same system + first user, but with assistant response and second user turn
+	paramsTurn2 := map[string]any{
+		"messages": []any{
+			map[string]any{"role": "system", "content": "You are a helpful assistant"},
+			map[string]any{"role": "user", "content": "First turn instructions"},
+			map[string]any{"role": "assistant", "content": "Understood, proceeding."},
+			map[string]any{"role": "user", "content": "Second turn question"},
+		},
+	}
+	sid2 := DeriveRequestSessionID(paramsTurn2, nil)
+
+	if sid1 != sid2 {
+		t.Fatalf("session ID diverged across turns: turn1=%q turn2=%q", sid1, sid2)
+	}
+	if !strings.HasPrefix(sid1, "ses_") {
+		t.Fatalf("session ID %q missing 'ses_' prefix", sid1)
+	}
+}
+
+func TestNormalizeUsageCache(t *testing.T) {
+	// Test prompt_tokens_details.cached_tokens
+	u1 := map[string]any{
+		"prompt_tokens":     float64(100),
+		"completion_tokens": float64(20),
+		"prompt_tokens_details": map[string]any{
+			"cached_tokens": float64(80),
+		},
+	}
+	normalizeUsageCache(u1)
+	if u1["cache_read_input_tokens"] != int64(80) {
+		t.Errorf("u1 cache_read_input_tokens = %v, want 80", u1["cache_read_input_tokens"])
+	}
+
+	// Test opencode.tokens.cache_read
+	u2 := map[string]any{
+		"prompt_tokens":     float64(200),
+		"completion_tokens": float64(30),
+		"opencode": map[string]any{
+			"tokens": map[string]any{
+				"cache_read": float64(150),
+			},
+		},
+	}
+	normalizeUsageCache(u2)
+	if u2["cache_read_input_tokens"] != int64(150) {
+		t.Errorf("u2 cache_read_input_tokens = %v, want 150", u2["cache_read_input_tokens"])
+	}
+	ptd, ok := u2["prompt_tokens_details"].(map[string]any)
+	if !ok || ptd["cached_tokens"] != int64(150) {
+		t.Errorf("u2 prompt_tokens_details = %v, want cached_tokens=150", u2["prompt_tokens_details"])
+	}
+}
+
+func TestDetectClientWorkDir(t *testing.T) {
+	// Test from cwd property
+	p1 := map[string]any{
+		"cwd": `G:\Datos_Bolivia\sc-prec4sa`,
+	}
+	if got := detectClientWorkDir(p1); got != "G:/Datos_Bolivia/sc-prec4sa" {
+		t.Errorf("detectClientWorkDir(p1) = %q, want 'G:/Datos_Bolivia/sc-prec4sa'", got)
+	}
+
+	// Test from messages
+	p2 := map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Please inspect files. <cwd>G:/Datos_Bolivia/sc-prec4sa</cwd>"},
+		},
+	}
+	if got := detectClientWorkDir(p2); got != "G:/Datos_Bolivia/sc-prec4sa" {
+		t.Errorf("detectClientWorkDir(p2) = %q, want 'G:/Datos_Bolivia/sc-prec4sa'", got)
+	}
+
+	// Test fallback
+	p3 := map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Hello world"},
+		},
+	}
+	env := opencodeEnvironment(p3)
+	if strings.Contains(env, "01_proyectos/cline-proxy-foxy") {
+		t.Errorf("opencodeEnvironment leaked internal proxy directory: %s", env)
+	}
+	if !strings.Contains(env, "Working directory: /workspace") {
+		t.Errorf("opencodeEnvironment missing default /workspace: %s", env)
+	}
+}
+

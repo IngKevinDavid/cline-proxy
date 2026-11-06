@@ -663,7 +663,7 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 		// 上游恒 stream=true：zen 免费层 chat 端点只接受 CLI 形态的流式请求，
 		// stream=false 会被 FreeTier gate 直接 403。非流式客户端在这里把 SSE
 		// 聚合回 JSON（原先透传 isStream 会让这类请求必 403）。
-		resp, _, err := callZenAPI(r.Context(), chat, true)
+		resp, _, err := callZenAPI(r.Context(), chat, true, zenCallOpts{sessionID: sid})
 		if err != nil {
 			log.Printf("  responses zen api error: %v", err)
 			writeJSON(w, http.StatusBadGateway, map[string]any{

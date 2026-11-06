@@ -942,8 +942,9 @@ func uncoolZenKey(key string) {
 // 与 ZEN_PIN_KEY 环境变量的区别：那是进程级排障开关，会影响所有并发请求；
 // pinKey 只作用于这一次调用（管理面板的 per-key "Test" 按钮），绝不影响正常轮转。
 type zenCallOpts struct {
-	pinKey   string
-	pinProxy string
+	pinKey    string
+	pinProxy  string
+	sessionID string
 }
 
 // zenKeyStatus 每个 key 的运行时状态（管理面板展示用，key 值打码）。
@@ -2175,7 +2176,12 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 			}
 		}
 
-		sess := CanonicalSessionID()
+		sess := o.sessionID
+		if sess == "" {
+			sess = DeriveRequestSessionID(params, nil)
+		} else {
+			sess = kit.CanonicalSessionIDFor(sess)
+		}
 		ua := zenCLIUserAgent()
 		body := buildZenResponsesBody(params, zm.ID, sess)
 		if isAnonZenKey(key) {
@@ -2478,7 +2484,12 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 			}
 		}
 
-		sess := CanonicalSessionID()
+		sess := o.sessionID
+		if sess == "" {
+			sess = DeriveRequestSessionID(params, nil)
+		} else {
+			sess = kit.CanonicalSessionIDFor(sess)
+		}
 		ua := zenCLIUserAgent()
 
 		reqEndpoint := endpoint

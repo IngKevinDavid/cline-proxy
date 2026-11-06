@@ -542,7 +542,7 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 		return
 	}
 
-	resp, rateLimited, err := callZenAPI(r.Context(), params, true)
+	resp, rateLimited, err := callZenAPI(r.Context(), params, true, zenCallOpts{sessionID: sid})
 	if err != nil && isWrongEndpoint(err) {
 		// 只在另一个端点真的成功后才持久化"该模型走 responses"。
 		//
@@ -602,7 +602,8 @@ func handleZenChat(w http.ResponseWriter, r *http.Request, params map[string]any
 // responses 路径上报"该用 chat"时，学回 chat 后经此重试，避免递归回主入口）。
 func handleZenChatDirect(w http.ResponseWriter, r *http.Request, params map[string]any, zm *ZenModel, tracker *zenStatsTracker) {
 	isStream, _ := params["stream"].(bool)
-	resp, rateLimited, err := callZenAPI(r.Context(), params, true)
+	sid := requestSessionID(params, r.Header)
+	resp, rateLimited, err := callZenAPI(r.Context(), params, true, zenCallOpts{sessionID: sid})
 	if err != nil {
 		log.Printf("  zen api error: %v", err)
 		tracker.rec.RateLimited = rateLimited
@@ -651,7 +652,8 @@ func handleZenResponsesNative(w http.ResponseWriter, r *http.Request, params map
 	// stream=false（即使显式传）上游按"非 CLI"请求 403）。网关非流式请求
 	// 在上游侧强制 stream=true 再聚合（与 cline 路由 force-stream 聚合约
 	// 定一致），客户端仍按非流式接收。
-	resp, rateLimited, err := callZenResponsesAPI(r.Context(), params, true)
+	sid := requestSessionID(params, r.Header)
+	resp, rateLimited, err := callZenResponsesAPI(r.Context(), params, true, zenCallOpts{sessionID: sid})
 	if err != nil {
 		// 反向纠错：若 responses 路径上报"该用 chat"（未来反向模型），
 		// 学回 chat 并改走 chat 路径重试一次。
@@ -2267,6 +2269,15 @@ func openAIToAnthropic(openAI map[string]any) map[string]any {
 			if ct, ok := um["completion_tokens"].(float64); ok {
 				usage["output_tokens"] = int(ct)
 			}
+			if cr, ok := um["cache_read_input_tokens"].(int64); ok && cr > 0 {
+				usage["cache_read_input_tokens"] = int(cr)
+			} else if crf, ok := um["cache_read_input_tokens"].(float64); ok && crf > 0 {
+				usage["cache_read_input_tokens"] = int(crf)
+			} else if ptd, ok := um["prompt_tokens_details"].(map[string]any); ok {
+				if cr, ok := ptd["cached_tokens"].(float64); ok && cr > 0 {
+					usage["cache_read_input_tokens"] = int(cr)
+				}
+			}
 		}
 	}
 	out["usage"] = usage
@@ -2485,7 +2496,7 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 	// 再走与 chat 路径完全相同的 anthropic 转换。上游恒 stream=true
 	//（spark 只接受 stream=true；false 会 403），客户端形态由 isStream 决定。
 	if zm.Upstream == "responses" && !isLocalOpenCodeDaemonAvailable() {
-		resp, rateLimited, rerr := callZenResponsesAPI(r.Context(), openAIReq, true)
+		resp, rateLimited, rerr := callZenResponsesAPI(r.Context(), openAIReq, true, zenCallOpts{sessionID: sid})
 		if rerr != nil {
 			log.Printf("  anthropic zen responses api error: %v", rerr)
 			tracker.rec.RateLimited = rateLimited
@@ -2522,12 +2533,12 @@ func handleZenAnthropic(w http.ResponseWriter, r *http.Request, req anthropicReq
 		return
 	}
 
-	resp, rateLimited, err := callZenAPI(r.Context(), openAIReq, true)
+	resp, rateLimited, err := callZenAPI(r.Context(), openAIReq, true, zenCallOpts{sessionID: sid})
 	if err != nil && isWrongEndpoint(err) {
 		learnZenEndpoint(zm.ID, "responses")
 		log.Printf("  anthropic zen endpoint auto-learn: model=%s chat/completions rejected (%v), retrying responses",
 			zm.ID, kit.Truncate(err.Error(), 120))
-		resp2, rateLimited2, rerr := callZenResponsesAPI(r.Context(), openAIReq, true)
+		resp2, rateLimited2, rerr := callZenResponsesAPI(r.Context(), openAIReq, true, zenCallOpts{sessionID: sid})
 		if rerr != nil {
 			log.Printf("  anthropic zen responses api error: %v", rerr)
 			tracker.rec.RateLimited = rateLimited2
@@ -2923,6 +2934,15 @@ func handleAnthropicStreamWithUsage(w http.ResponseWriter, upstream *http.Respon
 		if pt, ok := lastUsage["prompt_tokens"].(float64); ok {
 			usageOut["input_tokens"] = int(pt)
 		}
+		if cr, ok := lastUsage["cache_read_input_tokens"].(int64); ok && cr > 0 {
+			usageOut["cache_read_input_tokens"] = int(cr)
+		} else if crf, ok := lastUsage["cache_read_input_tokens"].(float64); ok && crf > 0 {
+			usageOut["cache_read_input_tokens"] = int(crf)
+		} else if ptd, ok := lastUsage["prompt_tokens_details"].(map[string]any); ok {
+			if cr, ok := ptd["cached_tokens"].(float64); ok && cr > 0 {
+				usageOut["cache_read_input_tokens"] = int(cr)
+			}
+		}
 	}
 	emit("message_delta", map[string]any{
 		"type": "message_delta",
@@ -3085,6 +3105,15 @@ func emitAnthropicSSEFromChat(w http.ResponseWriter, chat map[string]any, usageF
 		if pt, ok := u["prompt_tokens"].(float64); ok {
 			usageOut["input_tokens"] = int(pt)
 		}
+		if cr, ok := u["cache_read_input_tokens"].(int64); ok && cr > 0 {
+			usageOut["cache_read_input_tokens"] = int(cr)
+		} else if crf, ok := u["cache_read_input_tokens"].(float64); ok && crf > 0 {
+			usageOut["cache_read_input_tokens"] = int(crf)
+		} else if ptd, ok := u["prompt_tokens_details"].(map[string]any); ok {
+			if cr, ok := ptd["cached_tokens"].(float64); ok && cr > 0 {
+				usageOut["cache_read_input_tokens"] = int(cr)
+			}
+		}
 		if usageFn != nil {
 			usageFn(u)
 		}
@@ -3170,7 +3199,58 @@ func normalizeOpenAIResponse(obj map[string]any) map[string]any {
 		out["choices"] = normalized
 	}
 
+	if u, ok := out["usage"].(map[string]any); ok {
+		normalizeUsageCache(u)
+	}
+
 	return out
+}
+
+func normalizeUsageCache(u map[string]any) {
+	if u == nil {
+		return
+	}
+	var cachedTokens int64
+	// 1. prompt_tokens_details.cached_tokens
+	if ptd, ok := u["prompt_tokens_details"].(map[string]any); ok {
+		if ct, ok := ptd["cached_tokens"].(float64); ok && ct > 0 {
+			cachedTokens = int64(ct)
+		} else if ct, ok := ptd["cached_tokens"].(int64); ok && ct > 0 {
+			cachedTokens = ct
+		} else if ct, ok := ptd["cached_tokens"].(int); ok && ct > 0 {
+			cachedTokens = int64(ct)
+		}
+	}
+	// 2. opencode.tokens.cache_read
+	if cachedTokens == 0 {
+		if oc, ok := u["opencode"].(map[string]any); ok {
+			if tok, ok := oc["tokens"].(map[string]any); ok {
+				if cr, ok := tok["cache_read"].(float64); ok && cr > 0 {
+					cachedTokens = int64(cr)
+				} else if cr, ok := tok["cache_read"].(int64); ok && cr > 0 {
+					cachedTokens = cr
+				}
+			}
+		}
+	}
+	// 3. direct cache_read_input_tokens
+	if cachedTokens == 0 {
+		if cr, ok := u["cache_read_input_tokens"].(float64); ok && cr > 0 {
+			cachedTokens = int64(cr)
+		} else if cr, ok := u["cache_read_input_tokens"].(int64); ok && cr > 0 {
+			cachedTokens = cr
+		}
+	}
+	if cachedTokens > 0 {
+		if ptd, ok := u["prompt_tokens_details"].(map[string]any); ok {
+			ptd["cached_tokens"] = cachedTokens
+		} else {
+			u["prompt_tokens_details"] = map[string]any{
+				"cached_tokens": cachedTokens,
+			}
+		}
+		u["cache_read_input_tokens"] = cachedTokens
+	}
 }
 
 func normalizeMessage(msg map[string]any) map[string]any {

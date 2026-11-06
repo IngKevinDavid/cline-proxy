@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"cline-go-proxy/internal/kit"
 )
 
 // ============================================================================
@@ -337,14 +340,157 @@ func cleanupCompactStates() {
 	}
 }
 
-func requestSessionID(r map[string]any, hdr http.Header) string {
-	if sid := hdr.Get("x-opencode-session"); sid != "" {
-		return sid
+var claudeCodeSessionPattern = regexp.MustCompile(`_session_([0-9A-Fa-f-]{36})$`)
+
+func claudeCodeSessionID(userID string) string {
+	if userID == "" {
+		return ""
 	}
-	if sid := strField(r, "session_id"); sid != "" {
-		return sid
+	if match := claudeCodeSessionPattern.FindStringSubmatch(userID); match != nil {
+		return match[1]
+	}
+	var value map[string]any
+	if json.Unmarshal([]byte(userID), &value) == nil {
+		return strField(value, "session_id")
 	}
 	return ""
+}
+
+// conversationSeed fingerprints how a conversation begins: its system prompt
+// (system or instructions in top-level params, or system/developer messages ahead
+// of the first user turn) together with that first user turn.
+// This keeps multi-turn session affinity perfectly deterministic across turns.
+func conversationSeed(body map[string]any) string {
+	if body == nil {
+		return ""
+	}
+	prelude := make([]any, 0, 4)
+	for _, field := range []string{"system", "instructions"} {
+		if value := body[field]; value != nil {
+			prelude = append(prelude, value)
+		}
+	}
+	first, ok := firstUserTurn(body, &prelude)
+	if !ok {
+		return ""
+	}
+	encoded, err := json.Marshal(append(prelude, first))
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func firstUserTurn(body map[string]any, prelude *[]any) (any, bool) {
+	if input, ok := body["input"].(string); ok && input != "" {
+		return input, true
+	}
+	if msgs, ok := body["messages"].([]any); ok {
+		for _, raw := range msgs {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			role, _ := item["role"].(string)
+			switch role {
+			case "system", "developer":
+				if c := item["content"]; c != nil {
+					*prelude = append(*prelude, c)
+				}
+			case "user":
+				if c := item["content"]; c != nil {
+					return c, true
+				}
+			}
+		}
+	}
+	if inSlice, ok := body["input"].([]any); ok {
+		for _, raw := range inSlice {
+			item, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			role, _ := item["role"].(string)
+			switch role {
+			case "system", "developer":
+				if c := item["content"]; c != nil {
+					*prelude = append(*prelude, c)
+				}
+			case "user":
+				if c := item["content"]; c != nil {
+					return c, true
+				}
+			}
+		}
+	}
+	return nil, false
+}
+
+// DeriveRequestSessionID derives a stable, canonical session ID for upstream OpenCode.
+// It inspects headers, body fields, and conversation seed (system prompt + first user turn),
+// returning a canonical session ID (ses_...).
+func DeriveRequestSessionID(params map[string]any, hdr http.Header) string {
+	var signal string
+	if hdr != nil {
+		for _, key := range []string{
+			"x-opencode-session",
+			"x-opencode-session-id",
+			"x-session-affinity",
+			"x-session-id",
+			"session_id",
+			"session-id",
+			"conversation-id",
+			"conversation_id",
+			"x-conversation-id",
+		} {
+			if v := strings.TrimSpace(hdr.Get(key)); v != "" {
+				signal = v
+				break
+			}
+		}
+	}
+	if signal == "" && params != nil {
+		for _, key := range []string{
+			"session_id",
+			"conversation_id",
+			"session-id",
+			"conversation-id",
+		} {
+			if v := strField(params, key); v != "" {
+				signal = v
+				break
+			}
+		}
+		if signal == "" {
+			if meta, ok := params["metadata"].(map[string]any); ok {
+				for _, key := range []string{"session_id", "conversation_id"} {
+					if v := strField(meta, key); v != "" {
+						signal = v
+						break
+					}
+				}
+				if signal == "" {
+					if u, ok := meta["user_id"].(string); ok && u != "" {
+						signal = claudeCodeSessionID(u)
+					}
+				}
+			}
+		}
+		if signal == "" {
+			signal = conversationSeed(params)
+		}
+		if signal == "" {
+			signal = strField(params, "previous_response_id")
+		}
+	}
+	if signal == "" {
+		return kit.CanonicalSessionID()
+	}
+	return kit.CanonicalSessionIDFor(signal)
+}
+
+func requestSessionID(r map[string]any, hdr http.Header) string {
+	return DeriveRequestSessionID(r, hdr)
 }
 
 // ============ 压缩入口 ============

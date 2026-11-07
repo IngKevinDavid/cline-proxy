@@ -63,10 +63,19 @@ var (
 
 func GetOpenCodeAccountStore() *OpenCodeAccountStore {
 	globalOpenCodeAccountsOnce.Do(func() {
-		path := kit.ResolveDataPath(openCodeAccountsFileName)
-		globalOpenCodeAccounts = &OpenCodeAccountStore{path: path}
+		globalOpenCodeAccounts = &OpenCodeAccountStore{}
 	})
 	return globalOpenCodeAccounts
+}
+
+func (s *OpenCodeAccountStore) resolvePath() string {
+	if s == nil {
+		return ""
+	}
+	if s.path != "" {
+		return s.path
+	}
+	return kit.ResolveDataPath(openCodeAccountsFileName)
 }
 
 func (s *OpenCodeAccountStore) Load() (OpenCodeAccountsState, error) {
@@ -82,10 +91,11 @@ func (s *OpenCodeAccountStore) loadUnlocked() (OpenCodeAccountsState, error) {
 	state := OpenCodeAccountsState{
 		RoutingStrategy: "fill",
 	}
-	if s == nil || s.path == "" {
+	p := s.resolvePath()
+	if p == "" {
 		return state, nil
 	}
-	data, err := os.ReadFile(s.path)
+	data, err := os.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) {
 		return state, nil
 	}
@@ -108,7 +118,7 @@ func (s *OpenCodeAccountStore) loadUnlocked() (OpenCodeAccountsState, error) {
 }
 
 func (s *OpenCodeAccountStore) Save(state OpenCodeAccountsState) error {
-	if s == nil || s.path == "" {
+	if s == nil || s.resolvePath() == "" {
 		return errors.New("opencode account store path not configured")
 	}
 	s.mu.Lock()
@@ -117,15 +127,16 @@ func (s *OpenCodeAccountStore) Save(state OpenCodeAccountsState) error {
 }
 
 func (s *OpenCodeAccountStore) saveUnlocked(state OpenCodeAccountsState) error {
+	p := s.resolvePath()
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
+	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	return os.Rename(tmp, p)
 }
 
 func (s *OpenCodeAccountStore) ListAccounts() []map[string]any {
@@ -206,6 +217,13 @@ func (s *OpenCodeAccountStore) AddAccount(record OpenCodeAccountRecord) error {
 	}
 	if record.CreatedAt == "" {
 		record.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if record.OrgID == "" && record.Authorization != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if orgID, err := FetchAccountOrgID(ctx, record.Authorization, record.Route); err == nil && orgID != "" {
+			record.OrgID = orgID
+		}
+		cancel()
 	}
 
 	state.Accounts = append(state.Accounts, record)
@@ -315,6 +333,30 @@ func (s *OpenCodeAccountStore) PickAccount(pinName string) (*OpenCodeAccountReco
 	}
 
 	if len(available) == 0 {
+		// All accounts are in cooldown: fall back to the earliest-expiring non-disabled account
+		// so IP-rotated retries still use a valid authenticated account.
+		var best *OpenCodeAccountRecord
+		var bestUntil time.Time
+		for i := range state.Accounts {
+			a := state.Accounts[i]
+			if a.Disabled {
+				continue
+			}
+			var until time.Time
+			if a.RateLimitedUntil != "" {
+				until, _ = time.Parse(time.RFC3339, a.RateLimitedUntil)
+			}
+			if best == nil || (!until.IsZero() && (bestUntil.IsZero() || until.Before(bestUntil))) {
+				cp := a
+				best = &cp
+				bestUntil = until
+			}
+		}
+		if best != nil {
+			state.Active = best.Name
+			_ = s.saveUnlocked(state)
+			return best, nil
+		}
 		return nil, errors.New("all opencode accounts in pool are in cooldown or disabled")
 	}
 
@@ -555,6 +597,9 @@ func (s *OpenCodeAccountStore) ActiveAccountCount() int {
 // FindAccountByToken locates an OpenCode account by its authorization token
 func FindAccountByToken(token string) *OpenCodeAccountRecord {
 	clean := strings.TrimPrefix(strings.TrimSpace(token), "Bearer ")
+	if idx := strings.Index(clean, "#"); idx >= 0 {
+		clean = clean[:idx]
+	}
 	if clean == "" || clean == "public" {
 		return nil
 	}
@@ -568,6 +613,9 @@ func FindAccountByToken(token string) *OpenCodeAccountRecord {
 	}
 	for _, a := range state.Accounts {
 		aTok := strings.TrimPrefix(strings.TrimSpace(a.Authorization), "Bearer ")
+		if idx := strings.Index(aTok, "#"); idx >= 0 {
+			aTok = aTok[:idx]
+		}
 		if aTok == clean || (len(aTok) > 20 && strings.HasPrefix(clean, aTok)) {
 			res := a
 			return &res
@@ -575,4 +623,101 @@ func FindAccountByToken(token string) *OpenCodeAccountRecord {
 	}
 	return nil
 }
+
+// FetchAccountOrgID queries https://opencode.ai/console/api/v2/config to resolve x-opencode-org-id
+func FetchAccountOrgID(ctx context.Context, authorization, route string) (string, error) {
+	auth := strings.TrimSpace(authorization)
+	if auth == "" {
+		return "", errors.New("empty authorization")
+	}
+	if !strings.HasPrefix(auth, "Bearer ") {
+		auth = "Bearer " + auth
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://opencode.ai/console/api/v2/config", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", auth)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "opencode/latest/2.0.22/cli")
+	req.Header.Set("x-opencode-client", "cli")
+
+	client := proxyClientFor(resolveRouteProxyURL(route))
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("v2 config status %d", resp.StatusCode)
+	}
+
+	var parsed struct {
+		Providers map[string]struct {
+			Headers map[string]string `json:"headers"`
+		} `json:"providers"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&parsed); err != nil {
+		return "", err
+	}
+	prov, ok := parsed.Providers["opencode"]
+	if !ok {
+		return "", errors.New("no opencode provider in v2 config")
+	}
+	for k, v := range prov.Headers {
+		if strings.EqualFold(k, "x-opencode-org-id") {
+			orgID := strings.TrimSpace(v)
+			if orgID != "" {
+				return orgID, nil
+			}
+		}
+	}
+	return "", errors.New("no x-opencode-org-id header in v2 config")
+}
+
+// EnsureAccountOrgID resolves and persists OrgID for an account if missing
+func (s *OpenCodeAccountStore) EnsureAccountOrgID(ctx context.Context, name string) string {
+	if s == nil {
+		return ""
+	}
+	state, err := s.Load()
+	if err != nil {
+		return ""
+	}
+	var auth, route string
+	for _, a := range state.Accounts {
+		if strings.EqualFold(a.Name, name) {
+			if a.OrgID != "" {
+				return a.OrgID
+			}
+			auth = a.Authorization
+			route = a.Route
+			break
+		}
+	}
+	if auth == "" {
+		return ""
+	}
+	orgID, err := FetchAccountOrgID(ctx, auth, route)
+	if err != nil || orgID == "" {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err = s.loadUnlocked()
+	if err != nil {
+		return orgID
+	}
+	for i, a := range state.Accounts {
+		if strings.EqualFold(a.Name, name) {
+			state.Accounts[i].OrgID = orgID
+			_ = s.saveUnlocked(state)
+			break
+		}
+	}
+	return orgID
+}
+
 

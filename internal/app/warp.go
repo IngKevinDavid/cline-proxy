@@ -30,6 +30,7 @@ var (
 	warpActive        bool
 	warpConnected     bool
 	warpLastAttemptAt time.Time
+	warpLastRotate    time.Time
 	warpLastError     string
 )
 
@@ -145,6 +146,29 @@ func EnsureWarpReady(socksHost string, socksPort int) (string, error) {
 
 // RotateWarp rotates the connection to get a fresh IP address.
 func RotateWarp() error {
+	warpMu.Lock()
+	defer warpMu.Unlock()
+
+	cfg := getZenConfig()
+	host := "127.0.0.1"
+	port := 40000
+	if cfg != nil {
+		if cfg.WarpSocksHost != "" {
+			host = cfg.WarpSocksHost
+		}
+		if cfg.WarpSocksPort > 0 {
+			port = cfg.WarpSocksPort
+		}
+	}
+	socksURL := fmt.Sprintf("socks5://%s:%d", host, port)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+
+	if !warpLastRotate.IsZero() && time.Since(warpLastRotate) < 15*time.Second {
+		EvictProxyClient(socksURL)
+		log.Printf("[warp] rotation already triggered %v ago (skipping reconnect)", time.Since(warpLastRotate).Round(time.Millisecond))
+		return nil
+	}
+
 	ctx := context.Background()
 	bin := findWarpCli()
 	if bin == "" {
@@ -153,22 +177,29 @@ func RotateWarp() error {
 
 	// Try tunnel rotate-keys first
 	if out, err := runWarpCli(ctx, "tunnel", "rotate-keys"); err == nil {
+		warpLastRotate = time.Now()
 		log.Printf("[warp] rotated tunnel keys: %s", out)
-		cfg := getZenConfig()
-		EvictProxyClient(fmt.Sprintf("socks5://%s:%d", cfg.WarpSocksHost, cfg.WarpSocksPort))
-		time.Sleep(1 * time.Second)
+		EvictProxyClient(socksURL)
+		time.Sleep(500 * time.Millisecond)
 		return nil
 	}
 
 	// Fallback to disconnect + connect
 	_, _ = runWarpCli(ctx, "disconnect")
-	time.Sleep(1 * time.Second)
+	time.Sleep(800 * time.Millisecond)
 	if out, err := runWarpCli(ctx, "connect"); err != nil {
 		return fmt.Errorf("reconnect failed: %w (%s)", err, out)
 	}
-	cfg := getZenConfig()
-	EvictProxyClient(fmt.Sprintf("socks5://%s:%d", cfg.WarpSocksHost, cfg.WarpSocksPort))
-	time.Sleep(1500 * time.Millisecond)
+	warpLastRotate = time.Now()
+	EvictProxyClient(socksURL)
+
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		if ProbeSocks5(addr, 400*time.Millisecond) {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 	return nil
 }
 

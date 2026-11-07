@@ -92,7 +92,7 @@ var (
 	descendingTimePartPattern = regexp.MustCompile(`^[0-9a-f]{9}f[c-f][0-9a-f]$`)
 )
 
-const sessionTimestampWindow = 30 * 24 * time.Hour
+const sessionTimestampWindow = 2 * time.Hour
 
 var bootNonce = mintBootNonce()
 

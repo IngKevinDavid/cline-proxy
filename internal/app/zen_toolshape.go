@@ -5,9 +5,11 @@ import (
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,7 +41,7 @@ const (
 	clientToolDigestLength = 12
 	toolWireNameLimit      = 64
 	toolNameSeparators     = "_.- \t\r\n"
-	opencodePromptMarker   = "You are opencode, an interactive CLI tool"
+	opencodePromptMarker   = "You are an AI agent running in OpenCode, a coding agent harness. Help the user accomplish their goals using the tools you have available."
 	v2CompletionLimit      = 32000
 )
 
@@ -54,9 +56,10 @@ Use the skill tool to load a skill when a task matches its description.
 </available_skills>`
 
 var (
-	opencodeEnvOnce sync.Once
-	opencodeWorkDir string
-	globalRenames   sync.Map // wireName (string) -> clientName (string)
+	opencodeEnvOnce    sync.Once
+	opencodeWorkDir    string
+	globalRenames      sync.Map // wireName (string) -> clientName (string)
+	globalToolPathKeys sync.Map // toolName (string) -> clientPathKey (string, e.g. "path")
 )
 
 func getOpencodeTools() map[string]opencodeToolDef {
@@ -401,11 +404,11 @@ func officialV2ToolsResponses() []any {
 func carriesOpenCodePrompt(content any) bool {
 	switch v := content.(type) {
 	case string:
-		return strings.Contains(v, opencodePromptMarker)
+		return strings.Contains(v, opencodePromptMarker) || strings.Contains(v, "You are opencode, an interactive CLI tool")
 	case []any:
 		for _, part := range v {
 			if m, ok := part.(map[string]any); ok {
-				if text, ok := m["text"].(string); ok && strings.Contains(text, opencodePromptMarker) {
+				if text, ok := m["text"].(string); ok && (strings.Contains(text, opencodePromptMarker) || strings.Contains(text, "You are opencode, an interactive CLI tool")) {
 					return true
 				}
 			}
@@ -414,67 +417,250 @@ func carriesOpenCodePrompt(content any) bool {
 	return false
 }
 
-func injectOfficialChatPrompt(payload map[string]any) {
-	messages, ok := payload["messages"].([]any)
-	if !ok {
-		return
-	}
-	// Check if already carries prompt
-	for _, raw := range messages {
-		if m, ok := raw.(map[string]any); ok {
-			role, _ := m["role"].(string)
-			if role == "system" || role == "developer" {
-				if carriesOpenCodePrompt(m["content"]) {
-					return
-				}
-			}
-		}
-	}
+var (
+	mixedEnvTagRegex = regexp.MustCompile(`(?si)<(?:env|environment_info|workspace_info)(?:\s[^>]*)?>.*?</(?:env|environment_info|workspace_info)>`)
+	mixedPoweredByRe = regexp.MustCompile(`(?mi)^\s*You are powered by[^\r\n]*\n?`)
+	mixedEnvIntroRe  = regexp.MustCompile(`(?mi)^\s*Here is some useful information about the environment you are running in:\s*\n?`)
+	mixedIdentityRe  = regexp.MustCompile(`(?is)^\s*You are (?:an? (?:expert )?AI (?:agent|programming assistant|coding assistant)|a title generator|Pi(?:\s+coding\s+agent)?|GitHub Copilot|Kilo(?:\s+Code)?|Cline|Claude(?:\s+Code)?|Antigravity|OpenCode|Roo(?:\s+Code)?|Cursor)\b[^.\n]*(?:\.|$)\s*`)
+	mixedGoalRe      = regexp.MustCompile(`(?is)^\s*(?:Your primary goal is to help users[^.\n]*\.|Help the user accomplish their goals using the tools you have available\.|Use the instructions below and the tools available(?: to you)? to assist the user\.)\s*`)
+)
 
-	kept := make([]any, 0, len(messages)+1)
-	var instructions []string
-	for _, raw := range messages {
-		m, ok := raw.(map[string]any)
-		if !ok {
-			kept = append(kept, raw)
-			continue
-		}
-		role, _ := m["role"].(string)
-		if role != "system" && role != "developer" {
-			kept = append(kept, raw)
-			continue
-		}
-		switch c := m["content"].(type) {
-		case string:
-			if strings.TrimSpace(c) != "" {
-				instructions = append(instructions, strings.TrimSpace(c))
-			}
-		case []any:
-			for _, part := range c {
-				if pm, ok := part.(map[string]any); ok {
-					if text, ok := pm["text"].(string); ok && strings.TrimSpace(text) != "" {
-						instructions = append(instructions, strings.TrimSpace(text))
-					}
-				}
-			}
-		}
+func stripClientIdentityPreamble(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return ""
 	}
+	text = mixedEnvTagRegex.ReplaceAllString(text, "")
+	text = mixedPoweredByRe.ReplaceAllString(text, "")
+	text = mixedEnvIntroRe.ReplaceAllString(text, "")
 
-	system := opencodeFullPrompt(payload)
-	if len(instructions) > 0 {
-		system += "\n\n" + strings.Join(instructions, "\n\n")
+	paragraphs := strings.Split(text, "\n\n")
+	kept := make([]string, 0, len(paragraphs))
+	for _, para := range paragraphs {
+		lines := strings.Split(para, "\n")
+		outLines := make([]string, 0, len(lines))
+		for _, line := range lines {
+			trimmedLine := strings.TrimSpace(line)
+			if trimmedLine == "" {
+				continue
+			}
+			if strings.HasPrefix(trimmedLine, "#") || strings.HasPrefix(trimmedLine, "<") || strings.HasPrefix(trimmedLine, "- ") || strings.HasPrefix(trimmedLine, "* ") {
+				outLines = append(outLines, line)
+				continue
+			}
+			candidate := trimmedLine
+			for {
+				updated := mixedIdentityRe.ReplaceAllString(candidate, "")
+				updated = mixedPoweredByRe.ReplaceAllString(updated, "")
+				updated = mixedGoalRe.ReplaceAllString(updated, "")
+				updated = strings.TrimSpace(updated)
+				if updated == candidate {
+					break
+				}
+				candidate = updated
+			}
+			if candidate != "" {
+				outLines = append(outLines, candidate)
+			}
+		}
+		cleanedPara := strings.Join(outLines, "\n")
+		if strings.TrimSpace(cleanedPara) != "" {
+			kept = append(kept, cleanedPara)
+		}
 	}
-	payload["messages"] = append([]any{map[string]any{"role": "system", "content": system}}, kept...)
+	return strings.TrimSpace(strings.Join(kept, "\n\n"))
 }
 
-// ShapeZenChatRequest shapes chat requests to conform strictly to OpenCode v2 standards:
-// 1. Injects official system prompt with <env> and skills if not present.
-// 2. Obfuscates client tools to clint_<hash12> and appends the 13 official tools.
-// 3. Rewrites past messages and tool_choice.
+func fallbackReadGateTool() map[string]any {
+	return map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        "read",
+			"description": "read tool",
+			"parameters": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+			"strict": false,
+		},
+	}
+}
+
+func openCodeReadGateTool() map[string]any {
+	return officialProfileToolByName("read")
+}
+
+func officialProfileToolByName(name string) map[string]any {
+	if profile, err := LoadOpenCodeCLI2022Profile(); err == nil && len(profile.Tools) > 0 {
+		for _, raw := range profile.Tools {
+			tm, _ := raw.(map[string]any)
+			fn, _ := tm["function"].(map[string]any)
+			if fn != nil && fn["name"] == name {
+				b, _ := json.Marshal(tm)
+				var copyMap map[string]any
+				_ = json.Unmarshal(b, &copyMap)
+				return copyMap
+			}
+		}
+	}
+	for _, raw := range officialV2ToolsChat() {
+		tm, _ := raw.(map[string]any)
+		fn, _ := tm["function"].(map[string]any)
+		if fn != nil && fn["name"] == name {
+			return tm
+		}
+	}
+	return fallbackReadGateTool()
+}
+
+func detectClientPathKey(params any) string {
+	pm, ok := params.(map[string]any)
+	if !ok || pm == nil {
+		return ""
+	}
+	props, ok := pm["properties"].(map[string]any)
+	if !ok || len(props) == 0 {
+		return ""
+	}
+	for _, k := range []string{"path", "filePath", "file_path", "AbsolutePath", "TargetFile"} {
+		if _, exists := props[k]; exists {
+			return k
+		}
+	}
+	return ""
+}
+
+// TranslateWireToolArgsToClient translates OpenCode 2.0.22 "path" / "filePath" argument keys
+// back to the client's declared path property (e.g. "path", "file_path", or "filePath").
+func TranslateWireToolArgsToClient(toolName, rawArgs string) string {
+	if rawArgs == "" || (!strings.Contains(rawArgs, "filePath") && !strings.Contains(rawArgs, `"path"`)) {
+		return rawArgs
+	}
+	targetKey := ""
+	if v, ok := globalToolPathKeys.Load(toolName); ok {
+		targetKey, _ = v.(string)
+	}
+	if targetKey == "" {
+		lower := strings.ToLower(strings.TrimSpace(toolName))
+		if lower == "read" || lower == "read_file" || lower == "write" || lower == "write_file" {
+			if v, ok := globalToolPathKeys.Load("read"); ok {
+				targetKey, _ = v.(string)
+			}
+		}
+	}
+	if targetKey == "" {
+		return rawArgs
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(rawArgs), &obj); err == nil && obj != nil {
+		if _, hasTarget := obj[targetKey]; hasTarget {
+			return rawArgs
+		}
+		for _, srcKey := range []string{"path", "filePath", "file_path"} {
+			if srcKey == targetKey {
+				continue
+			}
+			if val, ok := obj[srcKey]; ok {
+				obj[targetKey] = val
+				delete(obj, srcKey)
+				if b, merr := json.Marshal(obj); merr == nil {
+					return string(b)
+				}
+				break
+			}
+		}
+		return rawArgs
+	}
+	return rawArgs
+}
+
+// TranslateClientToolArgsToWire translates client path keys (e.g. "file_path" or "filePath") to "path"
+// in historical assistant tool_calls for official 2.0.22 "read"/"write" tools.
+func TranslateClientToolArgsToWire(wireToolName, rawArgs string) string {
+	if (wireToolName != "read" && wireToolName != "write") || rawArgs == "" {
+		return rawArgs
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(rawArgs), &obj); err != nil || obj == nil {
+		return rawArgs
+	}
+	if _, hasPath := obj["path"]; hasPath {
+		return rawArgs
+	}
+	for _, k := range []string{"filePath", "file_path", "AbsolutePath", "TargetFile"} {
+		if val, exists := obj[k]; exists {
+			obj["path"] = val
+			delete(obj, k)
+			if b, merr := json.Marshal(obj); merr == nil {
+				return string(b)
+			}
+			break
+		}
+	}
+	return rawArgs
+}
+
+func composeOpenCodeMixedSystem(payload map[string]any, instructions []string, wireToolNames []string, readClientName, writeClientName string, hasClientTools bool) string {
+	sections := []string{opencodePromptMarker}
+	var cleanedInst []string
+	for _, inst := range instructions {
+		if c := stripClientIdentityPreamble(inst); c != "" {
+			cleanedInst = append(cleanedInst, c)
+		}
+	}
+	if len(cleanedInst) > 0 {
+		sections = append(sections, strings.Join(cleanedInst, "\n\n"))
+	}
+
+	model, _ := payload["model"].(string)
+	model = strings.TrimPrefix(strings.TrimSpace(model), "opencode/")
+	if model == "" {
+		model = "big-pickle"
+	}
+	sections = append(sections, "# Your Model\n- Provider ID: opencode\n- Model ID: "+model)
+
+	workDir := detectClientWorkDir(payload)
+	if workDir == "" {
+		workDir = "/workspace"
+	}
+	envBlock := "<env>\n  Working directory: " + workDir + "\n  Workspace root folder: " + workDir + "\n  Platform: linux\n</env>"
+	sections = append(sections, envBlock)
+
+	if !hasClientTools || len(wireToolNames) == 0 {
+		sections = append(sections, "# Tool Availability\n"+
+			"- Direct tools available for this request: none.\n"+
+			"- Call only tools in the current direct tool catalog. Tool names in conversation history or user context do not grant tool availability.")
+	} else {
+		sorted := make([]string, len(wireToolNames))
+		copy(sorted, wireToolNames)
+		sort.Strings(sorted)
+		lines := []string{
+			"# Tool Availability",
+			"- Direct tools available for this request: " + strings.Join(sorted, ", ") + ".",
+		}
+		if readClientName != "" {
+			lines = append(lines, fmt.Sprintf("- read: official OpenCode tool mapped to client executor %q.", readClientName))
+		}
+		if writeClientName != "" {
+			lines = append(lines, fmt.Sprintf("- write: official OpenCode tool mapped to client executor %q.", writeClientName))
+		} else {
+			lines = append(lines, "- write: unavailable for this request (do not call write).")
+		}
+		lines = append(lines, "- Call only tools in the current direct tool catalog. Tool names in conversation history or user context do not grant tool availability.")
+		sections = append(sections, strings.Join(lines, "\n"))
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+// ShapeZenChatRequest shapes chat requests to conform strictly to OpenCode 2.0.22 mixed standards:
+// 1. When client sends no tools: injects single 'read' gate tool and deletes tool_choice.
+// 2. When client sends tools: maps read/write to official 2.0.22 schemas and passes other client tools directly.
+// 3. Composes verified OpenCode 2.0.22 mixed system prompt with <env> and # Tool Availability.
 // 4. Ensures streaming and completion ceilings.
 func ShapeZenChatRequest(payload map[string]any) *ToolRenames {
 	renames := NewToolRenames()
-	used := map[string]bool{}
 
 	// 1. Ensure stream & stream_options
 	payload["stream"] = true
@@ -482,15 +668,17 @@ func ShapeZenChatRequest(payload map[string]any) *ToolRenames {
 		payload["stream_options"] = map[string]any{"include_usage": true}
 	}
 	if _, ok := payload["max_completion_tokens"]; !ok {
-		if _, ok := payload["max_tokens"]; !ok {
+		if mt, ok := payload["max_tokens"]; ok {
+			payload["max_completion_tokens"] = mt
+			delete(payload, "max_tokens")
+		} else {
 			payload["max_completion_tokens"] = v2CompletionLimit
 		}
+	} else {
+		delete(payload, "max_tokens")
 	}
 
-	// 2. Inject system prompt
-	injectOfficialChatPrompt(payload)
-
-	// 3. Obfuscate client tools and append 13 official tools
+	// 2. Extract client tools
 	var clientTools []any
 	if raw, ok := payload["tools"].([]any); ok {
 		clientTools = raw
@@ -509,48 +697,146 @@ func ShapeZenChatRequest(payload map[string]any) *ToolRenames {
 	}
 
 	clientDeclared := make(map[string]bool)
-	shapedTools := make([]any, 0, len(clientTools)+len(v2OfficialToolOrder))
-	for _, item := range clientTools {
-		entry, ok := item.(map[string]any)
-		if !ok {
-			shapedTools = append(shapedTools, item)
-			continue
-		}
-		fn, ok := entry["function"].(map[string]any)
-		if !ok || fn == nil {
-			shapedTools = append(shapedTools, item)
-			continue
-		}
-		name, _ := fn["name"].(string)
-		if name == "" {
-			shapedTools = append(shapedTools, item)
-			continue
-		}
-		clientDeclared[name] = true
-		wireName := ClientToolWireName(name, used)
-		renames.Add(name, wireName)
-		fn["name"] = wireName
-		fn["strict"] = false
-		shapedTools = append(shapedTools, entry)
-	}
+	var wireToolNames []string
+	var readClientName, writeClientName string
 
-	// Register official tool aliases for missing client tools
-	registerOfficialToolAliases(renames, clientDeclared)
+	if len(clientTools) == 0 {
+		payload["tools"] = []any{openCodeReadGateTool()}
+		delete(payload, "tool_choice")
+	} else {
+		var passthroughTools []any
+		for _, item := range clientTools {
+			entry, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			fn, ok := entry["function"].(map[string]any)
+			if !ok || fn == nil {
+				continue
+			}
+			name, _ := fn["name"].(string)
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			clientDeclared[name] = true
+			globalRenames.Store(name, name)
+			lower := strings.ToLower(name)
+			switch lower {
+			case "read", "read_file", "read_file_range", "view_file", "read_files":
+				if pk := detectClientPathKey(fn["parameters"]); pk != "" {
+					globalToolPathKeys.Store(name, pk)
+					globalToolPathKeys.Store("read", pk)
+				}
+				if readClientName == "" {
+					readClientName = name
+				}
+				if name != "read" {
+					renames.Add(name, "read")
+					renames.AddOfficialAlias("read", name)
+				}
+				continue
+			case "write", "write_file", "write_to_file", "create_file", "new_file":
+				if pk := detectClientPathKey(fn["parameters"]); pk != "" {
+					globalToolPathKeys.Store(name, pk)
+					globalToolPathKeys.Store("write", pk)
+				}
+				if writeClientName == "" {
+					writeClientName = name
+				}
+				if name != "write" {
+					renames.Add(name, "write")
+					renames.AddOfficialAlias("write", name)
+				}
+				continue
+			}
+			// Keep client tool directly on the wire
+			if fn["parameters"] == nil {
+				fn["parameters"] = map[string]any{"type": "object", "properties": map[string]any{}}
+			} else {
+				repairToolSchema(fn["parameters"])
+			}
+			passthroughTools = append(passthroughTools, entry)
+			wireToolNames = append(wireToolNames, name)
+		}
 
-	// Append official 13 tools
-	shapedTools = append(shapedTools, officialV2ToolsChat()...)
-	payload["tools"] = shapedTools
+		// Always include official 2.0.22 read tool first to satisfy OpenCode v2 gate
+		shapedTools := make([]any, 0, len(passthroughTools)+2)
+		shapedTools = append(shapedTools, officialProfileToolByName("read"))
+		wireToolNames = append(wireToolNames, "read")
+		if readClientName == "" {
+			readClientName = "read"
+		}
+		if writeClientName != "" {
+			shapedTools = append(shapedTools, officialProfileToolByName("write"))
+			wireToolNames = append(wireToolNames, "write")
+		}
+		shapedTools = append(shapedTools, passthroughTools...)
+		payload["tools"] = shapedTools
 
-	// 4. Rewrite tool references in tool_choice and message history
-	if choice, ok := payload["tool_choice"].(map[string]any); ok {
-		if function, ok := choice["function"].(map[string]any); ok {
-			if n, ok := function["name"].(string); ok {
-				if w, ok := renames.Wire(n); ok {
-					function["name"] = w
+		// Register fallback aliases in case model calls shell/execute/patch
+		registerOfficialToolAliases(renames, clientDeclared)
+
+		if tcStr, ok := payload["tool_choice"].(string); ok && (tcStr == "none" || tcStr == "auto") {
+			delete(payload, "tool_choice")
+		} else if choice, ok := payload["tool_choice"].(map[string]any); ok {
+			if function, ok := choice["function"].(map[string]any); ok {
+				if n, ok := function["name"].(string); ok {
+					if w, ok := renames.Wire(n); ok {
+						function["name"] = w
+					}
 				}
 			}
 		}
 	}
+
+	// 3. Inject verified OpenCode 2.0.22 mixed system prompt
+	if messages, ok := payload["messages"].([]any); ok {
+		alreadyShaped := false
+		for _, raw := range messages {
+			if m, ok := raw.(map[string]any); ok {
+				role, _ := m["role"].(string)
+				if (role == "system" || role == "developer") && carriesOpenCodePrompt(m["content"]) {
+					alreadyShaped = true
+					break
+				}
+			}
+		}
+		if !alreadyShaped {
+			kept := make([]any, 0, len(messages)+1)
+			var instructions []string
+			for _, raw := range messages {
+				m, ok := raw.(map[string]any)
+				if !ok {
+					kept = append(kept, raw)
+					continue
+				}
+				role, _ := m["role"].(string)
+				if role != "system" && role != "developer" {
+					kept = append(kept, raw)
+					continue
+				}
+				switch c := m["content"].(type) {
+				case string:
+					if strings.TrimSpace(c) != "" {
+						instructions = append(instructions, strings.TrimSpace(c))
+					}
+				case []any:
+					for _, part := range c {
+						if pm, ok := part.(map[string]any); ok {
+							if text, ok := pm["text"].(string); ok && strings.TrimSpace(text) != "" {
+								instructions = append(instructions, strings.TrimSpace(text))
+							}
+						}
+					}
+				}
+			}
+			sys := composeOpenCodeMixedSystem(payload, instructions, wireToolNames, readClientName, writeClientName, len(clientTools) > 0)
+			payload["messages"] = append([]any{map[string]any{"role": "system", "content": sys}}, kept...)
+		}
+	}
+
+	// 4. Rewrite mapped tool names (e.g. read_file -> read, write_file -> write) in message history
 	if messages, ok := payload["messages"].([]any); ok {
 		for _, rawMsg := range messages {
 			msg, ok := rawMsg.(map[string]any)
@@ -564,6 +850,10 @@ func ShapeZenChatRequest(payload map[string]any) *ToolRenames {
 							if n, ok := fn["name"].(string); ok {
 								if w, ok := renames.Wire(n); ok {
 									fn["name"] = w
+									n = w
+								}
+								if argsStr, ok := fn["arguments"].(string); ok && argsStr != "" {
+									fn["arguments"] = TranslateClientToolArgsToWire(n, argsStr)
 								}
 							}
 						}

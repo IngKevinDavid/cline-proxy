@@ -115,7 +115,7 @@ func isAnonZenKey(key string) bool {
 const (
 	zenAPIBase             = "https://opencode.ai/zen/v1"
 	zenV2InferenceBase     = "https://opencode.ai/inference/openai/v1"
-	defaultOpenCodeVersion = "2.0.29"
+	defaultOpenCodeVersion = "2.0.22"
 )
 
 var (
@@ -740,6 +740,8 @@ var (
 // When key is empty, it falls back to local CLI login session (GetConsoleAuth) if available.
 func resolveZenKeyIdentity(rawKey string) (token string, orgID string, isConsole bool) {
 	k := strings.TrimSpace(rawKey)
+	k = strings.TrimPrefix(k, "Bearer ")
+	k = strings.TrimSpace(k)
 	if k == "public" {
 		return "", "", false
 	}
@@ -756,7 +758,21 @@ func resolveZenKeyIdentity(rawKey string) (token string, orgID string, isConsole
 		orgID = strings.TrimSpace(k[idx+1:])
 	}
 
-	if strings.HasPrefix(token, "st_") {
+	if acc := FindAccountByToken(token); acc != nil {
+		isConsole = true
+		if orgID == "" {
+			orgID = strings.TrimSpace(acc.OrgID)
+			if orgID == "" {
+				if store := GetOpenCodeAccountStore(); store != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					orgID = store.EnsureAccountOrgID(ctx, acc.Name)
+					cancel()
+				}
+			}
+		}
+	}
+
+	if strings.HasPrefix(token, "st_") || strings.HasPrefix(token, "oc_sk_") || orgID != "" {
 		isConsole = true
 	} else if auth, err := GetConsoleAuth(); err == nil && auth != nil && auth.AccessToken != "" && token == auth.AccessToken {
 		isConsole = true
@@ -784,7 +800,12 @@ func pickZenKey() string {
 					acc = updated
 				}
 			}
-			rawToken := strings.TrimPrefix(acc.Authorization, "Bearer ")
+			if acc.OrgID == "" {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				acc.OrgID = store.EnsureAccountOrgID(ctx, acc.Name)
+				cancel()
+			}
+			rawToken := strings.TrimPrefix(strings.TrimSpace(acc.Authorization), "Bearer ")
 			if acc.OrgID != "" {
 				return rawToken + "#" + acc.OrgID
 			}
@@ -795,6 +816,9 @@ func pickZenKey() string {
 	keys := getZenConfig().Keys
 	if len(keys) == 0 || (len(keys) == 1 && keys[0] == "public") {
 		if auth, err := GetConsoleAuth(); err == nil && auth != nil && auth.AccessToken != "" {
+			if auth.ActiveOrgID != "" {
+				return auth.AccessToken + "#" + auth.ActiveOrgID
+			}
 			return auth.AccessToken
 		}
 		if len(keys) == 0 {
@@ -848,6 +872,7 @@ func markZenKeySuccess(key string) {
 	}
 	zenKeyMu.Lock()
 	zenKeyUsage[key]++
+	delete(zenKeyCool, key)
 	zenKeyMu.Unlock()
 }
 
@@ -875,17 +900,25 @@ func cooldownZenKey(key string, d time.Duration) time.Duration {
 		return 0
 	}
 	if d <= 0 {
-		d = 5 * time.Minute
+		d = 45 * time.Second
 	}
 	if d > maxCooldown {
 		d = maxCooldown
 	}
+
+	token, _, _ := resolveZenKeyIdentity(key)
+	acc := FindAccountByToken(token)
+	if acc != nil && d > 45*time.Second {
+		// Cap OpenCode account cooldown so IP rotation (Tor/WARP) and multi-account
+		// failover can recover quickly without locking accounts on disk for 8+ hours.
+		d = 45 * time.Second
+	}
+
 	zenKeyMu.Lock()
 	zenKeyCool[key] = time.Now().Add(d)
 	zenKeyMu.Unlock()
 
-	token, _, _ := resolveZenKeyIdentity(key)
-	if acc := FindAccountByToken(token); acc != nil {
+	if acc != nil {
 		if store := GetOpenCodeAccountStore(); store != nil {
 			store.CooldownAccount(acc.Name, d)
 		}
@@ -1067,6 +1100,11 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 	if model, ok := params["model"].(string); ok {
 		if m, ok := resolveZenModel(model); ok {
 			body["model"] = m.ID
+			if _, hasMax := body["max_tokens"]; !hasMax {
+				if _, hasMaxComp := body["max_completion_tokens"]; !hasMaxComp && m.Output > 0 {
+					body["max_completion_tokens"] = m.Output
+				}
+			}
 		}
 	}
 	// Map reasoning_effort according to Zen chat vocabulary (low, high, max)
@@ -1093,6 +1131,50 @@ func buildZenBody(params map[string]any, stream bool) map[string]any {
 			body["tool_choice"] = "auto"
 		}
 	}
+	return body
+}
+
+// buildZenV2ChatBody builds a clean OpenCode 2.0.22 v2 mixed-mode chat completion payload.
+func buildZenV2ChatBody(params map[string]any, stream bool) map[string]any {
+	body := map[string]any{}
+	for _, key := range passThroughKeys {
+		if val, ok := params[key]; ok {
+			body[key] = val
+		}
+	}
+	for _, key := range []string{"model", "messages", "max_tokens", "max_completion_tokens", "stream", "tool_choice"} {
+		if val, ok := params[key]; ok {
+			body[key] = val
+		}
+	}
+	body["stream"] = true
+	if _, ok := body["stream_options"]; !ok {
+		body["stream_options"] = map[string]any{"include_usage": true}
+	}
+	if model, ok := params["model"].(string); ok {
+		if m, ok := resolveZenModel(model); ok {
+			body["model"] = m.ID
+			if _, hasMax := body["max_tokens"]; !hasMax {
+				if _, hasMaxComp := body["max_completion_tokens"]; !hasMaxComp && m.Output > 0 {
+					body["max_completion_tokens"] = m.Output
+				}
+			}
+		}
+	}
+	if eff, ok := params["reasoning_effort"].(string); ok && eff != "" {
+		body["reasoning_effort"] = mapZenChatReasoningEffort(eff)
+	} else if eff, ok := params["reasoningEffort"].(string); ok && eff != "" {
+		body["reasoning_effort"] = mapZenChatReasoningEffort(eff)
+	}
+	delete(body, "reasoningEffort")
+	delete(body, "functions")
+	delete(body, "function_call")
+
+	clientTools := zenClientTools(params)
+	if len(clientTools) > 0 {
+		body["tools"] = clientTools
+	}
+	ShapeZenChatRequest(body)
 	return body
 }
 
@@ -2095,7 +2177,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		return nil, 0, fmt.Errorf("model %q is not a known zen model", model)
 	}
 	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/responses"
-	if isAnonZenKey(cfg.Key) && (cfg.BaseURL == "" || cfg.BaseURL == zenAPIBase) {
+	if !isAnonZenKey(cfg.Key) && (cfg.BaseURL == "" || cfg.BaseURL == zenAPIBase) {
 		endpoint = zenV2InferenceBase + "/responses"
 	}
 	isOfficialZen := cfg.BaseURL == "" || strings.Contains(cfg.BaseURL, "opencode.ai")
@@ -2119,6 +2201,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 	retryKey := "" // 非空时重试沿用该 key（保持 key sess_ 一致）
 	useFailoverProxy := false
 	lastPidx := -1
+	triedCleanEgress := map[string]bool{}
 
 	for attempt := 0; ; attempt++ {
 		proxyURL, pidx := pickProxyOrFailoverWithPreference(useFailoverProxy, lastPidx)
@@ -2131,7 +2214,6 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				pidx = -1
 			}
 		}
-		lastPidx = pidx
 		viaProxy := "direct"
 		if proxyURL != "" {
 			viaProxy = maskProxyURL(proxyURL)
@@ -2156,7 +2238,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 			key = retryKey
 		}
 
-		if isZenFreeModel(zm) && (key == "" || zenKeyCooling(key)) {
+		if isZenFreeModel(zm) && key == "" {
 			key = "public"
 			retryKey = "public"
 		}
@@ -2164,10 +2246,17 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		token, orgID, isConsole := resolveZenKeyIdentity(key)
 
 		// Check if key belongs to an OpenCode account with a configured egress route
-		if acc := FindAccountByToken(token); acc != nil && o.pinProxy == "" {
+		if acc := FindAccountByToken(token); acc != nil && o.pinProxy == "" && !useFailoverProxy {
 			if rProxy := resolveRouteProxyURL(acc.Route); rProxy != "" {
 				proxyURL = rProxy
-				pidx = -1
+				switch acc.Route {
+				case OpenCodeRouteWARP:
+					pidx = -2
+				case OpenCodeRouteTor:
+					pidx = -3
+				default:
+					pidx = -1
+				}
 				viaProxy = acc.Route
 			} else if acc.Route == OpenCodeRouteDirect {
 				proxyURL = ""
@@ -2175,6 +2264,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				viaProxy = "direct"
 			}
 		}
+		lastPidx = pidx
 
 		sess := o.sessionID
 		if sess == "" {
@@ -2182,18 +2272,23 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		} else {
 			sess = kit.CanonicalSessionIDFor(sess)
 		}
+		if token != "" {
+			sess = kit.CanonicalSessionIDFor(fmt.Sprintf("%s|%s|%d", sess, token, attempt))
+		}
 		ua := zenCLIUserAgent()
 		body := buildZenResponsesBody(params, zm.ID, sess)
-		if isAnonZenKey(key) {
-			ShapeZenResponsesRequest(body)
-		}
+		ShapeZenResponsesRequest(body)
 		bodyJSON, err := json.Marshal(body)
 		if err != nil {
 			return nil, rateLimited, fmt.Errorf("marshal zen responses body: %w", err)
 		}
 		reqEndpoint := endpoint
-		if isAnonZenKey(key) && (cfg.BaseURL == "" || cfg.BaseURL == zenAPIBase) {
-			reqEndpoint = zenV2InferenceBase + "/responses"
+		if cfg.BaseURL == "" || cfg.BaseURL == zenAPIBase {
+			if !isAnonZenKey(key) {
+				reqEndpoint = zenV2InferenceBase + "/responses"
+			} else {
+				reqEndpoint = zenAPIBase + "/responses"
+			}
 		}
 		req, err := http.NewRequestWithContext(ctx, "POST", reqEndpoint, bytes.NewReader(bodyJSON))
 		if err != nil {
@@ -2205,15 +2300,15 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		}
 		req.Header.Set("Authorization", auth)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("Accept", "*/*")
 		req.Header.Set("User-Agent", ua)
 		req.Header.Set("x-opencode-client", "cli")
 		req.Header.Set("x-opencode-session", sess)
 		req.Header.Set("x-opencode-session-id", sess)
 		req.Header.Set("x-session-affinity", sess)
-		req.Header.Set("X-Session-Id", sess)
-		req.Header.Set("x-opencode-project", zenProjectID())
-		if isConsole && orgID != "" {
+		req.Header.Set("x-session-id", sess)
+		req.Header.Set("x-opencode-project", "global")
+		if (isConsole || orgID != "") && orgID != "" {
 			req.Header.Set("x-opencode-org-id", orgID)
 		}
 		log.Printf("  zen upstream: model=%s responses stream=%v via=%s key=#%d attempt=%d session=%s",
@@ -2273,60 +2368,62 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 		apiErr := &zenHTTPError{Status: resp.StatusCode, Body: kit.Truncate(bodyBytes, 500)}
 
 		if isRateLimited(resp.StatusCode, bodyBytes) {
-			if acc := FindAccountByToken(token); acc != nil {
-				GetOpenCodeAccountStore().CooldownAccount(acc.Name, 15*time.Minute)
-			}
 			rateLimited++
 			apiErr.RateLimited = true
 			if pidx >= 0 {
 				cooldownUpstreamProxy(pidx, 5*time.Minute)
 				log.Printf("  zen rate limited (%d), cooldown proxy exit %s for 5m", resp.StatusCode, viaProxy)
 			}
-			if pidx == -2 {
-				// WARP IP was rate-limited; rotate tunnel connection
-				if err := RotateWarp(); err == nil {
-					RecordRotationEvent("warp", "auto_429", "", "", "ok", "WARP rotated on 429 rate limit")
-				}
-			}
-			if pidx == -3 || useFailoverProxy {
-				// Tor circuit was rate-limited or switching to Tor; rotate circuit
+			if pidx == -3 && o.pinKey == "" {
 				if err := RotateTor(9053); err == nil {
 					RecordRotationEvent("tor", "auto_429", "", "", "ok", "Tor circuit rotated on 429 rate limit")
 				}
+				if !triedCleanEgress[key] && attempt < retries {
+					triedCleanEgress[key] = true
+					useFailoverProxy = true
+					log.Printf("  zen responses rate limited (%d) on Tor exit, failing over same account to WARP/direct before cooling", resp.StatusCode)
+					continue
+				}
 			}
-			useFailoverProxy = true
 
-			// 原样记录上游的 Retry-After（HTTP 日期还是秒数、值是多少）：
-			// 冷却时长完全由它决定，而面板只能看到换算后的截止时刻。没有这行，
-			// "这个 key 为什么冷却这么久"只能靠猜（实测 FreeUsageLimitError
-			// 的 Retry-After 落在每日窗口复位点，见 TODO.md）。
 			rawRetry := resp.Header.Get("Retry-After")
 			applied := cooldownZenKey(key, parseRetryAfter(rawRetry))
 			log.Printf("  zen rate limited (%d) key#%d: Retry-After=%q -> cooldown %v",
 				resp.StatusCode, keyIndex(key), rawRetry, applied)
-			// pinKey（面板 Test）：探测结论必须是被探测 key 自己的——立即原样
-			// 上报 429（冷却已在上一行生效），不换 key 重试、不吃重试睡眠。
 			if o.pinKey != "" {
 				return nil, rateLimited, apiErr
 			}
 			if next := pickZenKey(); next != "" && next != key && !zenKeyCooling(next) {
-				// 必须同步改写 retryKey：循环头 key=retryKey，只改 key 不改
-				// retryKey 会让下一次迭代继续用刚冷却的旧 key，无限 429 空转。
+				if rateLimited >= 2 {
+					useFailoverProxy = true
+					if pidx == -2 {
+						if err := RotateWarp(); err == nil {
+							RecordRotationEvent("warp", "auto_429", "", "", "ok", "WARP rotated after multiple 429s")
+						}
+					}
+				}
 				key = next
 				retryKey = next
-				log.Printf("  zen responses rate limited (%d), switching to next zen key (%d configured)", resp.StatusCode, len(cfg.Keys))
+				log.Printf("  zen responses rate limited (%d), switching to next zen key", resp.StatusCode)
 				continue
 			}
-			if key != "public" && (strings.Contains(apiErr.Body, "FreeUsageLimitError") || isZenFreeModel(zm)) {
-				cooldownZenKey(key, 15*time.Minute)
-				log.Printf("  zen responses rate limit: switching from key#%d to anonymous public tier", keyIndex(key))
-				key = "public"
-				retryKey = "public"
-				continue
+			useFailoverProxy = true
+			if pidx == -2 {
+				if err := RotateWarp(); err == nil {
+					RecordRotationEvent("warp", "auto_429", "", "", "ok", "WARP rotated on 429 rate limit")
+				}
+			} else if pidx == -3 {
+				if err := RotateTor(9053); err == nil {
+					RecordRotationEvent("tor", "auto_429", "", "", "ok", "Tor circuit rotated on 429 rate limit")
+				}
+			}
+			if next := pickZenKey(); next != "" {
+				key = next
+				retryKey = next
 			}
 			if attempt < retries {
 				log.Printf("  zen responses rate limited (%d), rotating IP via Tor/WARP and retrying %d/%d...", resp.StatusCode, attempt+1, retries)
-				if !sleepCtx(ctx, kit.WithRetryJitter(1*time.Second)) {
+				if !sleepCtx(ctx, kit.WithRetryJitter(500*time.Millisecond)) {
 					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
 				}
 				continue
@@ -2355,7 +2452,7 @@ func callZenResponsesAPI(ctx context.Context, params map[string]any, stream bool
 				if next := pickZenKey(); next != "" && next != key && !zenKeyCooling(next) {
 					key = next
 					retryKey = next
-					log.Printf("  zen responses 401, switching to next zen key (%d configured)", len(cfg.Keys))
+					log.Printf("  zen responses 401, switching to next zen key")
 					continue
 				}
 			}
@@ -2396,10 +2493,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 	cfg := getZenConfig()
 	isOfficialZen := cfg.BaseURL == "" || strings.Contains(cfg.BaseURL, "opencode.ai")
 
-	body := buildZenBody(params, stream)
-	if isAnonZenKey(cfg.Key) {
-		ShapeZenChatRequest(body)
-	}
+	body := buildZenV2ChatBody(params, stream)
 
 	bodyJSON, err := json.Marshal(body)
 	if err != nil {
@@ -2407,7 +2501,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 	}
 
 	endpoint := strings.TrimRight(cfg.BaseURL, "/") + "/chat/completions"
-	if isAnonZenKey(cfg.Key) && (cfg.BaseURL == "" || cfg.BaseURL == zenAPIBase) {
+	if !isAnonZenKey(cfg.Key) && (cfg.BaseURL == "" || cfg.BaseURL == zenAPIBase) {
 		endpoint = zenV2InferenceBase + "/chat/completions"
 	}
 
@@ -2430,8 +2524,10 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 	}
 	delay := time.Second
 	rateLimited := 0
+	retryKey := ""
 	useFailoverProxy := false
 	lastPidx := -1
+	triedCleanEgress := map[string]bool{}
 
 	for attempt := 0; ; attempt++ {
 		proxyURL, pidx := pickProxyOrFailoverWithPreference(useFailoverProxy, lastPidx)
@@ -2444,7 +2540,6 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 				pidx = -1
 			}
 		}
-		lastPidx = pidx
 		viaProxy := "direct"
 		if proxyURL != "" {
 			viaProxy = maskProxyURL(proxyURL)
@@ -2457,25 +2552,38 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		var key string
 		if o.pinKey != "" {
 			key = o.pinKey
+			retryKey = o.pinKey
 		} else if pk := pinnedZenKey(); pk != "" {
 			key = pk
+			retryKey = pk
+		} else if retryKey == "" {
+			retryKey = pickZenKey()
+			key = retryKey
 		} else {
-			key = pickZenKey()
+			key = retryKey
 		}
 
 		modelStr, _ := params["model"].(string)
 		zm, _ := resolveZenModel(modelStr)
-		if zm != nil && isZenFreeModel(zm) && (key == "" || zenKeyCooling(key)) {
+		if zm != nil && isZenFreeModel(zm) && key == "" {
 			key = "public"
+			retryKey = "public"
 		}
 
 		token, orgID, isConsole := resolveZenKeyIdentity(key)
 
 		// Check if key belongs to an OpenCode account with a configured egress route
-		if acc := FindAccountByToken(token); acc != nil && o.pinProxy == "" {
+		if acc := FindAccountByToken(token); acc != nil && o.pinProxy == "" && !useFailoverProxy {
 			if rProxy := resolveRouteProxyURL(acc.Route); rProxy != "" {
 				proxyURL = rProxy
-				pidx = -1
+				switch acc.Route {
+				case OpenCodeRouteWARP:
+					pidx = -2
+				case OpenCodeRouteTor:
+					pidx = -3
+				default:
+					pidx = -1
+				}
 				viaProxy = acc.Route
 			} else if acc.Route == OpenCodeRouteDirect {
 				proxyURL = ""
@@ -2483,6 +2591,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 				viaProxy = "direct"
 			}
 		}
+		lastPidx = pidx
 
 		sess := o.sessionID
 		if sess == "" {
@@ -2490,11 +2599,18 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		} else {
 			sess = kit.CanonicalSessionIDFor(sess)
 		}
+		if token != "" {
+			sess = kit.CanonicalSessionIDFor(fmt.Sprintf("%s|%s|%d", sess, token, attempt))
+		}
 		ua := zenCLIUserAgent()
 
 		reqEndpoint := endpoint
-		if isAnonZenKey(key) && (cfg.BaseURL == "" || cfg.BaseURL == zenAPIBase) {
-			reqEndpoint = zenV2InferenceBase + "/chat/completions"
+		if cfg.BaseURL == "" || cfg.BaseURL == zenAPIBase {
+			if !isAnonZenKey(key) {
+				reqEndpoint = zenV2InferenceBase + "/chat/completions"
+			} else {
+				reqEndpoint = zenAPIBase + "/chat/completions"
+			}
 		}
 		req, err := http.NewRequestWithContext(ctx, "POST", reqEndpoint, bytes.NewReader(bodyJSON))
 		if err != nil {
@@ -2507,15 +2623,15 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		}
 		req.Header.Set("Authorization", auth)
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("Accept", "*/*")
 		req.Header.Set("User-Agent", ua)
 		req.Header.Set("x-opencode-client", "cli")
 		req.Header.Set("x-opencode-session", sess)
 		req.Header.Set("x-opencode-session-id", sess)
 		req.Header.Set("x-session-affinity", sess)
-		req.Header.Set("X-Session-Id", sess)
-		req.Header.Set("x-opencode-project", zenProjectID())
-		if isConsole && orgID != "" {
+		req.Header.Set("x-session-id", sess)
+		req.Header.Set("x-opencode-project", "global")
+		if (isConsole || orgID != "") && orgID != "" {
 			req.Header.Set("x-opencode-org-id", orgID)
 		}
 
@@ -2568,28 +2684,23 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 		apiErr := &zenHTTPError{Status: resp.StatusCode, Body: kit.Truncate(bodyBytes, 500)}
 
 		if isRateLimited(resp.StatusCode, bodyBytes) {
-			if acc := FindAccountByToken(token); acc != nil {
-				GetOpenCodeAccountStore().CooldownAccount(acc.Name, 15*time.Minute)
-			}
 			rateLimited++
 			apiErr.RateLimited = true
 			if pidx >= 0 {
 				cooldownUpstreamProxy(pidx, 5*time.Minute)
 				log.Printf("  zen rate limited (%d), cooldown proxy exit %s for 5m", resp.StatusCode, viaProxy)
 			}
-			if pidx == -2 {
-				// WARP IP was rate-limited; rotate tunnel connection
-				if err := RotateWarp(); err == nil {
-					RecordRotationEvent("warp", "auto_429", "", "", "ok", "WARP rotated on 429 rate limit")
-				}
-			}
-			if pidx == -3 || useFailoverProxy {
-				// Tor circuit was rate-limited or switching to Tor; rotate circuit
+			if pidx == -3 && o.pinKey == "" {
 				if err := RotateTor(9053); err == nil {
 					RecordRotationEvent("tor", "auto_429", "", "", "ok", "Tor circuit rotated on 429 rate limit")
 				}
+				if !triedCleanEgress[key] && attempt < retries {
+					triedCleanEgress[key] = true
+					useFailoverProxy = true
+					log.Printf("  zen rate limited (%d) on Tor exit, failing over same account to WARP/direct before cooling", resp.StatusCode)
+					continue
+				}
 			}
-			useFailoverProxy = true
 
 			// 冷却当前 key；若还有其他未冷却 key 则立即切换重试（不睡眠）。
 			// Retry-After 原样入日志（同 responses 路径）。
@@ -2602,19 +2713,36 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 				return nil, rateLimited, apiErr
 			}
 			if next := pickZenKey(); next != "" && next != key && !zenKeyCooling(next) {
-				log.Printf("  zen rate limited (%d), switching to next zen key (%d configured)", resp.StatusCode, len(cfg.Keys))
+				if rateLimited >= 2 {
+					useFailoverProxy = true
+					if pidx == -2 {
+						if err := RotateWarp(); err == nil {
+							RecordRotationEvent("warp", "auto_429", "", "", "ok", "WARP rotated after multiple 429s")
+						}
+					}
+				}
+				log.Printf("  zen rate limited (%d), switching to next zen key", resp.StatusCode)
 				key = next
+				retryKey = next
 				continue
 			}
-			if key != "public" && (strings.Contains(apiErr.Body, "FreeUsageLimitError") || (zm != nil && isZenFreeModel(zm))) {
-				cooldownZenKey(key, 15*time.Minute)
-				log.Printf("  zen rate limited: switching from key#%d to anonymous public tier", keyIndex(key))
-				key = "public"
-				continue
+			useFailoverProxy = true
+			if pidx == -2 {
+				if err := RotateWarp(); err == nil {
+					RecordRotationEvent("warp", "auto_429", "", "", "ok", "WARP rotated on 429 rate limit")
+				}
+			} else if pidx == -3 {
+				if err := RotateTor(9053); err == nil {
+					RecordRotationEvent("tor", "auto_429", "", "", "ok", "Tor circuit rotated on 429 rate limit")
+				}
+			}
+			if next := pickZenKey(); next != "" {
+				key = next
+				retryKey = next
 			}
 			if attempt < retries {
 				log.Printf("  zen rate limited (%d), rotating IP via Tor/WARP and retrying %d/%d...", resp.StatusCode, attempt+1, retries)
-				if !sleepCtx(ctx, kit.WithRetryJitter(1*time.Second)) {
+				if !sleepCtx(ctx, kit.WithRetryJitter(500*time.Millisecond)) {
 					return nil, rateLimited, fmt.Errorf("client aborted during retry wait")
 				}
 				continue
@@ -2643,6 +2771,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 				return nil, rateLimited, apiErr
 			}
 			if attempt < retries {
+				retryKey = ""
 				continue
 			}
 		}
@@ -2660,6 +2789,7 @@ func callZenAPI(ctx context.Context, params map[string]any, stream bool, opts ..
 				return nil, rateLimited, apiErr
 			}
 			if attempt < retries {
+				retryKey = ""
 				continue
 			}
 		}
@@ -2876,12 +3006,6 @@ func syncZenModels() (int, error) {
 	if added > 0 {
 		log.Printf("zen model sync: %d new free model(s) from live catalog", added)
 	}
-	// Automatically verify and persist endpoints for unverified free models in background
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		AutoVerifyZenModels(ctx)
-	}()
 	return added, nil
 }
 

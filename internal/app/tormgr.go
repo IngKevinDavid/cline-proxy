@@ -131,11 +131,11 @@ func RotateTor(controlPort int) error {
 	}
 
 	// Tor drops NEWNYM signals sent less than ~10s apart.
-	// If a rotation occurred recently, wait for the remaining time instead of dropping the rotation request.
+	// If a rotation occurred recently, evict idle connections and return without blocking the request thread.
 	if elapsed := time.Since(torLastRotate); elapsed < 10*time.Second {
-		wait := 10*time.Second - elapsed
-		log.Printf("[tor] pacing rotation (waiting %v for Tor gap floor)", wait.Round(time.Millisecond))
-		time.Sleep(wait)
+		EvictProxyClient(fmt.Sprintf("socks5://127.0.0.1:%d", torSocksPort))
+		log.Printf("[tor] rotation already triggered %v ago (skipping blocking wait)", elapsed.Round(time.Millisecond))
+		return nil
 	}
 
 	ctrlAddr := fmt.Sprintf("127.0.0.1:%d", controlPort)
@@ -169,7 +169,7 @@ func RotateTor(controlPort int) error {
 	// Evict cached HTTP client and close idle connections so requests do not reuse the old exit node connection.
 	EvictProxyClient(fmt.Sprintf("socks5://127.0.0.1:%d", torSocksPort))
 	log.Printf("[tor] circuit rotation requested (SIGNAL NEWNYM accepted, connections evicted)")
-	time.Sleep(1 * time.Second)
+	time.Sleep(250 * time.Millisecond)
 	return nil
 }
 

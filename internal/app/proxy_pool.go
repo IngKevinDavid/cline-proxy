@@ -159,7 +159,7 @@ func pickProxyOrFailoverWithPreference(preferFailover bool, lastPidx int) (strin
 		}
 	}
 
-	if preferFailover && (cfg == nil || cfg.WarpAutoFailover) {
+	if preferFailover {
 		host := "127.0.0.1"
 		port := 40000
 		if cfg != nil {

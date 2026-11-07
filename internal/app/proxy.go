@@ -1629,7 +1629,9 @@ func collectStreamResponse(upstream *http.Response) (map[string]any, error) {
 		sort.Ints(idxs)
 		for _, i := range idxs {
 			acc := pendingTools[i]
-			acc.call["function"].(map[string]any)["arguments"] = chatToolArguments(acc.args.String())
+			fnMap := acc.call["function"].(map[string]any)
+			fnName, _ := fnMap["name"].(string)
+			fnMap["arguments"] = TranslateWireToolArgsToClient(fnName, chatToolArguments(acc.args.String()))
 			if id, ok := acc.call["id"].(string); !ok || id == "" {
 				acc.call["id"] = fmt.Sprintf("call_%x_%d", time.Now().UnixNano(), i)
 			}
@@ -2130,6 +2132,14 @@ func filterToolInput(name string, input map[string]any, schemas map[string]map[s
 	allowed, ok := schemas[name]
 	if !ok || len(allowed) == 0 {
 		return input
+	}
+	if fp, hasFP := input["filePath"]; hasFP && !allowed["filePath"] {
+		for _, k := range []string{"path", "file_path", "AbsolutePath", "TargetFile"} {
+			if allowed[k] {
+				input[k] = fp
+				break
+			}
+		}
 	}
 	out := map[string]any{}
 	for k, v := range input {
@@ -3180,10 +3190,12 @@ func normalizeOpenAIResponse(obj map[string]any) map[string]any {
 									if n, ok := fn["name"].(string); ok && n != "" {
 										fn["name"] = GlobalRestoreToolName(n)
 									}
-									if fn["name"] == "codemode" {
-										if a, ok := fn["arguments"].(string); ok && a != "" {
-											fn["arguments"] = repairCodemodeArguments(a)
+									if a, ok := fn["arguments"].(string); ok && a != "" {
+										fnName, _ := fn["name"].(string)
+										if fnName == "codemode" {
+											a = repairCodemodeArguments(a)
 										}
+										fn["arguments"] = TranslateWireToolArgsToClient(fnName, a)
 									}
 								}
 							}
@@ -3290,7 +3302,7 @@ func normalizeMessage(msg map[string]any) map[string]any {
 						if name == "codemode" {
 							a = repairCodemodeArguments(a)
 						}
-						fn["arguments"] = chatToolArguments(a)
+						fn["arguments"] = TranslateWireToolArgsToClient(name, chatToolArguments(a))
 					} else if fn["arguments"] == nil {
 						fn["arguments"] = "{}"
 					}

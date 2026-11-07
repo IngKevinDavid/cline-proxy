@@ -82,37 +82,27 @@ func TestShapeZenChatRequest(t *testing.T) {
 		t.Errorf("system content missing <env> block")
 	}
 
-	// 3. Verify tool obfuscation and completion
+	// 3. Verify mixed tool shaping: official read gate + passthrough client tool
 	tools, ok := payload["tools"].([]any)
 	if !ok {
 		t.Fatalf("tools is not []any")
 	}
-	// Expected: 1 obfuscated client tool + 13 official tools = 14 tools
-	if len(tools) != 14 {
-		t.Fatalf("tools count = %d, want 14 (1 client + 13 official)", len(tools))
+	// Expected: 1 official read tool + 1 passthrough client tool = 2 tools
+	if len(tools) != 2 {
+		t.Fatalf("tools count = %d, want 2 (read + custom_agent_action)", len(tools))
 	}
 
-	// Check that custom_agent_action is obfuscated
-	firstTool := tools[0].(map[string]any)["function"].(map[string]any)
-	wireName := firstTool["name"].(string)
-	if !strings.HasPrefix(wireName, "clint_") {
-		t.Errorf("client tool name = %q, expected 'clint_' prefix", wireName)
-	}
-	if wire, ok := renames.Wire("custom_agent_action"); !ok || wire != wireName {
-		t.Errorf("renames.Wire('custom_agent_action') = %q, want %q", wire, wireName)
-	}
-
-	// Check that official tools are present (e.g. patch, edit, execute)
 	toolNames := make(map[string]bool)
 	for _, tool := range tools {
 		fn := tool.(map[string]any)["function"].(map[string]any)
 		toolNames[fn["name"].(string)] = true
 	}
-	for _, expected := range []string{"patch", "edit", "shell", "read", "grep"} {
+	for _, expected := range []string{"read", "custom_agent_action"} {
 		if !toolNames[expected] {
-			t.Errorf("missing official tool %q in shaped tools", expected)
+			t.Errorf("missing tool %q in shaped tools", expected)
 		}
 	}
+	_ = renames
 }
 
 func TestNormalizeOpenAIResponseRestoresToolName(t *testing.T) {
@@ -350,4 +340,59 @@ func TestDetectClientWorkDir(t *testing.T) {
 		t.Errorf("opencodeEnvironment missing default /workspace: %s", env)
 	}
 }
+
+func TestOpenCodeReadGateAndPathArgTranslation(t *testing.T) {
+	// 1. No-tool request injects full official 2.0.22 read tool schema (with path/offset/limit)
+	noToolsPayload := map[string]any{
+		"model": "mimo-v2.6-flash-free",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Reply with PONG"},
+		},
+	}
+	ShapeZenChatRequest(noToolsPayload)
+	tools, ok := noToolsPayload["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("no-tools request tools = %v, want 1 official read gate tool", noToolsPayload["tools"])
+	}
+	fn, _ := tools[0].(map[string]any)["function"].(map[string]any)
+	params, _ := fn["parameters"].(map[string]any)
+	props, _ := params["properties"].(map[string]any)
+	if _, hasPath := props["path"]; !hasPath {
+		t.Fatalf("official read gate tool missing path in parameters.properties: %v", props)
+	}
+
+	// 2. Client with read_file(file_path) gets path <-> file_path argument translation
+	withReadPayload := map[string]any{
+		"model": "big-pickle",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Read package.json"},
+		},
+		"tools": []any{
+			map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "read_file",
+					"description": "Read file",
+					"parameters": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"file_path": map[string]any{"type": "string"},
+						},
+						"required": []any{"file_path"},
+					},
+				},
+			},
+		},
+	}
+	ShapeZenChatRequest(withReadPayload)
+	translatedToClient := TranslateWireToolArgsToClient("read_file", `{"path":"package.json","limit":10}`)
+	if !strings.Contains(translatedToClient, `"file_path":"package.json"`) || strings.Contains(translatedToClient, `"path"`) {
+		t.Fatalf("TranslateWireToolArgsToClient = %s, want file_path instead of path", translatedToClient)
+	}
+	translatedToWire := TranslateClientToolArgsToWire("read", `{"file_path":"package.json"}`)
+	if !strings.Contains(translatedToWire, `"path":"package.json"`) || strings.Contains(translatedToWire, `"file_path"`) {
+		t.Fatalf("TranslateClientToolArgsToWire = %s, want path instead of file_path", translatedToWire)
+	}
+}
+
 
